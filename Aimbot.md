@@ -1,4 +1,4 @@
-# Aimbot
+# AIMBOT
 --========================================================
 -- TEST CONTROL PANEL
 -- ESP + AIMBOT
