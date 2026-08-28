@@ -1,1298 +1,92 @@
 --==============================================================--
--- CAFEÍNA • BOT READING SCANNER
--- STANDALONE V1
+-- CAFEÍNA • BOT RESEARCH SCANNER
+--==============================================================--
+-- INTERFACE INDEPENDENTE
 --
 -- OBJETIVO:
--- • Identificar bots ativos
--- • Diferenciar bots jogáveis de manequins
--- • Detectar Team
--- • Ler atributos dos bots
--- • Ler Humanoid
--- • Ler movimento
--- • Ler pontos de patrulha
--- • Relacionar bots aos pontos mais próximos
--- • Observar novos spawns
--- • Observar remoções
--- • Exportar leitura para JSON
+-- • Investigar entidades que podem ser bots
+-- • Diferenciar Player / Bot / Manequim / Indeterminado
+-- • Detectar Army / Rebels
+-- • Analisar BotPatrolPoints
+-- • Analisar Humanoid / Health / movimento
+-- • Analisar atributos e estrutura
+-- • Identificar possíveis relações com patrulha
+-- • Exportar a leitura para arquivo quando o ambiente permitir
 --
--- NÃO DEPENDE DO MENU ANTIGO
+-- OBS:
+-- Este scanner trabalha somente com objetos que o cliente
+-- consegue enxergar.
 --==============================================================--
 
-local Players = game:GetService("Players")
-local HttpService = game:GetService("HttpService")
-local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
+local Players =
+    game:GetService("Players")
 
-local LocalPlayer = Players.LocalPlayer
+local UserInputService =
+    game:GetService("UserInputService")
+
+local HttpService =
+    game:GetService("HttpService")
+
+local TweenService =
+    game:GetService("TweenService")
+
+local CoreGui =
+    game:GetService("CoreGui")
+
+local LocalPlayer =
+    Players.LocalPlayer
 
 if not LocalPlayer then
-    LocalPlayer = Players.PlayerAdded:Wait()
+    LocalPlayer =
+        Players.PlayerAdded:Wait()
 end
 
 --==============================================================--
--- CONFIG
+-- CONFIGURAÇÃO
 --==============================================================--
 
 local CONFIG = {
-    GUI_NAME = "CafeinaBotReadingStandalone",
 
-    BOT_FOLDER_NAME = "Soldiers",
+    GUI_NAME =
+        "CafeinaBotResearch_Independent",
 
-    PATROL_FOLDER_NAME = "BotPatrolPoints",
+    MAX_ENTITIES =
+        5000,
 
-    SAMPLE_INTERVAL = 0.75,
+    MAX_CHILDREN_PER_ENTITY =
+        250,
 
-    MAX_MOVEMENT_SAMPLES = 20,
+    PATROL_FOLDER =
+        "BotPatrolPoints",
 
-    MAX_BOTS = 500,
-
-    MAX_PATROL_POINTS = 1000,
-
-    EXPORT_FOLDER = "Cafeina",
-
-    VERSION = "BOT-READING-V1",
-}
-
---==============================================================--
--- STATE
---==============================================================--
-
-local State = {
-    Scanning = false,
-
-    Monitoring = false,
-
-    Minimized = false,
-
-    StartedAt = os.time(),
-
-    ScanCount = 0,
-
-    LastScanAt = 0,
-
-    Bots = {},
-
-    SpawnHistory = {},
-
-    RemovalHistory = {},
-
-    PatrolPoints = {},
-
-    TeamSummary = {
-        Army = 0,
-        Rebels = 0,
-        Unknown = 0,
+    POSSIBLE_BOT_CONTAINERS = {
+        "Soldiers",
+        "Bots",
+        "Bot",
+        "NPCs",
+        "Enemies",
+        "AI",
+        "Units",
+        "Characters",
     },
 
-    ClassificationSummary = {
-        PlayableBot = 0,
-        Mannequin = 0,
-        Unknown = 0,
+    TEAM_NAMES = {
+        Army = true,
+        Rebels = true,
     },
+
+    YIELD_EVERY =
+        50,
+
+    MOVEMENT_SAMPLE_TIME =
+        0.35,
+
+    MOVEMENT_THRESHOLD =
+        0.35,
+
+    EXPORT_FILE =
+        "Cafeina_Bot_Readout.json",
 }
-
---==============================================================--
--- SERVICES / REFERENCES
---==============================================================--
-
-local Workspace = game:GetService("Workspace")
-
-local BotFolder =
-    Workspace:FindFirstChild(
-        CONFIG.BOT_FOLDER_NAME
-    )
-
-local PatrolFolder =
-    Workspace:FindFirstChild(
-        CONFIG.PATROL_FOLDER_NAME
-    )
-
---==============================================================--
--- HELPERS
---==============================================================--
-
-local function safeCall(fn, fallback)
-    local ok, result =
-        pcall(fn)
-
-    if ok then
-        return result
-    end
-
-    return fallback
-end
-
-local function getFullName(instance)
-    return safeCall(
-        function()
-            return instance:GetFullName()
-        end,
-        tostring(instance.Name)
-    )
-end
-
-local function getAttribute(instance, name)
-    return safeCall(
-        function()
-            return instance:GetAttribute(name)
-        end,
-        nil
-    )
-end
-
-local function getAttributes(instance)
-    return safeCall(
-        function()
-            return instance:GetAttributes()
-        end,
-        {}
-    )
-end
-
-local function vectorToTable(v)
-    if typeof(v) ~= "Vector3" then
-        return nil
-    end
-
-    return {
-        x = v.X,
-        y = v.Y,
-        z = v.Z,
-    }
-end
-
-local function roundNumber(number)
-    if type(number) ~= "number" then
-        return number
-    end
-
-    return math.floor(
-        number * 1000 + 0.5
-    ) / 1000
-end
-
-local function distance(a, b)
-    if not a or not b then
-        return math.huge
-    end
-
-    return (
-        a - b
-    ).Magnitude
-end
-
-local function getRoot(model)
-    return safeCall(
-        function()
-            return model:FindFirstChild(
-                "HumanoidRootPart"
-            )
-        end,
-        nil
-    )
-end
-
-local function getHumanoid(model)
-    return safeCall(
-        function()
-            return model:FindFirstChildOfClass(
-                "Humanoid"
-            )
-        end,
-        nil
-    )
-end
-
---==============================================================--
--- CLASSIFICATION
---==============================================================--
-
-local function classifyBot(model)
-    if not model
-        or not model:IsA("Model")
-    then
-        return "Unknown"
-    end
-
-    local humanoid =
-        getHumanoid(model)
-
-    local root =
-        getRoot(model)
-
-    local team =
-        getAttribute(
-            model,
-            "Team"
-        )
-
-    local health =
-        getAttribute(
-            model,
-            "Health"
-        )
-
-    local speedMult =
-        getAttribute(
-            model,
-            "SpeedMult"
-        )
-
-    local gun =
-        getAttribute(
-            model,
-            "Gun"
-        )
-
-    local hasMovementStructure =
-        humanoid ~= nil
-        and root ~= nil
-
-    local hasBotAttributes =
-        team ~= nil
-        or health ~= nil
-        or speedMult ~= nil
-        or gun ~= nil
-
-    if
-        hasMovementStructure
-        and hasBotAttributes
-    then
-        return "PlayableBot"
-    end
-
-    if humanoid == nil then
-        return "Mannequin"
-    end
-
-    return "Unknown"
-end
-
---==============================================================--
--- PATROL POINT READING
---==============================================================--
-
-local function readPatrolPoints()
-
-    State.PatrolPoints = {}
-
-    if not PatrolFolder then
-        return
-    end
-
-    local descendants =
-        safeCall(
-            function()
-                return PatrolFolder:GetDescendants()
-            end,
-            {}
-        )
-
-    local total = 0
-
-    for _, object in ipairs(descendants) do
-
-        if total >= CONFIG.MAX_PATROL_POINTS then
-            break
-        end
-
-        if object:IsA("BasePart") then
-
-            local folderTeam = nil
-
-            if object.Parent then
-                folderTeam =
-                    tostring(
-                        object.Parent.Name
-                    )
-            end
-
-            local attributeTeam =
-                getAttribute(
-                    object,
-                    "Team"
-                )
-
-            local position =
-                safeCall(
-                    function()
-                        return object.Position
-                    end,
-                    nil
-                )
-
-            local point = {
-                name =
-                    tostring(object.Name),
-
-                path =
-                    getFullName(object),
-
-                className =
-                    tostring(object.ClassName),
-
-                parent =
-                    object.Parent
-                    and getFullName(
-                        object.Parent
-                    )
-                    or nil,
-
-                folderTeam =
-                    folderTeam,
-
-                attributeTeam =
-                    attributeTeam,
-
-                position =
-                    vectorToTable(
-                        position
-                    ),
-
-                anchored =
-                    safeCall(
-                        function()
-                            return object.Anchored
-                        end,
-                        nil
-                    ),
-
-                transparency =
-                    safeCall(
-                        function()
-                            return object.Transparency
-                        end,
-                        nil
-                    ),
-            }
-
-            State.PatrolPoints[
-                #State.PatrolPoints + 1
-            ] = point
-
-            total += 1
-        end
-    end
-end
-
---==============================================================--
--- FIND NEAREST PATROL POINT
---==============================================================--
-
-local function findNearestPatrolPoint(
-    position
-)
-
-    if not position then
-        return nil
-    end
-
-    local closest = nil
-    local closestDistance =
-        math.huge
-
-    for _, point
-        in ipairs(State.PatrolPoints)
-    do
-
-        if point.position then
-
-            local pointPosition =
-                Vector3.new(
-                    point.position.x,
-                    point.position.y,
-                    point.position.z
-                )
-
-            local currentDistance =
-                distance(
-                    position,
-                    pointPosition
-                )
-
-            if currentDistance
-                < closestDistance
-            then
-                closestDistance =
-                    currentDistance
-
-                closest = {
-                    path =
-                        point.path,
-
-                    folderTeam =
-                        point.folderTeam,
-
-                    attributeTeam =
-                        point.attributeTeam,
-
-                    distance =
-                        roundNumber(
-                            currentDistance
-                        ),
-                }
-            end
-        end
-    end
-
-    return closest
-end
-
---==============================================================--
--- MOVEMENT SNAPSHOT
---==============================================================--
-
-local function readMovement(model)
-    local humanoid =
-        getHumanoid(model)
-
-    local root =
-        getRoot(model)
-
-    if not humanoid
-        or not root
-    then
-        return {
-            available = false,
-        }
-    end
-
-    local moveDirection =
-        safeCall(
-            function()
-                return humanoid.MoveDirection
-            end,
-            Vector3.zero
-        )
-
-    local velocity =
-        safeCall(
-            function()
-                return root.AssemblyLinearVelocity
-            end,
-            Vector3.zero
-        )
-
-    local state =
-        safeCall(
-            function()
-                return humanoid:GetState()
-            end,
-            nil
-        )
-
-    local moving =
-        moveDirection.Magnitude > 0.05
-        or velocity.Magnitude > 1
-
-    return {
-        available = true,
-
-        moving = moving,
-
-        moveDirection =
-            vectorToTable(
-                moveDirection
-            ),
-
-        velocity =
-            vectorToTable(
-                velocity
-            ),
-
-        velocityMagnitude =
-            roundNumber(
-                velocity.Magnitude
-            ),
-
-        humanoidState =
-            state
-            and tostring(state)
-            or nil,
-
-        walkSpeed =
-            safeCall(
-                function()
-                    return humanoid.WalkSpeed
-                end,
-                nil
-            ),
-    }
-end
-
---==============================================================--
--- BOT RECORD
---==============================================================--
-
-local function buildBotRecord(model)
-
-    local humanoid =
-        getHumanoid(model)
-
-    local root =
-        getRoot(model)
-
-    local classification =
-        classifyBot(model)
-
-    local attributes =
-        getAttributes(model)
-
-    local team =
-        getAttribute(
-            model,
-            "Team"
-        )
-
-    local position = nil
-
-    if root then
-        position =
-            safeCall(
-                function()
-                    return root.Position
-                end,
-                nil
-            )
-    end
-
-    local patrol =
-        findNearestPatrolPoint(
-            position
-        )
-
-    local movement =
-        readMovement(model)
-
-    local record = {
-
-        name =
-            tostring(model.Name),
-
-        path =
-            getFullName(model),
-
-        className =
-            tostring(model.ClassName),
-
-        classification =
-            classification,
-
-        parent =
-            model.Parent
-            and getFullName(
-                model.Parent
-            )
-            or nil,
-
-        team =
-            team,
-
-        attributes =
-            attributes,
-
-        humanoid = {
-            exists =
-                humanoid ~= nil,
-
-            health =
-                humanoid
-                and safeCall(
-                    function()
-                        return humanoid.Health
-                    end,
-                    nil
-                )
-                or nil,
-
-            maxHealth =
-                humanoid
-                and safeCall(
-                    function()
-                        return humanoid.MaxHealth
-                    end,
-                    nil
-                )
-                or nil,
-
-            walkSpeed =
-                humanoid
-                and safeCall(
-                    function()
-                        return humanoid.WalkSpeed
-                    end,
-                    nil
-                )
-                or nil,
-
-            jumpPower =
-                humanoid
-                and safeCall(
-                    function()
-                        return humanoid.JumpPower
-                    end,
-                    nil
-                )
-                or nil,
-
-            rigType =
-                humanoid
-                and safeCall(
-                    function()
-                        return tostring(
-                            humanoid.RigType
-                        )
-                    end,
-                    nil
-                )
-                or nil,
-        },
-
-        root = {
-            exists =
-                root ~= nil,
-
-            position =
-                vectorToTable(
-                    position
-                ),
-        },
-
-        movement =
-            movement,
-
-        nearestPatrolPoint =
-            patrol,
-
-        observedAt =
-            os.time(),
-    }
-
-    return record
-end
-
---==============================================================--
--- REGISTER BOT
---==============================================================--
-
-local function registerBot(model)
-
-    if not model
-        or not model:IsA("Model")
-    then
-        return
-    end
-
-    if #State.SpawnHistory
-        > CONFIG.MAX_BOTS
-    then
-        return
-    end
-
-    local record =
-        buildBotRecord(model)
-
-    local path =
-        record.path
-
-    State.Bots[path] = {
-        model = model,
-
-        record = record,
-
-        firstSeen =
-            os.time(),
-
-        lastSeen =
-            os.time(),
-
-        samples = {},
-
-        movementHistory = {},
-    }
-
-    State.SpawnHistory[
-        #State.SpawnHistory + 1
-    ] = {
-        name =
-            record.name,
-
-        path =
-            record.path,
-
-        classification =
-            record.classification,
-
-        team =
-            record.team,
-
-        observedAt =
-            os.time(),
-    }
-end
-
---==============================================================--
--- UPDATE BOT
---==============================================================--
-
-local function updateBot(path, data)
-
-    if not data
-        or not data.model
-    then
-        return
-    end
-
-    local model =
-        data.model
-
-    if not model.Parent then
-        return
-    end
-
-    local record =
-        buildBotRecord(model)
-
-    data.record =
-        record
-
-    data.lastSeen =
-        os.time()
-
-    local movement =
-        record.movement
-
-    data.movementHistory[
-        #data.movementHistory + 1
-    ] = {
-        timestamp =
-            os.time(),
-
-        position =
-            record.root.position,
-
-        moving =
-            movement.moving,
-
-        direction =
-            movement.moveDirection,
-
-        velocity =
-            movement.velocity,
-
-        patrol =
-            record.nearestPatrolPoint,
-    }
-
-    if #data.movementHistory
-        > CONFIG.MAX_MOVEMENT_SAMPLES
-    then
-        table.remove(
-            data.movementHistory,
-            1
-        )
-    end
-end
-
---==============================================================--
--- SCAN EXISTING BOTS
---==============================================================--
-
-local function scanBots()
-
-    State.Scanning = true
-
-    State.Bots = {}
-
-    State.SpawnHistory = {}
-
-    State.RemovalHistory = {}
-
-    State.TeamSummary = {
-        Army = 0,
-        Rebels = 0,
-        Unknown = 0,
-    }
-
-    State.ClassificationSummary = {
-        PlayableBot = 0,
-        Mannequin = 0,
-        Unknown = 0,
-    }
-
-    readPatrolPoints()
-
-    BotFolder =
-        Workspace:FindFirstChild(
-            CONFIG.BOT_FOLDER_NAME
-        )
-
-    if not BotFolder then
-        State.Scanning = false
-        return
-    end
-
-    local children =
-        BotFolder:GetChildren()
-
-    local total = 0
-
-    for _, object
-        in ipairs(children)
-    do
-
-        if total >= CONFIG.MAX_BOTS then
-            break
-        end
-
-        if object:IsA("Model") then
-
-            registerBot(object)
-
-            total += 1
-        end
-    end
-
-    for _, data
-        in pairs(State.Bots)
-    do
-
-        local team =
-            data.record.team
-
-        if team == "Army" then
-            State.TeamSummary.Army += 1
-
-        elseif team == "Rebels" then
-            State.TeamSummary.Rebels += 1
-
-        else
-            State.TeamSummary.Unknown += 1
-        end
-
-        local classification =
-            data.record.classification
-
-        if classification
-            == "PlayableBot"
-        then
-            State.ClassificationSummary.PlayableBot += 1
-
-        elseif classification
-            == "Mannequin"
-        then
-            State.ClassificationSummary.Mannequin += 1
-
-        else
-            State.ClassificationSummary.Unknown += 1
-        end
-    end
-
-    State.ScanCount += 1
-    State.LastScanAt = os.time()
-
-    State.Scanning = false
-end
-
---==============================================================--
--- BOT FOLDER EVENTS
---==============================================================--
-
-local Connections = {}
-
-local function disconnectAll()
-
-    for _, connection
-        in ipairs(Connections)
-    do
-
-        pcall(function()
-            connection:Disconnect()
-        end)
-
-    end
-
-    Connections = {}
-end
-
-local function startMonitoring()
-
-    disconnectAll()
-
-    BotFolder =
-        Workspace:FindFirstChild(
-            CONFIG.BOT_FOLDER_NAME
-        )
-
-    if not BotFolder then
-        return
-    end
-
-    State.Monitoring = true
-
-    Connections[
-        #Connections + 1
-    ] =
-        BotFolder.ChildAdded:Connect(
-            function(child)
-
-                if not child:IsA("Model") then
-                    return
-                end
-
-                task.wait(0.1)
-
-                registerBot(child)
-
-            end
-        )
-
-    Connections[
-        #Connections + 1
-    ] =
-        BotFolder.ChildRemoved:Connect(
-            function(child)
-
-                if not child:IsA("Model") then
-                    return
-                end
-
-                local path =
-                    getFullName(child)
-
-                local oldData =
-                    State.Bots[path]
-
-                if oldData then
-
-                    State.RemovalHistory[
-                        #State.RemovalHistory + 1
-                    ] = {
-
-                        name =
-                            tostring(child.Name),
-
-                        path =
-                            path,
-
-                        team =
-                            oldData.record.team,
-
-                        classification =
-                            oldData.record.classification,
-
-                        removedAt =
-                            os.time(),
-                    }
-
-                    State.Bots[path] = nil
-                end
-            end
-        )
-
-    Connections[
-        #Connections + 1
-    ] =
-        RunService.Heartbeat:Connect(
-            function()
-
-                if not State.Monitoring then
-                    return
-                end
-
-                for path, data
-                    in pairs(State.Bots)
-                do
-
-                    if
-                        data.model
-                        and data.model.Parent
-                    then
-
-                        updateBot(
-                            path,
-                            data
-                        )
-                    end
-                end
-            end
-        )
-end
-
---==============================================================--
--- EXPORT DATA
---==============================================================--
-
-local function buildExport()
-
-    local bots = {}
-
-    for path, data
-        in pairs(State.Bots)
-    do
-
-        local copy = {
-            record =
-                data.record,
-
-            firstSeen =
-                data.firstSeen,
-
-            lastSeen =
-                data.lastSeen,
-
-            movementHistory =
-                data.movementHistory,
-        }
-
-        bots[path] = copy
-    end
-
-    return {
-
-        scanner = {
-            name =
-                "CAFEINA BOT READING",
-
-            version =
-                CONFIG.VERSION,
-
-            generatedAt =
-                os.time(),
-
-            generatedDate =
-                os.date(
-                    "!%Y-%m-%dT%H:%M:%SZ"
-                ),
-        },
-
-        game = {
-            placeId =
-                game.PlaceId,
-
-            gameId =
-                game.GameId,
-
-            jobId =
-                game.JobId,
-
-            placeVersion =
-                game.PlaceVersion,
-        },
-
-        structure = {
-            botFolder =
-                BotFolder
-                and getFullName(
-                    BotFolder
-                )
-                or nil,
-
-            patrolFolder =
-                PatrolFolder
-                and getFullName(
-                    PatrolFolder
-                )
-                or nil,
-        },
-
-        summary = {
-            scanCount =
-                State.ScanCount,
-
-            botCount =
-                #State.SpawnHistory,
-
-            activeBots =
-                State.ClassificationSummary.PlayableBot,
-
-            mannequins =
-                State.ClassificationSummary.Mannequin,
-
-            unknown =
-                State.ClassificationSummary.Unknown,
-
-            army =
-                State.TeamSummary.Army,
-
-            rebels =
-                State.TeamSummary.Rebels,
-
-            unknownTeam =
-                State.TeamSummary.Unknown,
-        },
-
-        patrolPoints =
-            State.PatrolPoints,
-
-        spawnHistory =
-            State.SpawnHistory,
-
-        removalHistory =
-            State.RemovalHistory,
-
-        bots =
-            bots,
-    }
-end
-
-local function encodeExport()
-
-    local data =
-        buildExport()
-
-    local ok, result =
-        pcall(function()
-            return HttpService:JSONEncode(
-                data
-            )
-        end)
-
-    if not ok then
-        return nil,
-            tostring(result)
-    end
-
-    return result
-end
-
---==============================================================--
--- FILE EXPORT
---==============================================================--
-
-local function exportFile()
-
-    local json, errorMessage =
-        encodeExport()
-
-    if not json then
-        return false,
-            errorMessage
-    end
-
-    local timestamp =
-        os.date(
-            "%Y%m%d_%H%M%S"
-        )
-
-    local filename =
-        "Cafeina_BotReading_"
-        .. tostring(
-            game.PlaceId
-        )
-        .. "_"
-        .. timestamp
-        .. ".json"
-
-    local writeFile =
-        typeof(writefile)
-        == "function"
-        and writefile
-        or nil
-
-    if writeFile then
-
-        local ok, err =
-            pcall(
-                function()
-                    writeFile(
-                        filename,
-                        json
-                    )
-                end
-            )
-
-        if ok then
-            return true,
-                filename
-        end
-
-        return false,
-            tostring(err)
-    end
-
-    return false,
-        "writefile indisponível"
-end
-
---==============================================================--
--- CLIPBOARD FALLBACK
---==============================================================--
-
-local function copyExport()
-
-    local json, errorMessage =
-        encodeExport()
-
-    if not json then
-        return false,
-            errorMessage
-    end
-
-    local clipboard =
-        typeof(setclipboard)
-        == "function"
-        and setclipboard
-        or nil
-
-    if not clipboard then
-        clipboard =
-            typeof(toclipboard)
-            == "function"
-            and toclipboard
-            or nil
-    end
-
-    if not clipboard then
-        return false,
-            "Clipboard indisponível"
-    end
-
-    local ok, err =
-        pcall(
-            clipboard,
-            json
-        )
-
-    if ok then
-        return true
-    end
-
-    return false,
-        tostring(err)
-end
-
---==============================================================--
--- GUI
---==============================================================--
-
-local oldGui =
-    LocalPlayer
-    :WaitForChild("PlayerGui")
-    :FindFirstChild(
-        CONFIG.GUI_NAME
-    )
-
-if oldGui then
-    oldGui:Destroy()
-end
-
-local Gui =
-    Instance.new("ScreenGui")
-
-Gui.Name =
-    CONFIG.GUI_NAME
-
-Gui.ResetOnSpawn =
-    false
-
-Gui.IgnoreGuiInset =
-    true
-
-Gui.Parent =
-    LocalPlayer:WaitForChild(
-        "PlayerGui"
-    )
 
 --==============================================================--
 -- COLORS
@@ -1302,873 +96,3961 @@ local COLORS = {
 
     Background =
         Color3.fromRGB(
+            10,
             12,
-            12,
-            15
+            17
         ),
 
     Panel =
         Color3.fromRGB(
-            20,
-            20,
-            24
+            18,
+            21,
+            29
         ),
 
     Panel2 =
         Color3.fromRGB(
+            25,
             29,
-            29,
-            35
+            39
         ),
 
-    Red =
+    Panel3 =
         Color3.fromRGB(
-            225,
-            38,
-            52
-        ),
-
-    RedDark =
-        Color3.fromRGB(
-            110,
-            20,
-            30
-        ),
-
-    Green =
-        Color3.fromRGB(
-            65,
-            210,
-            118
-        ),
-
-    Yellow =
-        Color3.fromRGB(
-            242,
-            184,
-            57
+            31,
+            36,
+            48
         ),
 
     Text =
         Color3.fromRGB(
-            245,
-            245,
+            240,
+            243,
             248
         ),
 
     Sub =
         Color3.fromRGB(
+            151,
             160,
-            160,
-            172
+            176
+        ),
+
+    Blue =
+        Color3.fromRGB(
+            35,
+            91,
+            150
+        ),
+
+    BlueDark =
+        Color3.fromRGB(
+            18,
+            46,
+            82
+        ),
+
+    BlueBright =
+        Color3.fromRGB(
+            45,
+            120,
+            205
+        ),
+
+    Green =
+        Color3.fromRGB(
+            65,
+            205,
+            120
+        ),
+
+    Red =
+        Color3.fromRGB(
+            225,
+            60,
+            70
+        ),
+
+    Yellow =
+        Color3.fromRGB(
+            235,
+            185,
+            65
+        ),
+
+    Orange =
+        Color3.fromRGB(
+            235,
+            125,
+            55
+        ),
+
+    Stroke =
+        Color3.fromRGB(
+            55,
+            64,
+            82
         ),
 }
 
 --==============================================================--
--- MAIN FRAME
+-- EXECUTOR HELPERS
+--==============================================================--
+
+local SetClipboard =
+    (
+        typeof(setclipboard) == "function"
+        and setclipboard
+    )
+    or
+    (
+        typeof(toclipboard) == "function"
+        and toclipboard
+    )
+    or nil
+
+local WriteFile =
+    (
+        typeof(writefile) == "function"
+        and writefile
+    )
+    or nil
+
+--==============================================================--
+-- SAFE FUNCTIONS
+--==============================================================--
+
+local function safeCall(callback, default)
+    local ok, result =
+        pcall(callback)
+
+    if ok then
+        return result
+    end
+
+    return default
+end
+
+local function safeName(object)
+    return safeCall(
+        function()
+            return tostring(object.Name)
+        end,
+        "?"
+    )
+end
+
+local function safeClass(object)
+    return safeCall(
+        function()
+            return tostring(object.ClassName)
+        end,
+        "?"
+    )
+end
+
+local function safePath(object)
+    return safeCall(
+        function()
+            return object:GetFullName()
+        end,
+        safeName(object)
+    )
+end
+
+local function safeChildren(object)
+    return safeCall(
+        function()
+            return object:GetChildren()
+        end,
+        {}
+    )
+end
+
+local function safeDescendants(object)
+    return safeCall(
+        function()
+            return object:GetDescendants()
+        end,
+        {}
+    )
+end
+
+local function safeAttribute(object, name)
+    return safeCall(
+        function()
+            return object:GetAttribute(name)
+        end,
+        nil
+    )
+end
+
+local function safeAttributes(object)
+    return safeCall(
+        function()
+            return object:GetAttributes()
+        end,
+        {}
+    )
+end
+
+local function safeProperty(object, property)
+    return safeCall(
+        function()
+            return object[property]
+        end,
+        nil
+    )
+end
+
+local function safeIsA(object, className)
+    return safeCall(
+        function()
+            return object:IsA(className)
+        end,
+        false
+    )
+end
+
+local function formatNumber(value)
+    if type(value) ~= "number" then
+        return tostring(value)
+    end
+
+    return string.format(
+        "%.3f",
+        value
+    )
+end
+
+local function vectorToTable(value)
+
+    if typeof(value) ~= "Vector3" then
+        return nil
+    end
+
+    return {
+        x = value.X,
+        y = value.Y,
+        z = value.Z,
+    }
+end
+
+--==============================================================--
+-- GUI FACTORY
+--==============================================================--
+
+local function newObject(className, properties)
+
+    local object =
+        Instance.new(className)
+
+    for property, value
+        in pairs(properties or {})
+    do
+        object[property] = value
+    end
+
+    return object
+end
+
+local function addCorner(parent, radius)
+
+    return newObject(
+        "UICorner",
+        {
+            CornerRadius =
+                UDim.new(
+                    0,
+                    radius or 8
+                ),
+
+            Parent =
+                parent,
+        }
+    )
+end
+
+local function addStroke(parent)
+
+    return newObject(
+        "UIStroke",
+        {
+            Color =
+                COLORS.Stroke,
+
+            Thickness =
+                1,
+
+            Parent =
+                parent,
+        }
+    )
+end
+
+--==============================================================--
+-- GUI PARENT
+--==============================================================--
+
+local GuiParent
+
+if typeof(gethui) == "function" then
+
+    local ok, result =
+        pcall(gethui)
+
+    if ok then
+        GuiParent = result
+    end
+end
+
+local PlayerGui =
+    LocalPlayer:WaitForChild(
+        "PlayerGui"
+    )
+
+local ScreenGui =
+    newObject(
+        "ScreenGui",
+        {
+            Name =
+                CONFIG.GUI_NAME,
+
+            ResetOnSpawn =
+                false,
+
+            IgnoreGuiInset =
+                true,
+
+            ZIndexBehavior =
+                Enum.ZIndexBehavior.Sibling,
+        }
+    )
+
+local attached = false
+
+if GuiParent then
+
+    attached =
+        pcall(function()
+            ScreenGui.Parent =
+                GuiParent
+        end)
+end
+
+if not attached then
+
+    attached =
+        pcall(function()
+            ScreenGui.Parent =
+                CoreGui
+        end)
+end
+
+if not attached then
+    ScreenGui.Parent =
+        PlayerGui
+end
+
+--==============================================================--
+-- REMOVE SOMENTE NOSSA GUI
+--==============================================================--
+
+for _, object
+    in ipairs(ScreenGui.Parent:GetChildren())
+do
+
+    if
+        object ~= ScreenGui
+        and object.Name
+        == CONFIG.GUI_NAME
+    then
+        object:Destroy()
+    end
+end
+
+--==============================================================--
+-- STATE
+--==============================================================--
+
+local State = {
+
+    Scanning =
+        false,
+
+    Cancel =
+        false,
+
+    HasRead =
+        false,
+
+    Results =
+        {},
+
+    Entities =
+        {},
+
+    PatrolPoints =
+        {},
+
+    SelectedIndex =
+        nil,
+
+    GeneratedText =
+        "",
+
+    LastExport =
+        nil,
+}
+
+--==============================================================--
+-- FIND TEAM
+--==============================================================--
+
+local function detectTeam(object)
+
+    local team =
+        safeAttribute(
+            object,
+            "Team"
+        )
+
+    if team ~= nil then
+
+        team =
+            tostring(team)
+
+        if CONFIG.TEAM_NAMES[team] then
+            return team,
+                "Attribute.Team"
+        end
+    end
+
+    local teamObject =
+        safeProperty(
+            object,
+            "Team"
+        )
+
+    if teamObject then
+
+        local teamName =
+            safeCall(
+                function()
+                    return tostring(
+                        teamObject.Name
+                    )
+                end,
+                nil
+            )
+
+        if teamName
+            and CONFIG.TEAM_NAMES[teamName]
+        then
+            return teamName,
+                "Object.Team"
+        end
+    end
+
+    local ancestors = {}
+
+    local current =
+        safeProperty(
+            object,
+            "Parent"
+        )
+
+    local depth = 0
+
+    while current and depth < 8 do
+
+        table.insert(
+            ancestors,
+            current
+        )
+
+        current =
+            safeProperty(
+                current,
+                "Parent"
+            )
+
+        depth += 1
+    end
+
+    for _, ancestor
+        in ipairs(ancestors)
+    do
+
+        local ancestorName =
+            safeName(ancestor)
+
+        if
+            ancestorName == "Army"
+            or ancestorName == "Rebels"
+        then
+
+            return ancestorName,
+                "Ancestor"
+        end
+
+        local attribute =
+            safeAttribute(
+                ancestor,
+                "Team"
+            )
+
+        if attribute then
+
+            attribute =
+                tostring(attribute)
+
+            if CONFIG.TEAM_NAMES[attribute] then
+                return attribute,
+                    "Ancestor.Attribute.Team"
+            end
+        end
+    end
+
+    return "Unknown",
+        "Not detected"
+end
+
+--==============================================================--
+-- PLAYER TEST
+--==============================================================--
+
+local function isPlayerCharacter(model)
+
+    if not model then
+        return false
+    end
+
+    local player =
+        safeCall(
+            function()
+                return Players:GetPlayerFromCharacter(
+                    model
+                )
+            end,
+            nil
+        )
+
+    if player then
+        return true,
+            player
+    end
+
+    return false,
+        nil
+end
+
+--==============================================================--
+-- HUMANOID
+--==============================================================--
+
+local function findHumanoid(model)
+
+    local humanoid =
+        safeCall(
+            function()
+                return model:FindFirstChildOfClass(
+                    "Humanoid"
+                )
+            end,
+            nil
+        )
+
+    return humanoid
+end
+
+local function findRoot(model)
+
+    local root =
+        safeCall(
+            function()
+                return model:FindFirstChild(
+                    "HumanoidRootPart"
+                )
+            end,
+            nil
+        )
+
+    if root then
+        return root
+    end
+
+    local primary =
+        safeProperty(
+            model,
+            "PrimaryPart"
+        )
+
+    if primary then
+        return primary
+    end
+
+    return nil
+end
+
+--==============================================================--
+-- PATROL POINTS
+--==============================================================--
+
+local function collectPatrolPoints()
+
+    local result = {}
+
+    local workspaceObject =
+        workspace
+
+    local folder =
+        safeCall(
+            function()
+                return workspaceObject:FindFirstChild(
+                    CONFIG.PATROL_FOLDER,
+                    true
+                )
+            end,
+            nil
+        )
+
+    if not folder then
+        return result
+    end
+
+    local descendants =
+        safeDescendants(folder)
+
+    for _, object
+        in ipairs(descendants)
+    do
+
+        if
+            safeIsA(
+                object,
+                "BasePart"
+            )
+        then
+
+            local team =
+                safeAttribute(
+                    object,
+                    "Team"
+                )
+
+            local position =
+                safeProperty(
+                    object,
+                    "Position"
+                )
+
+            result[
+                #result + 1
+            ] = {
+
+                name =
+                    safeName(object),
+
+                className =
+                    safeClass(object),
+
+                path =
+                    safePath(object),
+
+                parentPath =
+                    safePath(
+                        safeProperty(
+                            object,
+                            "Parent"
+                        )
+                    ),
+
+                team =
+                    team
+                    and tostring(team)
+                    or "Unknown",
+
+                position =
+                    vectorToTable(
+                        position
+                    ),
+
+                attributes =
+                    safeAttributes(object),
+            }
+        end
+    end
+
+    return result
+end
+
+--==============================================================--
+-- FIND NEAREST PATROL POINT
+--==============================================================--
+
+local function findNearestPatrol(root, team)
+
+    if not root then
+        return nil
+    end
+
+    local rootPosition =
+        safeProperty(
+            root,
+            "Position"
+        )
+
+    if typeof(rootPosition)
+        ~= "Vector3"
+    then
+        return nil
+    end
+
+    local nearest =
+        nil
+
+    local nearestDistance =
+        math.huge
+
+    for _, point
+        in ipairs(State.PatrolPoints)
+    do
+
+        if
+            point.position
+            and
+            (
+                point.team
+                == team
+                or
+                point.team
+                == "Unknown"
+            )
+        then
+
+            local position =
+                Vector3.new(
+                    point.position.x,
+                    point.position.y,
+                    point.position.z
+                )
+
+            local distance =
+                (
+                    rootPosition
+                    - position
+                ).Magnitude
+
+            if distance
+                < nearestDistance
+            then
+
+                nearestDistance =
+                    distance
+
+                nearest =
+                    {
+                        path =
+                            point.path,
+
+                        name =
+                            point.name,
+
+                        team =
+                            point.team,
+
+                        distance =
+                            distance,
+                    }
+            end
+        end
+    end
+
+    return nearest
+end
+
+--==============================================================--
+-- MOVEMENT TEST
+--==============================================================--
+
+local function checkMovement(root, humanoid)
+
+    if not root then
+
+        return {
+            available =
+                false,
+
+            moved =
+                false,
+
+            reason =
+                "No root part",
+        }
+    end
+
+    local start =
+        safeProperty(
+            root,
+            "Position"
+        )
+
+    if typeof(start)
+        ~= "Vector3"
+    then
+
+        return {
+            available =
+                false,
+
+            moved =
+                false,
+
+            reason =
+                "Position unavailable",
+        }
+    end
+
+    local startTime =
+        os.clock()
+
+    task.wait(
+        CONFIG.MOVEMENT_SAMPLE_TIME
+    )
+
+    local finish =
+        safeProperty(
+            root,
+            "Position"
+        )
+
+    if typeof(finish)
+        ~= "Vector3"
+    then
+
+        return {
+            available =
+                false,
+
+            moved =
+                false,
+
+            reason =
+                "Position unavailable after sample",
+        }
+    end
+
+    local distance =
+        (
+            finish
+            - start
+        ).Magnitude
+
+    local velocity =
+        safeProperty(
+            root,
+            "AssemblyLinearVelocity"
+        )
+
+    local humanoidState =
+        humanoid
+        and
+        safeCall(
+            function()
+                return tostring(
+                    humanoid:GetState()
+                )
+            end,
+            "Unknown"
+        )
+        or "No Humanoid"
+
+    return {
+
+        available =
+            true,
+
+        moved =
+            distance
+            >=
+            CONFIG.MOVEMENT_THRESHOLD,
+
+        distance =
+            distance,
+
+        sampleTime =
+            os.clock()
+            - startTime,
+
+        velocity =
+            vectorToTable(
+                velocity
+            ),
+
+        humanoidState =
+            humanoidState,
+    }
+end
+
+--==============================================================--
+-- RELEVANT CHILDREN
+--==============================================================--
+
+local function collectRelevantChildren(model)
+
+    local result = {}
+
+    local descendants =
+        safeDescendants(model)
+
+    local count = 0
+
+    for _, object
+        in ipairs(descendants)
+    do
+
+        count += 1
+
+        if count >
+            CONFIG.MAX_CHILDREN_PER_ENTITY
+        then
+            break
+        end
+
+        local className =
+            safeClass(object)
+
+        local name =
+            safeName(object)
+
+        local relevant =
+            (
+                className == "Humanoid"
+            )
+            or
+            (
+                name == "HumanoidRootPart"
+            )
+            or
+            (
+                className == "Animator"
+            )
+            or
+            (
+                className == "AnimationController"
+            )
+            or
+            (
+                className == "ObjectValue"
+            )
+            or
+            (
+                className == "StringValue"
+            )
+            or
+            (
+                className == "BoolValue"
+            )
+            or
+            (
+                className == "NumberValue"
+            )
+            or
+            (
+                name:lower():find(
+                    "patrol",
+                    1,
+                    true
+                ) ~= nil
+            )
+            or
+            (
+                name:lower():find(
+                    "spawn",
+                    1,
+                    true
+                ) ~= nil
+            )
+            or
+            (
+                name:lower():find(
+                    "target",
+                    1,
+                    true
+                ) ~= nil
+            )
+            or
+            (
+                name:lower():find(
+                    "ai",
+                    1,
+                    true
+                ) ~= nil
+            )
+            or
+            (
+                name:lower():find(
+                    "weapon",
+                    1,
+                    true
+                ) ~= nil
+            )
+        if relevant then
+
+            result[
+                #result + 1
+            ] = {
+
+                name =
+                    name,
+
+                className =
+                    className,
+
+                path =
+                    safePath(object),
+
+                value =
+                    safeProperty(
+                        object,
+                        "Value"
+                    ),
+            }
+        end
+    end
+
+    return result
+end
+
+--==============================================================--
+-- SCORE CLASSIFICATION
+--==============================================================--
+
+local function classifyEntity(model)
+
+    local humanoid =
+        findHumanoid(model)
+
+    local root =
+        findRoot(model)
+
+    local isPlayer,
+        player =
+        isPlayerCharacter(model)
+
+    local team,
+        teamSource =
+        detectTeam(model)
+
+    local attributes =
+        safeAttributes(model)
+
+    local score =
+        0
+
+    local evidence = {}
+
+    local negativeEvidence = {}
+
+    --==========================================================--
+    -- PLAYER
+    --==========================================================--
+
+    if isPlayer then
+
+        return {
+
+            classification =
+                "PLAYER",
+
+            confidence =
+                1,
+
+            score =
+                -100,
+
+            team =
+                (
+                    player
+                    and
+                    safeProperty(
+                        player,
+                        "Team"
+                    )
+                    and
+                    tostring(
+                        safeProperty(
+                            player.Team,
+                            "Name"
+                        )
+                    )
+                )
+                or team,
+
+            teamSource =
+                player
+                and
+                "Players:GetPlayerFromCharacter"
+                or teamSource,
+
+            playerName =
+                player
+                and
+                safeName(player)
+                or nil,
+
+            playerUserId =
+                player
+                and
+                safeProperty(
+                    player,
+                    "UserId"
+                )
+                or nil,
+
+            humanoid =
+                humanoid ~= nil,
+
+            root =
+                root ~= nil,
+
+            attributes =
+                attributes,
+
+            evidence = {
+                "Players:GetPlayerFromCharacter retornou um Player"
+            },
+
+            negativeEvidence = {},
+        }
+    end
+
+    --==========================================================--
+    -- HUMANOID
+    --==========================================================--
+
+    if humanoid then
+
+        score += 2
+
+        table.insert(
+            evidence,
+            "Possui Humanoid"
+        )
+
+        local health =
+            safeProperty(
+                humanoid,
+                "Health"
+            )
+
+        local maxHealth =
+            safeProperty(
+                humanoid,
+                "MaxHealth"
+            )
+
+        if type(health) == "number"
+            and type(maxHealth) == "number"
+        then
+
+            if maxHealth > 0 then
+
+                score += 2
+
+                table.insert(
+                    evidence,
+                    "Possui Health/MaxHealth válidos"
+                )
+            end
+        end
+
+        local state =
+            safeCall(
+                function()
+                    return humanoid:GetState()
+                end,
+                nil
+            )
+
+        if state then
+
+            if state
+                ~= Enum.HumanoidStateType.None
+            then
+
+                score += 1
+
+                table.insert(
+                    evidence,
+                    "Humanoid possui estado de execução"
+                )
+            end
+        end
+    else
+
+        table.insert(
+            negativeEvidence,
+            "Não possui Humanoid"
+        )
+    end
+
+    --==========================================================--
+    -- ROOT
+    --==========================================================--
+
+    if root then
+
+        score += 2
+
+        table.insert(
+            evidence,
+            "Possui HumanoidRootPart/PrimaryPart"
+        )
+
+    else
+
+        table.insert(
+            negativeEvidence,
+            "Não possui HumanoidRootPart/PrimaryPart"
+        )
+    end
+
+    --==========================================================--
+    -- TEAM
+    --==========================================================--
+
+    if team ~= "Unknown" then
+
+        score += 2
+
+        table.insert(
+            evidence,
+            "Equipe detectada: "
+            .. team
+            .. " via "
+            .. teamSource
+        )
+    else
+
+        table.insert(
+            negativeEvidence,
+            "Equipe não identificada"
+        )
+    end
+
+    --==========================================================--
+    -- BOT ATTRIBUTES
+    --==========================================================--
+
+    local botAttributeNames = {
+
+        "Health",
+        "HealthMult",
+        "DamageMult",
+        "Damage",
+        "DamagePerSecond",
+        "FireRate",
+        "Range",
+        "SpeedMult",
+        "ReloadTime",
+        "MagSize",
+        "Gun",
+    }
+
+    local foundBotAttributes = {}
+
+    for _, attributeName
+        in ipairs(botAttributeNames)
+    do
+
+        if attributes[attributeName]
+            ~= nil
+        then
+
+            foundBotAttributes[
+                #foundBotAttributes + 1
+            ] =
+                attributeName
+        end
+    end
+
+    if #foundBotAttributes > 0 then
+
+        score +=
+            math.min(
+                4,
+                #foundBotAttributes
+            )
+
+        table.insert(
+            evidence,
+            "Atributos relacionados a unidade: "
+            .. table.concat(
+                foundBotAttributes,
+                ", "
+            )
+        )
+    end
+
+    --==========================================================--
+    -- CONTAINER
+    --==========================================================--
+
+    local parent =
+        safeProperty(
+            model,
+            "Parent"
+        )
+
+    local parentName =
+        parent
+        and
+        safeName(parent)
+        or ""
+
+    for _, containerName
+        in ipairs(
+            CONFIG.POSSIBLE_BOT_CONTAINERS
+        )
+    do
+
+        if parentName
+            == containerName
+        then
+
+            score += 2
+
+            table.insert(
+                evidence,
+                "Está dentro de "
+                .. containerName
+            )
+        end
+    end
+
+    --==========================================================--
+    -- PATROL
+    --==========================================================--
+
+    local nearestPatrol =
+        findNearestPatrol(
+            root,
+            team
+        )
+
+    if nearestPatrol then
+
+        local distance =
+            nearestPatrol.distance
+
+        if distance <= 100 then
+
+            score += 3
+
+            table.insert(
+                evidence,
+                "Existe ponto de patrulha próximo"
+            )
+
+        elseif distance <= 300 then
+
+            score += 1
+
+            table.insert(
+                evidence,
+                "Existe ponto de patrulha na região"
+            )
+        end
+    end
+
+    --==========================================================--
+    -- MODEL
+    --==========================================================--
+
+    if safeIsA(model, "Model") then
+
+        score += 1
+
+        table.insert(
+            evidence,
+            "Entidade é um Model"
+        )
+    end
+
+    --==========================================================--
+    -- CLASSIFICATION
+    --==========================================================--
+
+    local classification
+
+    local confidence
+
+    if score >= 8 then
+
+        classification =
+            "BOT JOGÁVEL"
+
+        confidence =
+            math.clamp(
+                score / 13,
+                0,
+                1
+            )
+
+    elseif score >= 4 then
+
+        classification =
+            "PROVÁVEL BOT"
+
+        confidence =
+            math.clamp(
+                score / 10,
+                0,
+                0.85
+            )
+
+    elseif
+        humanoid
+        and
+        not root
+    then
+
+        classification =
+            "POSSÍVEL MANEQUIM"
+
+        confidence =
+            0.45
+
+    else
+
+        classification =
+            "INDETERMINADO"
+
+        confidence =
+            0.25
+    end
+
+    return {
+
+        classification =
+            classification,
+
+        confidence =
+            confidence,
+
+        score =
+            score,
+
+        team =
+            team,
+
+        teamSource =
+            teamSource,
+
+        humanoid =
+            humanoid ~= nil,
+
+        root =
+            root ~= nil,
+
+        player =
+            false,
+
+        attributes =
+            attributes,
+
+        evidence =
+            evidence,
+
+        negativeEvidence =
+            negativeEvidence,
+
+        nearestPatrol =
+            nearestPatrol,
+    }
+end
+
+--==============================================================--
+-- ENTITY RECORD
+--==============================================================--
+
+local function buildEntityRecord(model)
+
+    local classification =
+        classifyEntity(model)
+
+    local humanoid =
+        findHumanoid(model)
+
+    local root =
+        findRoot(model)
+
+    local position =
+        root
+        and
+        safeProperty(
+            root,
+            "Position"
+        )
+        or nil
+
+    local health =
+        humanoid
+        and
+        safeProperty(
+            humanoid,
+            "Health"
+        )
+        or nil
+
+    local maxHealth =
+        humanoid
+        and
+        safeProperty(
+            humanoid,
+            "MaxHealth"
+        )
+        or nil
+
+    local walkSpeed =
+        humanoid
+        and
+        safeProperty(
+            humanoid,
+            "WalkSpeed"
+        )
+        or nil
+
+    local jumpPower =
+        humanoid
+        and
+        safeProperty(
+            humanoid,
+            "JumpPower"
+        )
+        or nil
+
+    local velocity =
+        root
+        and
+        safeProperty(
+            root,
+            "AssemblyLinearVelocity"
+        )
+        or nil
+
+    local movement =
+        checkMovement(
+            root,
+            humanoid
+        )
+
+    local player,
+        playerObject =
+        isPlayerCharacter(model)
+
+    return {
+
+        name =
+            safeName(model),
+
+        className =
+            safeClass(model),
+
+        path =
+            safePath(model),
+
+        parentPath =
+            safePath(
+                safeProperty(
+                    model,
+                    "Parent"
+                )
+            ),
+
+        classification =
+            classification.classification,
+
+        confidence =
+            classification.confidence,
+
+        score =
+            classification.score,
+
+        team =
+            classification.team,
+
+        teamSource =
+            classification.teamSource,
+
+        isPlayer =
+            player,
+
+        playerName =
+            playerObject
+            and
+            safeName(playerObject)
+            or nil,
+
+        playerUserId =
+            playerObject
+            and
+            safeProperty(
+                playerObject,
+                "UserId"
+            )
+            or nil,
+
+        humanoid =
+            {
+
+                exists =
+                    humanoid ~= nil,
+
+                health =
+                    health,
+
+                maxHealth =
+                    maxHealth,
+
+                walkSpeed =
+                    walkSpeed,
+
+                jumpPower =
+                    jumpPower,
+
+                state =
+                    humanoid
+                    and
+                    safeCall(
+                        function()
+                            return tostring(
+                                humanoid:GetState()
+                            )
+                        end,
+                        "Unknown"
+                    )
+                    or nil,
+            },
+
+        root =
+            {
+
+                exists =
+                    root ~= nil,
+
+                name =
+                    root
+                    and
+                    safeName(root)
+                    or nil,
+
+                position =
+                    vectorToTable(position),
+
+                velocity =
+                    vectorToTable(velocity),
+            },
+
+        movement =
+            movement,
+
+        nearestPatrol =
+            classification.nearestPatrol,
+
+        attributes =
+            classification.attributes,
+
+        evidence =
+            classification.evidence,
+
+        negativeEvidence =
+            classification.negativeEvidence,
+
+        relevantChildren =
+            collectRelevantChildren(model),
+    }
+end
+
+--==============================================================--
+-- ENTITY DISCOVERY
+--==============================================================--
+
+local function shouldInspectModel(model)
+
+    if not safeIsA(model, "Model") then
+        return false
+    end
+
+    local humanoid =
+        findHumanoid(model)
+
+    local root =
+        findRoot(model)
+
+    local isPlayer =
+        isPlayerCharacter(model)
+
+    local team =
+        detectTeam(model)
+
+    local lowerName =
+        safeName(model):lower()
+
+    local interestingName =
+        lowerName:find(
+            "bot",
+            1,
+            true
+        )
+        or
+        lowerName:find(
+            "npc",
+            1,
+            true
+        )
+        or
+        lowerName:find(
+            "soldier",
+            1,
+            true
+        )
+        or
+        lowerName:find(
+            "dummy",
+            1,
+            true
+        )
+        or
+        lowerName:find(
+            "mannequin",
+            1,
+            true
+        )
+        or
+        lowerName:find(
+            "armour",
+            1,
+            true
+        )
+        or
+        lowerName:find(
+            "enemy",
+            1,
+            true
+        )
+
+    return
+        humanoid ~= nil
+        or
+        root ~= nil
+        or
+        isPlayer
+        or
+        team ~= "Unknown"
+        or
+        interestingName ~= nil
+end
+
+--==============================================================--
+-- SCAN
+--==============================================================--
+
+local function performScan()
+
+    if State.Scanning then
+        return
+    end
+
+    State.Scanning =
+        true
+
+    State.Cancel =
+        false
+
+    State.Results =
+        {}
+
+    State.Entities =
+        {}
+
+    State.HasRead =
+        false
+
+    StatusLabel.Text =
+        "Procurando estruturas..."
+
+    StatusLabel.TextColor3 =
+        COLORS.Yellow
+
+    ProgressFill.Size =
+        UDim2.new(
+            0,
+            0,
+            1,
+            0
+        )
+
+    --==========================================================--
+    -- PATROL
+    --==========================================================--
+
+    State.PatrolPoints =
+        collectPatrolPoints()
+
+    --==========================================================--
+    -- DESCENDANTS
+    --==========================================================--
+
+    local descendants =
+        safeDescendants(
+            workspace
+        )
+
+    local candidates =
+        {}
+
+    for _, object
+        in ipairs(descendants)
+    do
+
+        if State.Cancel then
+            break
+        end
+
+        if shouldInspectModel(object) then
+
+            candidates[
+                #candidates + 1
+            ] =
+                object
+
+            if
+                #candidates
+                >= CONFIG.MAX_ENTITIES
+            then
+                break
+            end
+        end
+    end
+
+    local total =
+        #candidates
+
+    --==========================================================--
+    -- ANALYZE
+    --==========================================================--
+
+    for index, model
+        in ipairs(candidates)
+    do
+
+        if State.Cancel then
+            break
+        end
+
+        local ok, record =
+            pcall(
+                buildEntityRecord,
+                model
+            )
+
+        if ok
+            and type(record)
+            == "table"
+        then
+
+            State.Entities[
+                #State.Entities + 1
+            ] =
+                record
+        end
+
+        local progress =
+            total > 0
+            and index / total
+            or 1
+
+        ProgressFill.Size =
+            UDim2.new(
+                progress,
+                0,
+                1,
+                0
+            )
+
+        StatusLabel.Text =
+            "Analisando "
+            .. tostring(index)
+            .. " / "
+            .. tostring(total)
+
+        if
+            index
+            % CONFIG.YIELD_EVERY
+            == 0
+        then
+            task.wait()
+        end
+    end
+
+    --==========================================================--
+    -- SUMMARY
+    --==========================================================--
+
+    local summary = {
+
+        total =
+            #State.Entities,
+
+        botJogavel =
+            0,
+
+        provavelBot =
+            0,
+
+        manequim =
+            0,
+
+        indeterminado =
+            0,
+
+        players =
+            0,
+
+        army =
+            0,
+
+        rebels =
+            0,
+
+        patrolPoints =
+            #State.PatrolPoints,
+    }
+
+    for _, entity
+        in ipairs(State.Entities)
+    do
+
+        if entity.classification
+            == "BOT JOGÁVEL"
+        then
+            summary.botJogavel += 1
+
+        elseif entity.classification
+            == "PROVÁVEL BOT"
+        then
+            summary.provavelBot += 1
+
+        elseif entity.classification
+            == "POSSÍVEL MANEQUIM"
+        then
+            summary.manequim += 1
+
+        else
+            summary.indeterminado += 1
+        end
+
+        if entity.isPlayer then
+            summary.players += 1
+        end
+
+        if entity.team == "Army" then
+            summary.army += 1
+
+        elseif entity.team == "Rebels" then
+            summary.rebels += 1
+        end
+    end
+
+    State.Results =
+        {
+
+            generatedAt =
+                os.time(),
+
+            game = {
+
+                placeId =
+                    game.PlaceId,
+
+                gameId =
+                    game.GameId,
+
+                jobId =
+                    game.JobId,
+            },
+
+            summary =
+                summary,
+
+            patrolPoints =
+                State.PatrolPoints,
+
+            entities =
+                State.Entities,
+        }
+
+    State.HasRead =
+        true
+
+    State.Scanning =
+        false
+
+    if State.Cancel then
+
+        StatusLabel.Text =
+            "Leitura cancelada"
+
+        StatusLabel.TextColor3 =
+            COLORS.Orange
+
+    else
+
+        StatusLabel.Text =
+            "Leitura concluída • "
+            .. tostring(
+                #State.Entities
+            )
+            .. " entidades"
+
+        StatusLabel.TextColor3 =
+            COLORS.Green
+
+        ProgressFill.Size =
+            UDim2.new(
+                1,
+                0,
+                1,
+                0
+            )
+    end
+
+    updateSummary()
+    showSummary()
+end
+
+--==============================================================--
+-- JSON
+--==============================================================--
+
+local function generateJSON()
+
+    if not State.HasRead then
+        return nil
+    end
+
+    local ok, encoded =
+        pcall(function()
+
+            return HttpService:JSONEncode(
+                State.Results
+            )
+
+        end)
+
+    if not ok then
+        return nil
+    end
+
+    return encoded
+end
+
+--==============================================================--
+-- TEXT REPORT
+--==============================================================--
+
+local function generateReadableReport()
+
+    if not State.HasRead then
+        return "Nenhuma leitura realizada."
+    end
+
+    local lines = {}
+
+    local summary =
+        State.Results.summary
+
+    table.insert(
+        lines,
+        "================================================"
+    )
+
+    table.insert(
+        lines,
+        "CAFEÍNA • BOT RESEARCH REPORT"
+    )
+
+    table.insert(
+        lines,
+        "================================================"
+    )
+
+    table.insert(
+        lines,
+        ""
+    )
+
+    table.insert(
+        lines,
+        "PLACE ID: "
+        .. tostring(
+            State.Results.game.placeId
+        )
+    )
+
+    table.insert(
+        lines,
+        "GAME ID: "
+        .. tostring(
+            State.Results.game.gameId
+        )
+    )
+
+    table.insert(
+        lines,
+        ""
+    )
+
+    table.insert(
+        lines,
+        "RESUMO"
+    )
+
+    table.insert(
+        lines,
+        "Entidades: "
+        .. tostring(summary.total)
+    )
+
+    table.insert(
+        lines,
+        "Bot jogável: "
+        .. tostring(summary.botJogavel)
+    )
+
+    table.insert(
+        lines,
+        "Provável bot: "
+        .. tostring(summary.provavelBot)
+    )
+
+    table.insert(
+        lines,
+        "Possível manequim: "
+        .. tostring(summary.manequim)
+    )
+
+    table.insert(
+        lines,
+        "Indeterminado: "
+        .. tostring(summary.indeterminado)
+    )
+
+    table.insert(
+        lines,
+        "Players: "
+        .. tostring(summary.players)
+    )
+
+    table.insert(
+        lines,
+        "Army: "
+        .. tostring(summary.army)
+    )
+
+    table.insert(
+        lines,
+        "Rebels: "
+        .. tostring(summary.rebels)
+    )
+
+    table.insert(
+        lines,
+        "Patrol Points: "
+        .. tostring(summary.patrolPoints)
+    )
+
+    table.insert(
+        lines,
+        ""
+    )
+
+    table.insert(
+        lines,
+        "================================================"
+    )
+
+    table.insert(
+        lines,
+        "ENTIDADES"
+    )
+
+    table.insert(
+        lines,
+        "================================================"
+    )
+
+    for index, entity
+        in ipairs(State.Entities)
+    do
+
+        table.insert(
+            lines,
+            ""
+        )
+
+        table.insert(
+            lines,
+            "------------------------------------------------"
+        )
+
+        table.insert(
+            lines,
+            "#" .. tostring(index)
+        )
+
+        table.insert(
+            lines,
+            "Nome: "
+            .. entity.name
+        )
+
+        table.insert(
+            lines,
+            "Classe: "
+            .. entity.className
+        )
+
+        table.insert(
+            lines,
+            "Classificação: "
+            .. entity.classification
+        )
+
+        table.insert(
+            lines,
+            "Score: "
+            .. tostring(entity.score)
+        )
+
+        table.insert(
+            lines,
+            "Confiança: "
+            .. string.format(
+                "%.1f%%",
+                entity.confidence * 100
+            )
+        )
+
+        table.insert(
+            lines,
+            "Time: "
+            .. tostring(entity.team)
+        )
+
+        table.insert(
+            lines,
+            "Fonte do time: "
+            .. tostring(entity.teamSource)
+        )
+
+        table.insert(
+            lines,
+            "Player: "
+            .. tostring(entity.isPlayer)
+        )
+
+        table.insert(
+            lines,
+            "Path: "
+            .. entity.path
+        )
+
+        table.insert(
+            lines,
+            ""
+        )
+
+        table.insert(
+            lines,
+            "HUMANOID"
+        )
+
+        table.insert(
+            lines,
+            "Existe: "
+            .. tostring(
+                entity.humanoid.exists
+            )
+        )
+
+        table.insert(
+            lines,
+            "Health: "
+            .. tostring(
+                entity.humanoid.health
+            )
+            .. " / "
+            .. tostring(
+                entity.humanoid.maxHealth
+            )
+        )
+
+        table.insert(
+            lines,
+            "WalkSpeed: "
+            .. tostring(
+                entity.humanoid.walkSpeed
+            )
+        )
+
+        table.insert(
+            lines,
+            "Estado: "
+            .. tostring(
+                entity.humanoid.state
+            )
+        )
+
+        table.insert(
+            lines,
+            ""
+        )
+
+        table.insert(
+            lines,
+            "MOVIMENTO"
+        )
+
+        table.insert(
+            lines,
+            "Root: "
+            .. tostring(
+                entity.root.exists
+            )
+        )
+
+        table.insert(
+            lines,
+            "Movimento detectado: "
+            .. tostring(
+                entity.movement.moved
+            )
+        )
+
+        table.insert(
+            lines,
+            "Distância durante amostra: "
+            .. formatNumber(
+                entity.movement.distance
+            )
+        )
+
+        if entity.nearestPatrol then
+
+            table.insert(
+                lines,
+                ""
+            )
+
+            table.insert(
+                lines,
+                "PATRULHA"
+            )
+
+            table.insert(
+                lines,
+                "Ponto próximo: "
+                .. tostring(
+                    entity.nearestPatrol.name
+                )
+            )
+
+            table.insert(
+                lines,
+                "Time do ponto: "
+                .. tostring(
+                    entity.nearestPatrol.team
+                )
+            )
+
+            table.insert(
+                lines,
+                "Distância: "
+                .. formatNumber(
+                    entity.nearestPatrol.distance
+                )
+            )
+
+            table.insert(
+                lines,
+                "Path: "
+                .. tostring(
+                    entity.nearestPatrol.path
+                )
+            )
+        end
+
+        table.insert(
+            lines,
+            ""
+        )
+
+        table.insert(
+            lines,
+            "EVIDÊNCIAS"
+        )
+
+        for _, evidence
+            in ipairs(
+                entity.evidence
+            )
+        do
+
+            table.insert(
+                lines,
+                " + "
+                .. tostring(evidence)
+            )
+        end
+
+        if #entity.negativeEvidence
+            > 0
+        then
+
+            table.insert(
+                lines,
+                ""
+            )
+
+            table.insert(
+                lines,
+                "AUSÊNCIAS / CONTRA-EVIDÊNCIAS"
+            )
+
+            for _, evidence
+                in ipairs(
+                    entity.negativeEvidence
+                )
+            do
+
+                table.insert(
+                    lines,
+                    " - "
+                    .. tostring(evidence)
+                )
+            end
+        end
+
+        table.insert(
+            lines,
+            ""
+        )
+
+        table.insert(
+            lines,
+            "ATRIBUTOS"
+        )
+
+        for key, value
+            in pairs(
+                entity.attributes
+            )
+        do
+
+            table.insert(
+                lines,
+                " "
+                .. tostring(key)
+                .. " = "
+                .. tostring(value)
+            )
+        end
+
+        table.insert(
+            lines,
+            ""
+        )
+
+        table.insert(
+            lines,
+            "FILHOS RELEVANTES"
+        )
+
+        for _, child
+            in ipairs(
+                entity.relevantChildren
+            )
+        do
+
+            table.insert(
+                lines,
+                " • "
+                .. tostring(child.name)
+                .. " ["
+                .. tostring(child.className)
+                .. "]"
+            )
+        end
+    end
+
+    return table.concat(
+        lines,
+        "\n"
+    )
+end
+
+--==============================================================--
+-- EXPORT
+--==============================================================--
+
+local function exportReport()
+
+    if not State.HasRead then
+
+        StatusLabel.Text =
+            "Faça uma leitura primeiro"
+
+        StatusLabel.TextColor3 =
+            COLORS.Yellow
+
+        return
+    end
+
+    local json =
+        generateJSON()
+
+    if not json then
+
+        StatusLabel.Text =
+            "Erro ao gerar JSON"
+
+        StatusLabel.TextColor3 =
+            COLORS.Red
+
+        return
+    end
+
+    State.GeneratedText =
+        generateReadableReport()
+
+    --==========================================================--
+    -- WRITEFILE
+    --==========================================================--
+
+    if WriteFile then
+
+        local ok =
+            pcall(
+                WriteFile,
+                CONFIG.EXPORT_FILE,
+                json
+            )
+
+        if ok then
+
+            State.LastExport =
+                CONFIG.EXPORT_FILE
+
+            StatusLabel.Text =
+                "Arquivo gerado: "
+                .. CONFIG.EXPORT_FILE
+
+            StatusLabel.TextColor3 =
+                COLORS.Green
+
+            return
+        end
+    end
+
+    --==========================================================--
+    -- CLIPBOARD FALLBACK
+    --==========================================================--
+
+    if SetClipboard then
+
+        local ok =
+            pcall(
+                SetClipboard,
+                json
+            )
+
+        if ok then
+
+            StatusLabel.Text =
+                "JSON copiado para o clipboard"
+
+            StatusLabel.TextColor3 =
+                COLORS.Green
+
+            return
+        end
+    end
+
+    StatusLabel.Text =
+        "Ambiente não permite arquivo/clipboard"
+
+    StatusLabel.TextColor3 =
+        COLORS.Yellow
+end
+
+--==============================================================--
+-- SUMMARY UI
+--==============================================================--
+
+function updateSummary()
+
+    if not State.HasRead then
+
+        SummaryText.Text =
+            "Nenhuma leitura realizada."
+
+        return
+    end
+
+    local s =
+        State.Results.summary
+
+    SummaryText.Text =
+        "ENTIDADES: "
+        .. tostring(s.total)
+        .. "\n\n"
+        .. "BOT JOGÁVEL: "
+        .. tostring(s.botJogavel)
+        .. "\n"
+        .. "PROVÁVEL BOT: "
+        .. tostring(s.provavelBot)
+        .. "\n"
+        .. "POSSÍVEL MANEQUIM: "
+        .. tostring(s.manequim)
+        .. "\n"
+        .. "INDETERMINADO: "
+        .. tostring(s.indeterminado)
+        .. "\n\n"
+        .. "ARMY: "
+        .. tostring(s.army)
+        .. "\n"
+        .. "REBELS: "
+        .. tostring(s.rebels)
+        .. "\n"
+        .. "PLAYERS: "
+        .. tostring(s.players)
+        .. "\n\n"
+        .. "PATROL POINTS: "
+        .. tostring(s.patrolPoints)
+end
+
+--==============================================================--
+-- RESULT VIEW
+--==============================================================--
+
+local function showSummary()
+
+    if not State.HasRead then
+        Viewer.Text =
+            "Nenhuma leitura realizada."
+
+        return
+    end
+
+    local report =
+        generateReadableReport()
+
+    Viewer.Text =
+        report
+end
+
+--==============================================================--
+-- RESULT SELECTION
+--==============================================================--
+
+local function showEntity(index)
+
+    local entity =
+        State.Entities[index]
+
+    if not entity then
+        return
+    end
+
+    State.SelectedIndex =
+        index
+
+    local lines = {}
+
+    table.insert(
+        lines,
+        "BOT RESEARCH • ENTITY #"
+        .. tostring(index)
+    )
+
+    table.insert(
+        lines,
+        ""
+    )
+
+    table.insert(
+        lines,
+        "Nome: "
+        .. entity.name
+    )
+
+    table.insert(
+        lines,
+        "Classificação: "
+        .. entity.classification
+    )
+
+    table.insert(
+        lines,
+        "Score: "
+        .. tostring(entity.score)
+    )
+
+    table.insert(
+        lines,
+        "Confiança: "
+        .. string.format(
+            "%.1f%%",
+            entity.confidence * 100
+        )
+    )
+
+    table.insert(
+        lines,
+        "Time: "
+        .. tostring(entity.team)
+    )
+
+    table.insert(
+        lines,
+        "Fonte: "
+        .. tostring(entity.teamSource)
+    )
+
+    table.insert(
+        lines,
+        ""
+    )
+
+    table.insert(
+        lines,
+        "PATH"
+    )
+
+    table.insert(
+        lines,
+        entity.path
+    )
+
+    table.insert(
+        lines,
+        ""
+    )
+
+    table.insert(
+        lines,
+        "HEALTH"
+    )
+
+    table.insert(
+        lines,
+        tostring(
+            entity.humanoid.health
+        )
+        .. " / "
+        .. tostring(
+            entity.humanoid.maxHealth
+        )
+    )
+
+    table.insert(
+        lines,
+        "WalkSpeed: "
+        .. tostring(
+            entity.humanoid.walkSpeed
+        )
+    )
+
+    table.insert(
+        lines,
+        "State: "
+        .. tostring(
+            entity.humanoid.state
+        )
+    )
+
+    table.insert(
+        lines,
+        ""
+    )
+
+    table.insert(
+        lines,
+        "MOVIMENTO"
+    )
+
+    table.insert(
+        lines,
+        "Detectado: "
+        .. tostring(
+            entity.movement.moved
+        )
+    )
+
+    table.insert(
+        lines,
+        "Distância: "
+        .. formatNumber(
+            entity.movement.distance
+        )
+    )
+
+    table.insert(
+        lines,
+        ""
+    )
+
+    table.insert(
+        lines,
+        "EVIDÊNCIAS"
+    )
+
+    for _, evidence
+        in ipairs(entity.evidence)
+    do
+
+        table.insert(
+            lines,
+            "+ "
+            .. tostring(evidence)
+        )
+    end
+
+    if entity.nearestPatrol then
+
+        table.insert(
+            lines,
+            ""
+        )
+
+        table.insert(
+            lines,
+            "PATRULHA"
+        )
+
+        table.insert(
+            lines,
+            "Nome: "
+            .. tostring(
+                entity.nearestPatrol.name
+            )
+        )
+
+        table.insert(
+            lines,
+            "Time: "
+            .. tostring(
+                entity.nearestPatrol.team
+            )
+        )
+
+        table.insert(
+            lines,
+            "Distância: "
+            .. formatNumber(
+                entity.nearestPatrol.distance
+            )
+        )
+    end
+
+    Viewer.Text =
+        table.concat(
+            lines,
+            "\n"
+        )
+end
+
+--==============================================================--
+-- MAIN WINDOW
 --==============================================================--
 
 local Main =
-    Instance.new("Frame")
+    newObject(
+        "Frame",
+        {
+            Size =
+                UDim2.fromScale(
+                    0.86,
+                    0.78
+                ),
 
-Main.Size =
-    UDim2.fromOffset(
-        430,
-        430
+            AnchorPoint =
+                Vector2.new(
+                    0.5,
+                    0.5
+                ),
+
+            Position =
+                UDim2.fromScale(
+                    0.5,
+                    0.5
+                ),
+
+            BackgroundColor3 =
+                COLORS.Background,
+
+            BorderSizePixel =
+                0,
+
+            Parent =
+                ScreenGui,
+        }
     )
 
-Main.Position =
-    UDim2.fromScale(
-        0.5,
-        0.5
-    )
-
-Main.AnchorPoint =
-    Vector2.new(
-        0.5,
-        0.5
-    )
-
-Main.BackgroundColor3 =
-    COLORS.Background
-
-Main.BorderSizePixel =
-    0
-
-Main.Parent =
-    Gui
-
-local corner =
-    Instance.new("UICorner")
-
-corner.CornerRadius =
-    UDim.new(
-        0,
-        14
-    )
-
-corner.Parent =
-    Main
+addCorner(Main, 14)
+addStroke(Main)
 
 --==============================================================--
 -- HEADER
 --==============================================================--
 
 local Header =
-    Instance.new("Frame")
+    newObject(
+        "Frame",
+        {
+            Size =
+                UDim2.new(
+                    1,
+                    0,
+                    0,
+                    54
+                ),
 
-Header.Size =
-    UDim2.new(
-        1,
-        0,
-        0,
-        55
+            BackgroundColor3 =
+                COLORS.Panel,
+
+            BorderSizePixel =
+                0,
+
+            Parent =
+                Main,
+        }
     )
 
-Header.BackgroundColor3 =
-    COLORS.Panel
+addCorner(Header, 14)
 
-Header.BorderSizePixel =
-    0
+newObject(
+    "TextLabel",
+    {
+        Position =
+            UDim2.fromOffset(
+                15,
+                8
+            ),
 
-Header.Parent =
-    Main
+        Size =
+            UDim2.new(
+                1,
+                -120,
+                0,
+                22
+            ),
 
-local HeaderCorner =
-    Instance.new("UICorner")
+        BackgroundTransparency =
+            1,
 
-HeaderCorner.CornerRadius =
-    UDim.new(
-        0,
-        14
+        Text =
+            "CAFEÍNA • BOT RESEARCH",
+
+        TextColor3 =
+            COLORS.Text,
+
+        Font =
+            Enum.Font.GothamBold,
+
+        TextSize =
+            15,
+
+        TextXAlignment =
+            Enum.TextXAlignment.Left,
+
+        Parent =
+            Header,
+    }
+)
+
+newObject(
+    "TextLabel",
+    {
+        Position =
+            UDim2.fromOffset(
+                15,
+                30
+            ),
+
+        Size =
+            UDim2.new(
+                1,
+                -120,
+                0,
+                15
+            ),
+
+        BackgroundTransparency =
+            1,
+
+        Text =
+            "scanner independente • análise client-visible",
+
+        TextColor3 =
+            COLORS.Sub,
+
+        Font =
+            Enum.Font.Gotham,
+
+        TextSize =
+            9,
+
+        TextXAlignment =
+            Enum.TextXAlignment.Left,
+
+        Parent =
+            Header,
+    }
+)
+
+local MinimizeButton =
+    newObject(
+        "TextButton",
+        {
+            Position =
+                UDim2.new(
+                    1,
+                    -76,
+                    0,
+                    11
+                ),
+
+            Size =
+                UDim2.fromOffset(
+                    28,
+                    28
+                ),
+
+            BackgroundColor3 =
+                COLORS.BlueDark,
+
+            BorderSizePixel =
+                0,
+
+            Text =
+                "—",
+
+            TextColor3 =
+                COLORS.Text,
+
+            Font =
+                Enum.Font.GothamBold,
+
+            TextSize =
+                16,
+
+            Parent =
+                Header,
+        }
     )
 
-HeaderCorner.Parent =
-    Header
+addCorner(MinimizeButton, 8)
 
-local Title =
-    Instance.new("TextLabel")
+local CloseButton =
+    newObject(
+        "TextButton",
+        {
+            Position =
+                UDim2.new(
+                    1,
+                    -42,
+                    0,
+                    11
+                ),
 
-Title.BackgroundTransparency =
-    1
+            Size =
+                UDim2.fromOffset(
+                    28,
+                    28
+                ),
 
-Title.Position =
-    UDim2.fromOffset(
-        14,
-        7
+            BackgroundColor3 =
+                COLORS.Red,
+
+            BorderSizePixel =
+                0,
+
+            Text =
+                "×",
+
+            TextColor3 =
+                COLORS.Text,
+
+            Font =
+                Enum.Font.GothamBold,
+
+            TextSize =
+                17,
+
+            Parent =
+                Header,
+        }
     )
 
-Title.Size =
-    UDim2.new(
-        1,
-        -100,
-        0,
-        23
-    )
-
-Title.Text =
-    "CAFEÍNA • LEITURA DE BOTS"
-
-Title.TextColor3 =
-    COLORS.Text
-
-Title.Font =
-    Enum.Font.GothamBold
-
-Title.TextSize =
-    15
-
-Title.TextXAlignment =
-    Enum.TextXAlignment.Left
-
-Title.Parent =
-    Header
-
-local Subtitle =
-    Instance.new("TextLabel")
-
-Subtitle.BackgroundTransparency =
-    1
-
-Subtitle.Position =
-    UDim2.fromOffset(
-        14,
-        30
-    )
-
-Subtitle.Size =
-    UDim2.new(
-        1,
-        -100,
-        0,
-        16
-    )
-
-Subtitle.Text =
-    "BOT READING • STANDALONE"
-
-Subtitle.TextColor3 =
-    COLORS.Sub
-
-Subtitle.Font =
-    Enum.Font.Gotham
-
-Subtitle.TextSize =
-    9
-
-Subtitle.TextXAlignment =
-    Enum.TextXAlignment.Left
-
-Subtitle.Parent =
-    Header
-
---==============================================================--
--- MINIMIZE
---==============================================================--
-
-local Minimize =
-    Instance.new("TextButton")
-
-Minimize.Size =
-    UDim2.fromOffset(
-        30,
-        30
-    )
-
-Minimize.Position =
-    UDim2.new(
-        1,
-        -75,
-        0,
-        11
-    )
-
-Minimize.BackgroundColor3 =
-    COLORS.Panel2
-
-Minimize.BorderSizePixel =
-    0
-
-Minimize.Text =
-    "—"
-
-Minimize.TextColor3 =
-    COLORS.Text
-
-Minimize.Font =
-    Enum.Font.GothamBold
-
-Minimize.TextSize =
-    17
-
-Minimize.Parent =
-    Header
-
-local MinCorner =
-    Instance.new("UICorner")
-
-MinCorner.CornerRadius =
-    UDim.new(
-        0,
-        8
-    )
-
-MinCorner.Parent =
-    Minimize
-
---==============================================================--
--- CLOSE
---==============================================================--
-
-local Close =
-    Instance.new("TextButton")
-
-Close.Size =
-    UDim2.fromOffset(
-        30,
-        30
-    )
-
-Close.Position =
-    UDim2.new(
-        1,
-        -40,
-        0,
-        11
-    )
-
-Close.BackgroundColor3 =
-    COLORS.RedDark
-
-Close.BorderSizePixel =
-    0
-
-Close.Text =
-    "×"
-
-Close.TextColor3 =
-    COLORS.Text
-
-Close.Font =
-    Enum.Font.GothamBold
-
-Close.TextSize =
-    18
-
-Close.Parent =
-    Header
-
-local CloseCorner =
-    Instance.new("UICorner")
-
-CloseCorner.CornerRadius =
-    UDim.new(
-        0,
-        8
-    )
-
-CloseCorner.Parent =
-    Close
+addCorner(CloseButton, 8)
 
 --==============================================================--
 -- STATUS
 --==============================================================--
 
-local Status =
-    Instance.new("TextLabel")
+local StatusBar =
+    newObject(
+        "Frame",
+        {
+            Position =
+                UDim2.new(
+                    0,
+                    9,
+                    0,
+                    63
+                ),
 
-Status.BackgroundColor3 =
-    COLORS.Panel
+            Size =
+                UDim2.new(
+                    1,
+                    -18,
+                    0,
+                    43
+                ),
 
-Status.BorderSizePixel =
-    0
+            BackgroundColor3 =
+                COLORS.Panel,
 
-Status.Position =
-    UDim2.fromOffset(
-        10,
-        65
+            BorderSizePixel =
+                0,
+
+            Parent =
+                Main,
+        }
     )
 
-Status.Size =
-    UDim2.new(
-        1,
-        -20,
-        0,
-        45
+addCorner(StatusBar, 9)
+
+local StatusLabel =
+    newObject(
+        "TextLabel",
+        {
+            Position =
+                UDim2.fromOffset(
+                    12,
+                    7
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -24,
+                    0,
+                    20
+                ),
+
+            BackgroundTransparency =
+                1,
+
+            Text =
+                "Pronto para leitura",
+
+            TextColor3 =
+                COLORS.Green,
+
+            Font =
+                Enum.Font.GothamBold,
+
+            TextSize =
+                10,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            Parent =
+                StatusBar,
+        }
     )
 
-Status.Text =
-    "Pronto para leitura"
+local ProgressBG =
+    newObject(
+        "Frame",
+        {
+            Position =
+                UDim2.new(
+                    0,
+                    12,
+                    1,
+                    -8
+                ),
 
-Status.TextColor3 =
-    COLORS.Green
+            Size =
+                UDim2.new(
+                    1,
+                    -24,
+                    0,
+                    4
+                ),
 
-Status.Font =
-    Enum.Font.GothamBold
+            BackgroundColor3 =
+                COLORS.Panel3,
 
-Status.TextSize =
-    11
+            BorderSizePixel =
+                0,
 
-Status.Parent =
-    Main
-
-local StatusCorner =
-    Instance.new("UICorner")
-
-StatusCorner.CornerRadius =
-    UDim.new(
-        0,
-        9
+            Parent =
+                StatusBar,
+        }
     )
 
-StatusCorner.Parent =
-    Status
+addCorner(ProgressBG, 99)
+
+local ProgressFill =
+    newObject(
+        "Frame",
+        {
+            Size =
+                UDim2.new(
+                    0,
+                    0,
+                    1,
+                    0
+                ),
+
+            BackgroundColor3 =
+                COLORS.BlueBright,
+
+            BorderSizePixel =
+                0,
+
+            Parent =
+                ProgressBG,
+        }
+    )
+
+addCorner(ProgressFill, 99)
 
 --==============================================================--
--- SUMMARY
+-- BODY
 --==============================================================--
 
-local Summary =
-    Instance.new("TextLabel")
+local Left =
+    newObject(
+        "Frame",
+        {
+            Position =
+                UDim2.new(
+                    0,
+                    9,
+                    0,
+                    113
+                ),
 
-Summary.BackgroundColor3 =
-    COLORS.Panel
+            Size =
+                UDim2.new(
+                    0.28,
+                    -5,
+                    1,
+                    -122
+                ),
 
-Summary.BorderSizePixel =
-    0
+            BackgroundColor3 =
+                COLORS.Panel,
 
-Summary.Position =
-    UDim2.fromOffset(
-        10,
-        120
+            BorderSizePixel =
+                0,
+
+            Parent =
+                Main,
+        }
     )
 
-Summary.Size =
-    UDim2.new(
-        1,
-        -20,
-        0,
-        115
+addCorner(Left, 10)
+
+local Right =
+    newObject(
+        "Frame",
+        {
+            Position =
+                UDim2.new(
+                    0.28,
+                    5,
+                    0,
+                    113
+                ),
+
+            Size =
+                UDim2.new(
+                    0.72,
+                    -14,
+                    1,
+                    -122
+                ),
+
+            BackgroundColor3 =
+                COLORS.Panel,
+
+            BorderSizePixel =
+                0,
+
+            Parent =
+                Main,
+        }
     )
 
-Summary.Text =
-    "Nenhuma leitura realizada."
-
-Summary.TextColor3 =
-    COLORS.Text
-
-Summary.Font =
-    Enum.Font.Code
-
-Summary.TextSize =
-    11
-
-Summary.TextWrapped =
-    true
-
-Summary.TextXAlignment =
-    Enum.TextXAlignment.Left
-
-Summary.TextYAlignment =
-    Enum.TextYAlignment.Top
-
-Summary.Parent =
-    Main
-
-local SummaryCorner =
-    Instance.new("UICorner")
-
-SummaryCorner.CornerRadius =
-    UDim.new(
-        0,
-        9
-    )
-
-SummaryCorner.Parent =
-    Summary
+addCorner(Right, 10)
 
 --==============================================================--
--- BUTTON CREATOR
---==============================================================--
-
-local function createButton(
-    text,
-    position,
-    size,
-    color
-)
-
-    local button =
-        Instance.new("TextButton")
-
-    button.Position =
-        position
-
-    button.Size =
-        size
-
-    button.BackgroundColor3 =
-        color
-
-    button.BorderSizePixel =
-        0
-
-    button.Text =
-        text
-
-    button.TextColor3 =
-        COLORS.Text
-
-    button.Font =
-        Enum.Font.GothamBold
-
-    button.TextSize =
-        10
-
-    button.Parent =
-        Main
-
-    local c =
-        Instance.new("UICorner")
-
-    c.CornerRadius =
-        UDim.new(
-            0,
-            8
-        )
-
-    c.Parent =
-        button
-
-    return button
-end
-
---==============================================================--
--- BUTTONS
+-- LEFT BUTTONS
 --==============================================================--
 
 local ScanButton =
-    createButton(
-        "LER BOTS",
-        UDim2.fromOffset(
-            10,
-            245
-        ),
-        UDim2.new(
-            0.48,
-            -5,
-            0,
-            40
-        ),
-        COLORS.Red
+    newObject(
+        "TextButton",
+        {
+            Position =
+                UDim2.fromOffset(
+                    8,
+                    8
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -16,
+                    0,
+                    40
+                ),
+
+            BackgroundColor3 =
+                COLORS.Blue,
+
+            BorderSizePixel =
+                0,
+
+            Text =
+                "INICIAR LEITURA",
+
+            TextColor3 =
+                COLORS.Text,
+
+            Font =
+                Enum.Font.GothamBold,
+
+            TextSize =
+                10,
+
+            Parent =
+                Left,
+        }
     )
 
-local MonitorButton =
-    createButton(
-        "MONITORAR SPAWN",
-        UDim2.new(
-            0.52,
-            5,
-            0,
-            245
-        ),
-        UDim2.new(
-            0.48,
-            -15,
-            0,
-            40
-        ),
-        COLORS.Panel2
+addCorner(ScanButton, 8)
+
+local CancelButton =
+    newObject(
+        "TextButton",
+        {
+            Position =
+                UDim2.fromOffset(
+                    8,
+                    54
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -16,
+                    0,
+                    34
+                ),
+
+            BackgroundColor3 =
+                COLORS.Panel3,
+
+            BorderSizePixel =
+                0,
+
+            Text =
+                "CANCELAR",
+
+            TextColor3 =
+                COLORS.Sub,
+
+            Font =
+                Enum.Font.GothamBold,
+
+            TextSize =
+                9,
+
+            Parent =
+                Left,
+        }
+    )
+
+addCorner(CancelButton, 8)
+
+local SummaryTitle =
+    newObject(
+        "TextLabel",
+        {
+            Position =
+                UDim2.fromOffset(
+                    11,
+                    100
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -22,
+                    0,
+                    20
+                ),
+
+            BackgroundTransparency =
+                1,
+
+            Text =
+                "RESUMO DA LEITURA",
+
+            TextColor3 =
+                COLORS.Text,
+
+            Font =
+                Enum.Font.GothamBold,
+
+            TextSize =
+                10,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            Parent =
+                Left,
+        }
+    )
+
+SummaryText =
+    newObject(
+        "TextLabel",
+        {
+            Position =
+                UDim2.fromOffset(
+                    11,
+                    125
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -22,
+                    1,
+                    -255
+                ),
+
+            BackgroundTransparency =
+                1,
+
+            Text =
+                "Nenhuma leitura realizada.",
+
+            TextColor3 =
+                COLORS.Sub,
+
+            Font =
+                Enum.Font.Code,
+
+            TextSize =
+                9,
+
+            TextWrapped =
+                true,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            TextYAlignment =
+                Enum.TextYAlignment.Top,
+
+            Parent =
+                Left,
+        }
     )
 
 local ExportButton =
-    createButton(
-        "BAIXAR ARQUIVO DE LEITURA",
-        UDim2.fromOffset(
-            10,
-            295
-        ),
-        UDim2.new(
-            1,
-            -20,
-            0,
-            42
-        ),
-        COLORS.RedDark
+    newObject(
+        "TextButton",
+        {
+            Position =
+                UDim2.new(
+                    0,
+                    8,
+                    1,
+                    -88
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -16,
+                    0,
+                    36
+                ),
+
+            BackgroundColor3 =
+                COLORS.BlueDark,
+
+            BorderSizePixel =
+                0,
+
+            Text =
+                "GERAR ARQUIVO",
+
+            TextColor3 =
+                COLORS.Text,
+
+            Font =
+                Enum.Font.GothamBold,
+
+            TextSize =
+                9,
+
+            Parent =
+                Left,
+        }
     )
+
+addCorner(ExportButton, 8)
 
 local CopyButton =
-    createButton(
-        "COPIAR JSON",
-        UDim2.fromOffset(
-            10,
-            347
-        ),
-        UDim2.new(
-            1,
-            -20,
-            0,
-            35
-        ),
-        COLORS.Panel2
+    newObject(
+        "TextButton",
+        {
+            Position =
+                UDim2.new(
+                    0,
+                    8,
+                    1,
+                    -46
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -16,
+                    0,
+                    34
+                ),
+
+            BackgroundColor3 =
+                COLORS.Panel3,
+
+            BorderSizePixel =
+                0,
+
+            Text =
+                "COPIAR LEITURA",
+
+            TextColor3 =
+                COLORS.Text,
+
+            Font =
+                Enum.Font.GothamBold,
+
+            TextSize =
+                9,
+
+            Parent =
+                Left,
+        }
     )
+
+addCorner(CopyButton, 8)
 
 --==============================================================--
--- MINI BUTTON
+-- RIGHT VIEWER
 --==============================================================--
 
-local Mini =
-    Instance.new("TextButton")
+local ViewerTitle =
+    newObject(
+        "TextLabel",
+        {
+            Position =
+                UDim2.fromOffset(
+                    11,
+                    8
+                ),
 
-Mini.Size =
-    UDim2.fromOffset(
-        55,
-        55
+            Size =
+                UDim2.new(
+                    1,
+                    -22,
+                    0,
+                    20
+                ),
+
+            BackgroundTransparency =
+                1,
+
+            Text =
+                "RESULTADO",
+
+            TextColor3 =
+                COLORS.Text,
+
+            Font =
+                Enum.Font.GothamBold,
+
+            TextSize =
+                11,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            Parent =
+                Right,
+        }
     )
 
-Mini.Position =
-    UDim2.fromScale(
-        0.5,
-        0.5
+Viewer =
+    newObject(
+        "TextBox",
+        {
+            Position =
+                UDim2.fromOffset(
+                    8,
+                    34
+                ),
+
+            Size =
+                UDim2.new(
+                    1,
+                    -16,
+                    1,
+                    -42
+                ),
+
+            BackgroundColor3 =
+                COLORS.Background,
+
+            BorderSizePixel =
+                0,
+
+            Text =
+                "Execute a leitura para visualizar os resultados.",
+
+            TextColor3 =
+                COLORS.Text,
+
+            Font =
+                Enum.Font.Code,
+
+            TextSize =
+                9,
+
+            TextWrapped =
+                false,
+
+            MultiLine =
+                true,
+
+            ClearTextOnFocus =
+                false,
+
+            TextEditable =
+                false,
+
+            TextXAlignment =
+                Enum.TextXAlignment.Left,
+
+            TextYAlignment =
+                Enum.TextYAlignment.Top,
+
+            Parent =
+                Right,
+        }
     )
 
-Mini.AnchorPoint =
-    Vector2.new(
-        0.5,
-        0.5
-    )
-
-Mini.BackgroundColor3 =
-    COLORS.Red
-
-Mini.BorderSizePixel =
-    0
-
-Mini.Text =
-    "C"
-
-Mini.TextColor3 =
-    COLORS.Text
-
-Mini.Font =
-    Enum.Font.GothamBlack
-
-Mini.TextSize =
-    20
-
-Mini.Visible =
-    false
-
-Mini.Parent =
-    Gui
-
-local MiniCorner =
-    Instance.new("UICorner")
-
-MiniCorner.CornerRadius =
-    UDim.new(
-        1,
-        0
-    )
-
-MiniCorner.Parent =
-    Mini
+addCorner(Viewer, 8)
 
 --==============================================================--
--- UPDATE SUMMARY
+-- FLOATING MINIMIZED BUTTON
 --==============================================================--
 
-local function updateSummary()
+local FloatingButton =
+    newObject(
+        "TextButton",
+        {
+            Visible =
+                false,
 
-    local total =
-        0
+            Size =
+                UDim2.fromOffset(
+                    58,
+                    58
+                ),
 
-    for _ in pairs(State.Bots) do
-        total += 1
-    end
+            AnchorPoint =
+                Vector2.new(
+                    0.5,
+                    0.5
+                ),
 
-    local patrolCount =
-        #State.PatrolPoints
+            Position =
+                UDim2.fromScale(
+                    0.5,
+                    0.5
+                ),
 
-    Summary.Text =
-        "BOTS ATIVOS: "
-        .. tostring(total)
-        .. "\n\n"
+            BackgroundColor3 =
+                COLORS.BlueDark,
 
-        .. "ARMY: "
-        .. tostring(
-            State.TeamSummary.Army
-        )
-        .. "\n"
+            BorderSizePixel =
+                0,
 
-        .. "REBELS: "
-        .. tostring(
-            State.TeamSummary.Rebels
-        )
-        .. "\n"
+            Text =
+                "BOT",
 
-        .. "TEAM INDEFINIDO: "
-        .. tostring(
-            State.TeamSummary.Unknown
-        )
-        .. "\n\n"
+            TextColor3 =
+                COLORS.Text,
 
-        .. "JOGÁVEIS: "
-        .. tostring(
-            State.ClassificationSummary.PlayableBot
-        )
-        .. "\n"
+            Font =
+                Enum.Font.GothamBlack,
 
-        .. "MANEQUINS: "
-        .. tostring(
-            State.ClassificationSummary.Mannequin
-        )
-        .. "\n"
+            TextSize =
+                12,
 
-        .. "PATROL POINTS: "
-        .. tostring(patrolCount)
+            AutoButtonColor =
+                true,
+
+            Parent =
+                ScreenGui,
+        }
+    )
+
+addCorner(
+    FloatingButton,
+    99
+)
+
+addStroke(
+    FloatingButton
+)
+
+--==============================================================--
+-- DRAGGING
+--==============================================================--
+
+local function makeFreeDraggable(object)
+
+    local dragging =
+        false
+
+    local dragInput =
+        nil
+
+    local dragStart =
+        nil
+
+    local startPosition =
+        nil
+
+    object.InputBegan:Connect(
+        function(input)
+
+            if
+                input.UserInputType
+                == Enum.UserInputType.MouseButton1
+                or
+                input.UserInputType
+                == Enum.UserInputType.Touch
+            then
+
+                dragging =
+                    true
+
+                dragStart =
+                    input.Position
+
+                startPosition =
+                    object.Position
+
+                dragInput =
+                    input
+            end
+        end
+    )
+
+    UserInputService.InputChanged:Connect(
+        function(input)
+
+            if not dragging then
+                return
+            end
+
+            if
+                input.UserInputType
+                ~= Enum.UserInputType.MouseMovement
+                and
+                input.UserInputType
+                ~= Enum.UserInputType.Touch
+            then
+                return
+            end
+
+            if
+                not dragStart
+                or
+                not startPosition
+            then
+                return
+            end
+
+            local delta =
+                input.Position
+                - dragStart
+
+            object.Position =
+                UDim2.new(
+                    startPosition.X.Scale,
+                    startPosition.X.Offset
+                    + delta.X,
+
+                    startPosition.Y.Scale,
+                    startPosition.Y.Offset
+                    + delta.Y
+                )
+        end
+    )
+
+    UserInputService.InputEnded:Connect(
+        function(input)
+
+            if
+                input.UserInputType
+                == Enum.UserInputType.MouseButton1
+                or
+                input.UserInputType
+                == Enum.UserInputType.Touch
+            then
+
+                dragging =
+                    false
+
+                dragInput =
+                    nil
+            end
+        end
+    )
 end
 
+makeFreeDraggable(
+    FloatingButton
+)
+
 --==============================================================--
--- SCAN BUTTON
+-- BUTTON EVENTS
 --==============================================================--
 
 ScanButton.Activated:Connect(
     function()
 
         if State.Scanning then
+
+            State.Cancel =
+                true
+
             return
         end
 
-        Status.Text =
-            "Lendo estrutura dos bots..."
-
-        Status.TextColor3 =
-            COLORS.Yellow
-
         task.spawn(
-            function()
-
-                local ok, err =
-                    pcall(
-                        scanBots
-                    )
-
-                if not ok then
-
-                    Status.Text =
-                        "Erro: "
-                        .. tostring(err)
-
-                    Status.TextColor3 =
-                        COLORS.Red
-
-                    return
-                end
-
-                updateSummary()
-
-                Status.Text =
-                    "Leitura concluída"
-
-                Status.TextColor3 =
-                    COLORS.Green
-            end
+            performScan
         )
     end
 )
 
---==============================================================--
--- MONITOR BUTTON
---==============================================================--
-
-MonitorButton.Activated:Connect(
+CancelButton.Activated:Connect(
     function()
 
-        if State.Monitoring then
+        if State.Scanning then
 
-            State.Monitoring =
-                false
+            State.Cancel =
+                true
 
-            disconnectAll()
+            StatusLabel.Text =
+                "Cancelando..."
 
-            MonitorButton.Text =
-                "MONITORAR SPAWN"
-
-            MonitorButton.BackgroundColor3 =
-                COLORS.Panel2
-
-            Status.Text =
-                "Monitoramento parado"
-
-            Status.TextColor3 =
+            StatusLabel.TextColor3 =
                 COLORS.Yellow
-
-            return
         end
-
-        if not BotFolder then
-            BotFolder =
-                Workspace:FindFirstChild(
-                    CONFIG.BOT_FOLDER_NAME
-                )
-        end
-
-        if not BotFolder then
-
-            Status.Text =
-                "Workspace.Soldiers não encontrado"
-
-            Status.TextColor3 =
-                COLORS.Red
-
-            return
-        end
-
-        startMonitoring()
-
-        MonitorButton.Text =
-            "MONITORAMENTO ATIVO"
-
-        MonitorButton.BackgroundColor3 =
-            COLORS.RedDark
-
-        Status.Text =
-            "Observando novos bots..."
-
-        Status.TextColor3 =
-            COLORS.Green
     end
 )
-
---==============================================================--
--- EXPORT BUTTON
---==============================================================--
 
 ExportButton.Activated:Connect(
     function()
 
-        Status.Text =
-            "Gerando arquivo JSON..."
-
-        Status.TextColor3 =
-            COLORS.Yellow
-
-        task.spawn(
-            function()
-
-                local ok, result =
-                    exportFile()
-
-                if ok then
-
-                    Status.Text =
-                        "Arquivo criado: "
-                        .. tostring(result)
-
-                    Status.TextColor3 =
-                        COLORS.Green
-
-                else
-
-                    Status.Text =
-                        "Arquivo não criado • "
-                        .. tostring(result)
-
-                    Status.TextColor3 =
-                        COLORS.Yellow
-                end
-            end
-        )
+        exportReport()
     end
 )
-
---==============================================================--
--- COPY BUTTON
---==============================================================--
 
 CopyButton.Activated:Connect(
     function()
 
-        local ok, result =
-            copyExport()
+        if not State.HasRead then
 
-        if ok then
+            StatusLabel.Text =
+                "Nenhuma leitura disponível"
 
-            Status.Text =
-                "JSON copiado para o clipboard"
-
-            Status.TextColor3 =
-                COLORS.Green
-
-        else
-
-            Status.Text =
-                tostring(result)
-
-            Status.TextColor3 =
+            StatusLabel.TextColor3 =
                 COLORS.Yellow
+
+            return
         end
+
+        local report =
+            generateReadableReport()
+
+        if SetClipboard then
+
+            local ok =
+                pcall(
+                    SetClipboard,
+                    report
+                )
+
+            if ok then
+
+                StatusLabel.Text =
+                    "Leitura copiada"
+
+                StatusLabel.TextColor3 =
+                    COLORS.Green
+
+                return
+            end
+        end
+
+        StatusLabel.Text =
+            "Clipboard indisponível"
+
+        StatusLabel.TextColor3 =
+            COLORS.Yellow
     end
 )
 
@@ -2176,30 +4058,24 @@ CopyButton.Activated:Connect(
 -- MINIMIZE
 --==============================================================--
 
-Minimize.Activated:Connect(
+MinimizeButton.Activated:Connect(
     function()
 
         Main.Visible =
             false
 
-        Mini.Visible =
-            true
-
-        State.Minimized =
+        FloatingButton.Visible =
             true
     end
 )
 
-Mini.Activated:Connect(
+FloatingButton.Activated:Connect(
     function()
-
-        Mini.Visible =
-            false
 
         Main.Visible =
             true
 
-        State.Minimized =
+        FloatingButton.Visible =
             false
     end
 )
@@ -2208,32 +4084,32 @@ Mini.Activated:Connect(
 -- CLOSE
 --==============================================================--
 
-Close.Activated:Connect(
+CloseButton.Activated:Connect(
     function()
 
-        State.Monitoring =
-            false
+        State.Cancel =
+            true
 
-        disconnectAll()
-
-        Gui:Destroy()
+        ScreenGui:Destroy()
     end
 )
 
 --==============================================================--
--- INITIALIZATION
+-- INITIALIZE
 --==============================================================--
 
-readPatrolPoints()
+State.PatrolPoints =
+    collectPatrolPoints()
 
-updateSummary()
-
-Status.Text =
-    "Standalone carregado • pronto"
-
-Status.TextColor3 =
-    COLORS.Green
+SummaryText.Text =
+    "Pronto.\n\n"
+    .. "Patrol Points encontrados: "
+    .. tostring(
+        #State.PatrolPoints
+    )
+    .. "\n\n"
+    .. "Pressione INICIAR LEITURA."
 
 print(
-    "[CAFEINA] Bot Reading Standalone carregado."
+    "[CAFEÍNA] Bot Research Scanner independente carregado."
 )
