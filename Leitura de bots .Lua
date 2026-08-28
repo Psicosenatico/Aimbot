@@ -1,484 +1,566 @@
--- CAFEÍNA • LEITURA DE BOTS
--- Interface independente da interface antiga.
--- Mantém apenas leitura de bots + exportação local/cópia.
--- Botão flutuante azul-escuro pode ser arrastado livremente.
+--==============================================================--
+-- CAFEÍNA • BOT READER
+-- INTERFACE BASE — V0
+--
+-- ESTA VERSÃO É SOMENTE A INTERFACE.
+-- Nenhuma função do menu antigo foi reutilizada.
+--
+-- Botões preparados para receber funções posteriormente:
+-- • LEITURA DE BOTS
+-- • BAIXAR ARQUIVO
+--
+-- Recursos da interface:
+-- • Janela independente
+-- • Minimizar
+-- • Fechar
+-- • Botão flutuante azul-escuro
+-- • Botão flutuante pode ser movido livremente
+-- • Janela pode ser arrastada
+-- • Compatível com mouse e toque
+--==============================================================--
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
-local function getParent()
-    if typeof(gethui) == "function" then
-        local ok, p = pcall(gethui)
-        if ok and p then return p end
-    end
-    return CoreGui
-end
-
-local Parent = getParent()
-
--- Remove SOMENTE instâncias desta nova interface.
--- Não procura nem altera a interface antiga.
-for _, v in ipairs(Parent:GetChildren()) do
-    if v.Name == "CafeinaBotReader_Standalone" then
-        pcall(function() v:Destroy() end)
-    end
-end
-
-local Gui = Instance.new("ScreenGui")
-Gui.Name = "CafeinaBotReader_Standalone"
-Gui.ResetOnSpawn = false
-Gui.IgnoreGuiInset = true
-Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-Gui.Parent = Parent
+--==============================================================--
+-- CORES
+--==============================================================--
 
 local COLORS = {
-    bg = Color3.fromRGB(12,12,15),
-    panel = Color3.fromRGB(20,20,25),
-    panel2 = Color3.fromRGB(29,29,36),
-    text = Color3.fromRGB(245,245,248),
-    sub = Color3.fromRGB(160,160,172),
-    blue = Color3.fromRGB(22,55,105),
-    blue2 = Color3.fromRGB(30,75,135),
-    green = Color3.fromRGB(65,210,118),
-    red = Color3.fromRGB(235,38,52),
-    yellow = Color3.fromRGB(242,184,57),
+    Background = Color3.fromRGB(12, 12, 16),
+    Panel = Color3.fromRGB(20, 20, 25),
+    Panel2 = Color3.fromRGB(28, 28, 35),
+    Stroke = Color3.fromRGB(55, 55, 65),
+
+    Text = Color3.fromRGB(245, 245, 248),
+    SubText = Color3.fromRGB(160, 160, 172),
+
+    Red = Color3.fromRGB(235, 38, 52),
+    RedDark = Color3.fromRGB(115, 20, 30),
+
+    -- Botão flutuante de minimizar
+    BlueDark = Color3.fromRGB(20, 55, 105),
+    BlueStroke = Color3.fromRGB(45, 105, 180),
 }
 
-local function new(class, props)
-    local x = Instance.new(class)
-    for k,v in pairs(props or {}) do x[k] = v end
-    return x
+--==============================================================--
+-- HELPERS
+--==============================================================--
+
+local function Create(className, properties)
+    local object = Instance.new(className)
+
+    for property, value in pairs(properties or {}) do
+        object[property] = value
+    end
+
+    return object
 end
 
-local function round(x, r)
-    new("UICorner", {CornerRadius=UDim.new(0,r or 8), Parent=x})
-end
-
-local function label(parent, text, size, pos, textSize)
-    return new("TextLabel", {
-        Parent=parent, BackgroundTransparency=1, Text=text,
-        Size=size, Position=pos, TextColor3=COLORS.text,
-        Font=Enum.Font.Gotham, TextSize=textSize or 10,
-        TextXAlignment=Enum.TextXAlignment.Left
+local function AddCorner(parent, radius)
+    return Create("UICorner", {
+        CornerRadius = UDim.new(0, radius or 10),
+        Parent = parent,
     })
 end
 
--- ============================================================
--- Estado
--- ============================================================
-
-local State = {
-    Records = {},
-    Army = {},
-    Rebels = {},
-    Mannequins = {},
-    Playable = {},
-    PatrolPoints = {},
-    Scanned = false,
-}
-
-local function safeFullName(x)
-    local ok, v = pcall(function() return x:GetFullName() end)
-    return ok and tostring(v) or tostring(x.Name)
+local function AddStroke(parent, color, thickness)
+    return Create("UIStroke", {
+        Color = color or COLORS.Stroke,
+        Thickness = thickness or 1,
+        Parent = parent,
+    })
 end
 
-local function attr(x, key)
-    local ok, v = pcall(function() return x:GetAttribute(key) end)
-    return ok and v or nil
-end
+--==============================================================--
+-- GUI
+--==============================================================--
 
-local function hasClass(x, class)
-    local ok, v = pcall(function() return x:IsA(class) end)
-    return ok and v
-end
+local GUI_NAME = "CafeinaBotReader_NewInterface"
 
-local function getRoot(model)
-    return model:FindFirstChild("HumanoidRootPart")
-        or model.PrimaryPart
-        or model:FindFirstChildWhichIsA("BasePart")
-end
-
-local function getHumanoid(model)
-    return model:FindFirstChildOfClass("Humanoid")
-end
-
-local function isPlayerCharacter(model)
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p.Character == model then return true end
+-- Remove SOMENTE uma instância desta nova interface.
+-- Nenhuma interface antiga é procurada ou alterada.
+pcall(function()
+    local old = CoreGui:FindFirstChild(GUI_NAME)
+    if old then
+        old:Destroy()
     end
-    return false
-end
+end)
 
--- Heurística deliberadamente conservadora:
--- 1) exclui personagens de Players;
--- 2) exige Model + Humanoid;
--- 3) procura sinais de entidade jogável;
--- 4) registra os sinais encontrados, sem afirmar que são definitivos.
-local function inspectModel(model)
-    if not hasClass(model, "Model") or isPlayerCharacter(model) then
-        return nil
-    end
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-    local hum = getHumanoid(model)
-    if not hum then return nil end
+local Gui = Create("ScreenGui", {
+    Name = GUI_NAME,
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
 
-    local root = getRoot(model)
-    local teamValue = attr(model, "Team")
-    local teamName = teamValue and tostring(teamValue) or nil
+local parented = false
 
-    if not teamName then
-        local teamObj = model:FindFirstChild("Team")
-        if teamObj and teamObj:IsA("StringValue") then
-            teamName = teamObj.Value
+pcall(function()
+    if typeof(gethui) == "function" then
+        local holder = gethui()
+        if holder then
+            Gui.Parent = holder
+            parented = true
         end
     end
+end)
 
-    local signals = {}
-    if root then table.insert(signals, "RootPart") end
-    table.insert(signals, "Humanoid")
-    if hum.Health > 0 then table.insert(signals, "Health>0") end
-    if hum.WalkSpeed > 0 then table.insert(signals, "WalkSpeed") end
-    if hum.MoveDirection.Magnitude > 0 then table.insert(signals, "MoveDirection") end
-    if model:FindFirstChildWhichIsA("Tool", true) then table.insert(signals, "Tool") end
-
-    local patrolFolder = workspace:FindFirstChild("BotPatrolPoints")
-    local hasPatrol = patrolFolder ~= nil
-    if hasPatrol then table.insert(signals, "BotPatrolPoints presente") end
-
-    local likelyMannequin =
-        model.Name:lower():find("dummy",1,true) ~= nil
-        or model.Name:lower():find("mannequin",1,true) ~= nil
-        or model.Name:lower():find("manequim",1,true) ~= nil
-
-    local likelyPlayable = not likelyMannequin and root ~= nil
-
-    local rec = {
-        name = model.Name,
-        path = safeFullName(model),
-        className = model.ClassName,
-        team = teamName,
-        health = hum.Health,
-        maxHealth = hum.MaxHealth,
-        walkSpeed = hum.WalkSpeed,
-        jumpPower = hum.JumpPower,
-        rigType = tostring(hum.RigType),
-        rootPart = root and root.Name or nil,
-        position = root and {x=root.Position.X,y=root.Position.Y,z=root.Position.Z} or nil,
-        moveDirection = {x=hum.MoveDirection.X,y=hum.MoveDirection.Y,z=hum.MoveDirection.Z},
-        attributes = {},
-        signals = signals,
-        likelyMannequin = likelyMannequin,
-        likelyPlayable = likelyPlayable,
-    }
-
+if not parented then
     pcall(function()
-        for k,v in pairs(model:GetAttributes()) do
-            rec.attributes[tostring(k)] = tostring(v)
-        end
+        Gui.Parent = CoreGui
+        parented = true
     end)
-
-    return rec
 end
 
-local function scanPatrolPoints()
-    State.PatrolPoints = {}
-    local folder = workspace:FindFirstChild("BotPatrolPoints")
-    if not folder then return end
-
-    for _, teamFolder in ipairs(folder:GetChildren()) do
-        if teamFolder:IsA("Folder") then
-            local list = {}
-            for _, p in ipairs(teamFolder:GetDescendants()) do
-                if p:IsA("BasePart") then
-                    list[#list+1] = {
-                        name=p.Name,
-                        path=safeFullName(p),
-                        teamAttribute=attr(p,"Team"),
-                        position={x=p.Position.X,y=p.Position.Y,z=p.Position.Z},
-                        anchored=p.Anchored,
-                        transparency=p.Transparency,
-                    }
-                end
-            end
-            State.PatrolPoints[teamFolder.Name] = list
-        end
-    end
+if not parented then
+    Gui.Parent = PlayerGui
 end
 
-local function scanBots()
-    State.Records, State.Army, State.Rebels, State.Mannequins, State.Playable = {}, {}, {}, {}, {}
-    scanPatrolPoints()
+--==============================================================--
+-- JANELA PRINCIPAL
+--==============================================================--
 
-    for _, inst in ipairs(workspace:GetDescendants()) do
-        local rec = inspectModel(inst)
-        if rec then
-            State.Records[#State.Records+1] = rec
+local Main = Create("Frame", {
+    Name = "Main",
+    Size = UDim2.fromScale(0.78, 0.62),
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5),
 
-            if rec.team == "Army" then
-                State.Army[#State.Army+1] = rec
-            elseif rec.team == "Rebels" then
-                State.Rebels[#State.Rebels+1] = rec
-            end
+    BackgroundColor3 = COLORS.Background,
+    BorderSizePixel = 0,
 
-            if rec.likelyMannequin then
-                State.Mannequins[#State.Mannequins+1] = rec
-            elseif rec.likelyPlayable then
-                State.Playable[#State.Playable+1] = rec
-            end
-        end
-    end
-
-    State.Scanned = true
-end
-
-local function buildExport()
-    return {
-        format = "Cafeina Bot Reader",
-        version = "Standalone-1",
-        generatedAtUnix = os.time(),
-        game = {
-            placeId = game.PlaceId,
-            gameId = game.GameId,
-            jobId = game.JobId,
-        },
-        detection = {
-            note = "Heurísticas baseadas apenas no que está visível ao cliente.",
-            bots = #State.Records,
-            army = #State.Army,
-            rebels = #State.Rebels,
-            mannequins = #State.Mannequins,
-            likelyPlayable = #State.Playable,
-        },
-        bots = State.Records,
-        patrolPoints = State.PatrolPoints,
-    }
-end
-
-local function jsonExport()
-    local ok, result = pcall(function()
-        return HttpService:JSONEncode(buildExport())
-    end)
-    return ok and result or nil
-end
-
--- ============================================================
--- Interface NOVA
--- ============================================================
-
-local Main = new("Frame", {
-    Parent=Gui, Size=UDim2.fromOffset(520,430),
-    Position=UDim2.new(.5,-260,.5,-215),
-    BackgroundColor3=COLORS.bg, BorderSizePixel=0
+    Parent = Gui,
 })
-round(Main,14)
 
-local Header = new("Frame", {
-    Parent=Main, Size=UDim2.new(1,0,0,55),
-    BackgroundColor3=COLORS.panel, BorderSizePixel=0
+AddCorner(Main, 15)
+AddStroke(Main, COLORS.Stroke, 1)
+
+--==============================================================--
+-- CABEÇALHO
+--==============================================================--
+
+local Header = Create("Frame", {
+    Name = "Header",
+
+    Size = UDim2.new(1, 0, 0, 62),
+
+    BackgroundColor3 = COLORS.Panel,
+    BorderSizePixel = 0,
+
+    Parent = Main,
 })
-round(Header,14)
 
-label(Header,"CAFEÍNA • LEITURA DE BOTS",UDim2.new(1,-95,0,24),UDim2.fromOffset(14,7),15)
-local sub=label(Header,"INTERFACE STANDALONE • SOMENTE LEITURA",UDim2.new(1,-95,0,16),UDim2.fromOffset(14,31),9)
-sub.TextColor3=COLORS.sub
+AddCorner(Header, 15)
 
-local Min = new("TextButton", {
-    Parent=Header, Size=UDim2.fromOffset(30,30),
-    Position=UDim2.new(1,-76,0,11), Text="—",
-    BackgroundColor3=COLORS.panel2, TextColor3=COLORS.text,
-    Font=Enum.Font.GothamBold, TextSize=17, BorderSizePixel=0
+Create("TextLabel", {
+    Name = "Title",
+
+    Position = UDim2.fromOffset(16, 8),
+    Size = UDim2.new(1, -105, 0, 25),
+
+    BackgroundTransparency = 1,
+
+    Text = "CAFÉÍNA • BOT READER",
+    TextColor3 = COLORS.Text,
+
+    Font = Enum.Font.GothamBold,
+    TextSize = 17,
+
+    TextXAlignment = Enum.TextXAlignment.Left,
+
+    Parent = Header,
 })
-round(Min,8)
 
-local Close = new("TextButton", {
-    Parent=Header, Size=UDim2.fromOffset(30,30),
-    Position=UDim2.new(1,-40,0,11), Text="×",
-    BackgroundColor3=COLORS.red, TextColor3=COLORS.text,
-    Font=Enum.Font.GothamBold, TextSize=18, BorderSizePixel=0
+Create("TextLabel", {
+    Name = "Subtitle",
+
+    Position = UDim2.fromOffset(16, 34),
+    Size = UDim2.new(1, -105, 0, 17),
+
+    BackgroundTransparency = 1,
+
+    Text = "INTERFACE NOVA • V0",
+
+    TextColor3 = COLORS.SubText,
+
+    Font = Enum.Font.Gotham,
+    TextSize = 10,
+
+    TextXAlignment = Enum.TextXAlignment.Left,
+
+    Parent = Header,
 })
-round(Close,8)
 
-local Status = label(Main,"Pronto para realizar a leitura.",UDim2.new(1,-28,0,28),UDim2.fromOffset(14,66),11)
-Status.TextColor3=COLORS.sub
+local MinimizeButton = Create("TextButton", {
+    Name = "Minimize",
 
-local Scan = new("TextButton", {
-    Parent=Main, Size=UDim2.new(.5,-20,0,42),
-    Position=UDim2.fromOffset(14,98), Text="REALIZAR LEITURA DE BOTS",
-    BackgroundColor3=COLORS.blue2, TextColor3=COLORS.text,
-    Font=Enum.Font.GothamBold, TextSize=10, BorderSizePixel=0
+    Position = UDim2.new(1, -78, 0, 13),
+    Size = UDim2.fromOffset(30, 30),
+
+    BackgroundColor3 = COLORS.Panel2,
+    BorderSizePixel = 0,
+
+    Text = "—",
+    TextColor3 = COLORS.Text,
+
+    Font = Enum.Font.GothamBold,
+    TextSize = 17,
+
+    Parent = Header,
 })
-round(Scan,8)
 
-local Export = new("TextButton", {
-    Parent=Main, Size=UDim2.new(.5,-20,0,42),
-    Position=UDim2.new(.5,6,0,98), Text="BAIXAR ARQUIVO DE LEITURA",
-    BackgroundColor3=COLORS.blue, TextColor3=COLORS.text,
-    Font=Enum.Font.GothamBold, TextSize=10, BorderSizePixel=0
+AddCorner(MinimizeButton, 8)
+
+local CloseButton = Create("TextButton", {
+    Name = "Close",
+
+    Position = UDim2.new(1, -42, 0, 13),
+    Size = UDim2.fromOffset(30, 30),
+
+    BackgroundColor3 = COLORS.RedDark,
+    BorderSizePixel = 0,
+
+    Text = "×",
+    TextColor3 = COLORS.Text,
+
+    Font = Enum.Font.GothamBold,
+    TextSize = 19,
+
+    Parent = Header,
 })
-round(Export,8)
 
-local Summary = label(Main,"Nenhuma leitura realizada.",UDim2.new(1,-28,0,52),UDim2.fromOffset(14,150),10)
-Summary.TextWrapped=true
-Summary.TextColor3=COLORS.text
+AddCorner(CloseButton, 8)
 
-local Viewer = new("TextBox", {
-    Parent=Main, Size=UDim2.new(1,-28,1,-222),
-    Position=UDim2.fromOffset(14,204),
-    BackgroundColor3=COLORS.panel, BorderSizePixel=0,
-    Text="", TextColor3=COLORS.text, Font=Enum.Font.Code,
-    TextSize=9, MultiLine=true, ClearTextOnFocus=false,
-    TextEditable=false, TextXAlignment=Enum.TextXAlignment.Left,
-    TextYAlignment=Enum.TextYAlignment.Top
+--==============================================================--
+-- STATUS
+--==============================================================--
+
+local Status = Create("Frame", {
+    Name = "Status",
+
+    Position = UDim2.new(0, 10, 0, 72),
+    Size = UDim2.new(1, -20, 0, 62),
+
+    BackgroundColor3 = COLORS.Panel,
+    BorderSizePixel = 0,
+
+    Parent = Main,
 })
-round(Viewer,8)
 
-local Mini = new("TextButton", {
-    Parent=Gui, Size=UDim2.fromOffset(54,54),
-    Position=UDim2.new(.5,-27,.5,-27),
-    BackgroundColor3=COLORS.blue, Text="C",
-    TextColor3=COLORS.text, Font=Enum.Font.GothamBlack,
-    TextSize=19, BorderSizePixel=0, Visible=false
+AddCorner(Status, 10)
+
+local StatusDot = Create("Frame", {
+    Size = UDim2.fromOffset(10, 10),
+    Position = UDim2.fromOffset(12, 13),
+
+    BackgroundColor3 = Color3.fromRGB(65, 210, 118),
+    BorderSizePixel = 0,
+
+    Parent = Status,
 })
-round(Mini,99)
 
--- ============================================================
--- Preview
--- ============================================================
+AddCorner(StatusDot, 99)
 
-local function preview()
-    local lines = {
-        "LEITURA DE BOTS",
-        "",
-        "Bots/Modelos detectados: "..#State.Records,
-        "Army: "..#State.Army,
-        "Rebels: "..#State.Rebels,
-        "Possíveis jogáveis: "..#State.Playable,
-        "Possíveis manequins: "..#State.Mannequins,
-        "",
-        "BOTPATROLPOINTS:"
-    }
+Create("TextLabel", {
+    Name = "StatusText",
 
-    local totalPoints=0
-    for team, list in pairs(State.PatrolPoints) do
-        lines[#lines+1] = "  "..team..": "..#list.." pontos"
-        totalPoints += #list
-    end
-    lines[#lines+1] = "Total de patrol points: "..totalPoints
-    lines[#lines+1] = ""
-    lines[#lines+1] = "ENTIDADES:"
+    Position = UDim2.fromOffset(30, 7),
+    Size = UDim2.new(1, -40, 0, 22),
 
-    for _, r in ipairs(State.Records) do
-        lines[#lines+1] =
-            "["..tostring(r.team or "?").."] "
-            ..r.name
-            .." | HP "..string.format("%.1f",r.health)
-            .."/"..string.format("%.1f",r.maxHealth)
-            .." | "..(r.likelyMannequin and "MANEQUIM" or "POSSÍVEL BOT")
-    end
+    BackgroundTransparency = 1,
 
-    Viewer.Text=table.concat(lines,"\n")
-end
+    Text = "Interface pronta",
+    TextColor3 = COLORS.Text,
 
-Scan.Activated:Connect(function()
-    Scan.Text="LENDO..."
-    Status.Text="Inspecionando modelos, Humanoids, atributos, times e BotPatrolPoints..."
-    task.spawn(function()
-        local ok, err=pcall(scanBots)
-        if ok then
-            preview()
-            Summary.Text="Leitura concluída • "..#State.Records.." entidades • "..#State.Army.." Army • "..#State.Rebels.." Rebels • "..#State.Mannequins.." possíveis manequins"
-            Status.Text="Leitura concluída."
-            Status.TextColor3=COLORS.green
-        else
-            Status.Text="Erro: "..tostring(err)
-            Status.TextColor3=COLORS.red
-        end
-        Scan.Text="REALIZAR LEITURA DE BOTS"
-    end)
-end)
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
 
-Export.Activated:Connect(function()
-    if not State.Scanned then
-        Status.Text="Faça a leitura primeiro."
-        return
-    end
+    TextXAlignment = Enum.TextXAlignment.Left,
 
-    local data=jsonExport()
-    if not data then
-        Status.Text="Não foi possível gerar JSON."
-        return
-    end
+    Parent = Status,
+})
 
-    -- Nem todo ambiente/executor possui API de arquivo.
-    local filename="Cafeina_BotReader_"..tostring(game.PlaceId)..".json"
-    local wrote=false
+Create("TextLabel", {
+    Name = "StatusDetail",
 
-    if typeof(writefile)=="function" then
-        local ok=pcall(function() writefile(filename,data) end)
-        wrote=ok
-    end
+    Position = UDim2.fromOffset(12, 32),
+    Size = UDim2.new(1, -24, 0, 18),
 
-    if not wrote and typeof(setclipboard)=="function" then
-        pcall(setclipboard,data)
-        Status.Text="JSON copiado para a área de transferência (writefile indisponível)."
-    elseif wrote then
-        Status.Text="Arquivo salvo: "..filename
-    else
-        Status.Text="Ambiente sem writefile/clipboard."
-    end
-end)
+    BackgroundTransparency = 1,
 
--- ============================================================
--- Minimizar / fechar
--- ============================================================
+    Text = "Nenhuma leitura executada",
 
-Min.Activated:Connect(function()
-    Main.Visible=false
-    Mini.Visible=true
-end)
+    TextColor3 = COLORS.SubText,
 
-Close.Activated:Connect(function()
-    pcall(function() Gui:Destroy() end)
-end)
+    Font = Enum.Font.Gotham,
+    TextSize = 9,
 
--- ============================================================
--- Arrastar livremente o botão flutuante
--- ============================================================
+    TextXAlignment = Enum.TextXAlignment.Left,
 
-do
-    local dragging=false
-    local dragStart
-    local startPos
+    Parent = Status,
+})
 
-    Mini.InputBegan:Connect(function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1
-        or input.UserInputType==Enum.UserInputType.Touch then
-            dragging=true
-            dragStart=input.Position
-            startPos=Mini.Position
+--==============================================================--
+-- CORPO
+--==============================================================--
+
+local Sidebar = Create("Frame", {
+    Name = "Sidebar",
+
+    Position = UDim2.new(0, 10, 0, 144),
+    Size = UDim2.new(0.31, -15, 1, -154),
+
+    BackgroundColor3 = COLORS.Panel,
+    BorderSizePixel = 0,
+
+    Parent = Main,
+})
+
+AddCorner(Sidebar, 10)
+
+local Content = Create("Frame", {
+    Name = "Content",
+
+    Position = UDim2.new(0.31, 5, 0, 144),
+    Size = UDim2.new(0.69, -15, 1, -154),
+
+    BackgroundColor3 = COLORS.Panel,
+    BorderSizePixel = 0,
+
+    Parent = Main,
+})
+
+AddCorner(Content, 10)
+
+--==============================================================--
+-- BOTÕES NOVOS
+--==============================================================--
+
+local ReadBotsButton = Create("TextButton", {
+    Name = "ReadBots",
+
+    Position = UDim2.fromOffset(8, 8),
+    Size = UDim2.new(1, -16, 0, 46),
+
+    BackgroundColor3 = COLORS.Red,
+    BorderSizePixel = 0,
+
+    Text = "LEITURA DE BOTS",
+
+    TextColor3 = COLORS.Text,
+
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+
+    Parent = Sidebar,
+})
+
+AddCorner(ReadBotsButton, 9)
+
+local DownloadButton = Create("TextButton", {
+    Name = "Download",
+
+    Position = UDim2.fromOffset(8, 62),
+    Size = UDim2.new(1, -16, 0, 46),
+
+    BackgroundColor3 = COLORS.RedDark,
+    BorderSizePixel = 0,
+
+    Text = "BAIXAR ARQUIVO",
+
+    TextColor3 = COLORS.Text,
+
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+
+    Parent = Sidebar,
+})
+
+AddCorner(DownloadButton, 9)
+
+--==============================================================--
+-- ÁREA DE VISUALIZAÇÃO
+--==============================================================--
+
+Create("TextLabel", {
+    Name = "ContentTitle",
+
+    Position = UDim2.fromOffset(12, 10),
+    Size = UDim2.new(1, -24, 0, 24),
+
+    BackgroundTransparency = 1,
+
+    Text = "LEITURA DE BOTS",
+
+    TextColor3 = COLORS.Text,
+
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+
+    TextXAlignment = Enum.TextXAlignment.Left,
+
+    Parent = Content,
+})
+
+local Viewer = Create("TextBox", {
+    Name = "Viewer",
+
+    Position = UDim2.fromOffset(10, 40),
+    Size = UDim2.new(1, -20, 1, -50),
+
+    BackgroundColor3 = COLORS.Background,
+    BorderSizePixel = 0,
+
+    Text = "Interface criada do zero.\n\nA função de leitura de bots será adicionada na próxima etapa.",
+
+    TextColor3 = COLORS.SubText,
+
+    Font = Enum.Font.Code,
+    TextSize = 10,
+
+    TextWrapped = false,
+    MultiLine = true,
+
+    ClearTextOnFocus = false,
+    TextEditable = false,
+
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+
+    Parent = Content,
+})
+
+AddCorner(Viewer, 8)
+
+--==============================================================--
+-- BOTÃO FLUTUANTE
+--==============================================================--
+
+local FloatingButton = Create("TextButton", {
+    Name = "FloatingMinimize",
+
+    Size = UDim2.fromOffset(58, 58),
+
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.88, 0.15),
+
+    BackgroundColor3 = COLORS.BlueDark,
+    BorderSizePixel = 0,
+
+    Text = "C",
+    TextColor3 = COLORS.Text,
+
+    Font = Enum.Font.GothamBlack,
+    TextSize = 20,
+
+    Parent = Gui,
+})
+
+AddCorner(FloatingButton, 99)
+AddStroke(FloatingButton, COLORS.BlueStroke, 2)
+
+FloatingButton.Visible = false
+
+--==============================================================--
+-- ARRASTAR
+--==============================================================--
+
+local function MakeDraggable(target, handle)
+    local dragging = false
+    local dragStart = nil
+    local startPosition = nil
+
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+            dragging = true
+            dragStart = input.Position
+            startPosition = target.Position
         end
     end)
 
     UserInputService.InputChanged:Connect(function(input)
-        if not dragging then return end
-        if input.UserInputType~=Enum.UserInputType.MouseMovement
-        and input.UserInputType~=Enum.UserInputType.Touch then return end
+        if not dragging then
+            return
+        end
 
-        local delta=input.Position-dragStart
-        Mini.Position=UDim2.new(
-            startPos.X.Scale,startPos.X.Offset+delta.X,
-            startPos.Y.Scale,startPos.Y.Offset+delta.Y
+        if input.UserInputType ~= Enum.UserInputType.Touch
+            and input.UserInputType ~= Enum.UserInputType.MouseMovement then
+            return
+        end
+
+        if not dragStart or not startPosition then
+            return
+        end
+
+        local delta = input.Position - dragStart
+
+        target.Position = UDim2.new(
+            startPosition.X.Scale,
+            startPosition.X.Offset + delta.X,
+
+            startPosition.Y.Scale,
+            startPosition.Y.Offset + delta.Y
         )
     end)
 
     UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1
-        or input.UserInputType==Enum.UserInputType.Touch then
-            dragging=false
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+            dragging = false
         end
     end)
 end
+
+MakeDraggable(Main, Header)
+MakeDraggable(FloatingButton, FloatingButton)
+
+--==============================================================--
+-- EVENTOS DA INTERFACE
+--==============================================================--
+
+MinimizeButton.Activated:Connect(function()
+    Main.Visible = false
+    FloatingButton.Visible = true
+end)
+
+FloatingButton.Activated:Connect(function()
+    FloatingButton.Visible = false
+    Main.Visible = true
+end)
+
+CloseButton.Activated:Connect(function()
+    Gui:Destroy()
+end)
+
+--==============================================================--
+-- BOTÕES DE FUNÇÃO
+--==============================================================--
+
+-- IMPORTANTE:
+-- Estes dois botões estão propositalmente SEM lógica de leitura.
+-- As funções serão adicionadas individualmente nas próximas versões.
+
+ReadBotsButton.Activated:Connect(function()
+    Viewer.Text =
+        "LEITURA DE BOTS\n\n" ..
+        "Botão preparado.\n" ..
+        "A função de leitura será adicionada separadamente."
+end)
+
+DownloadButton.Activated:Connect(function()
+    Viewer.Text =
+        "BAIXAR ARQUIVO\n\n" ..
+        "Botão preparado.\n" ..
+        "A função de geração/download será adicionada separadamente."
+end)
+
+print("[CAFEINA BOT READER] Interface nova V0 carregada.")
