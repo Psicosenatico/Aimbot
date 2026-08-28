@@ -8,7 +8,7 @@
 -- • ScrollingFrame para dados
 -- • Menu principal arrastável
 -- • Botão minimizado arrastável
--- • Identificação visual V3
+-- • Identificação visual V3 no cabeçalho
 -- • Registro de spawn/remoção/mudanças
 -- • Exportação JSON
 -- ============================================================
@@ -16,7 +16,6 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
-local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
@@ -76,7 +75,7 @@ local COLORS = {
 }
 
 -- ============================================================
--- HELPERS DE UI
+-- HELPERS
 -- ============================================================
 
 local function new(class, props)
@@ -140,6 +139,8 @@ local State = {
     Connections = {}
 }
 
+local MonitorRunning = false
+
 -- ============================================================
 -- UTILITÁRIOS
 -- ============================================================
@@ -197,7 +198,7 @@ local function clock()
 end
 
 -- ============================================================
--- EVENTO
+-- EVENTOS
 -- ============================================================
 
 local function addEvent(eventType, data)
@@ -215,21 +216,18 @@ end
 
 local function inspectTeam(model)
 
-    -- Atributo Team
     local teamAttribute = attr(model, "Team")
 
     if teamAttribute ~= nil then
         return tostring(teamAttribute), "Attribute.Team"
     end
 
-    -- StringValue Team
     local teamValue = model:FindFirstChild("Team")
 
     if teamValue and teamValue:IsA("StringValue") then
         return tostring(teamValue.Value), "StringValue.Team"
     end
 
-    -- ObjectValue Team
     if teamValue and teamValue:IsA("ObjectValue") then
         local value = teamValue.Value
 
@@ -238,7 +236,6 @@ local function inspectTeam(model)
         end
     end
 
-    -- Verificação de outros objetos relacionados à equipe
     for _, child in ipairs(model:GetChildren()) do
 
         local lower = child.Name:lower()
@@ -416,7 +413,6 @@ local function registerBot(model, reason)
         return
     end
 
-    -- Evita registrar a mesma instância várias vezes
     for _, record in ipairs(State.Records) do
         if record.instance == model then
             return
@@ -574,9 +570,7 @@ local function scanExisting()
     for _, inst in ipairs(workspace:GetDescendants()) do
 
         if inst:IsA("Model") then
-
             registerBot(inst, "EXISTING_ON_SCAN")
-
         end
     end
 
@@ -584,7 +578,7 @@ local function scanExisting()
 end
 
 -- ============================================================
--- CONEXÕES DE SPAWN / REMOÇÃO
+-- MONITORAMENTO DE SPAWN / REMOÇÃO
 -- ============================================================
 
 local function connectMonitoring()
@@ -662,7 +656,7 @@ local function monitorAttributeChanges(model, record)
 end
 
 -- ============================================================
--- ATUALIZA EQUIPE
+-- ATUALIZAÇÃO DE EQUIPE
 -- ============================================================
 
 local function updateTeamClassification()
@@ -696,10 +690,8 @@ local function updateTeamClassification()
 end
 
 -- ============================================================
--- PESQUISA
+-- INÍCIO / PARADA
 -- ============================================================
-
-local MonitorRunning = false
 
 local function startScanner()
 
@@ -828,7 +820,7 @@ local function jsonExport()
 end
 
 -- ============================================================
--- INTERFACE RESPONSIVA
+-- INTERFACE
 -- ============================================================
 
 local Main = new("Frame", {
@@ -861,18 +853,15 @@ local function updateMainSize()
     local maxHeight = math.floor(viewport.Y * 0.70)
     local maxWidth = math.floor(viewport.X * 0.92)
 
-    -- Mantém uma proporção confortável para celular deitado
     local desiredHeight = math.floor(viewport.Y * 0.68)
     local desiredWidth = math.floor(viewport.X * 0.88)
 
     local height = math.min(desiredHeight, maxHeight)
     local width = math.min(desiredWidth, maxWidth)
 
-    -- Limites mínimos para não quebrar a interface
     height = math.max(height, 300)
     width = math.max(width, 420)
 
-    -- Nunca deixa o tamanho calculado maior que a tela
     height = math.min(height, viewport.Y - 20)
     width = math.min(width, viewport.X - 20)
 
@@ -882,19 +871,21 @@ end
 updateMainSize()
 
 if workspace.CurrentCamera then
+
     workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(
         updateMainSize
     )
+
 end
 
 -- ============================================================
--- HEADER
+-- HEADER COMPACTO
 -- ============================================================
 
 local Header = new("Frame", {
     Parent = Main,
 
-    Size = UDim2.new(1, 0, 0, 72),
+    Size = UDim2.new(1, 0, 0, 61),
 
     BackgroundColor3 = COLORS.panel,
 
@@ -903,39 +894,46 @@ local Header = new("Frame", {
 
 round(Header, 16)
 
+-- ============================================================
+-- TÍTULO
+-- ============================================================
+
 local Title = label(
     Header,
     "CAFÉINA • BOT RESEARCH",
-    UDim2.new(1, -150, 0, 28),
-    UDim2.fromOffset(18, 8),
+    UDim2.new(1, -150, 0, 25),
+    UDim2.fromOffset(18, 7),
     17
 )
-
-local Subtitle = label(
-    Header,
-    "PESQUISA DE COMPORTAMENTO • SOMENTE LEITURA",
-    UDim2.new(1, -150, 0, 18),
-    UDim2.fromOffset(18, 38),
-    9
-)
-
-Subtitle.TextColor3 = COLORS.sub
 
 -- ============================================================
 -- V3
 -- ============================================================
 
 local Version = label(
-    Main,
+    Header,
     "V3",
-    UDim2.fromOffset(40, 22),
-    UDim2.new(1, -55, 1, -28),
-    10
+    UDim2.fromOffset(40, 17),
+    UDim2.fromOffset(18, 34),
+    9
 )
 
-Version.TextXAlignment = Enum.TextXAlignment.Right
-Version.TextYAlignment = Enum.TextYAlignment.Center
 Version.TextColor3 = COLORS.sub
+Version.TextXAlignment = Enum.TextXAlignment.Left
+
+-- ============================================================
+-- SUBTÍTULO
+-- ============================================================
+
+local Subtitle = label(
+    Header,
+    "PESQUISA DE COMPORTAMENTO • SOMENTE LEITURA",
+    UDim2.new(1, -190, 0, 17),
+    UDim2.fromOffset(48, 34),
+    8
+)
+
+Subtitle.TextColor3 = COLORS.sub
 
 -- ============================================================
 -- MINIMIZAR
@@ -944,9 +942,9 @@ Version.TextColor3 = COLORS.sub
 local Min = new("TextButton", {
     Parent = Header,
 
-    Size = UDim2.fromOffset(42, 38),
+    Size = UDim2.fromOffset(38, 36),
 
-    Position = UDim2.new(1, -96, 0, 17),
+    Position = UDim2.new(1, -88, 0, 12),
 
     Text = "—",
 
@@ -956,7 +954,7 @@ local Min = new("TextButton", {
 
     Font = Enum.Font.GothamBold,
 
-    TextSize = 20,
+    TextSize = 19,
 
     BorderSizePixel = 0
 })
@@ -970,9 +968,9 @@ round(Min, 10)
 local Close = new("TextButton", {
     Parent = Header,
 
-    Size = UDim2.fromOffset(42, 38),
+    Size = UDim2.fromOffset(38, 36),
 
-    Position = UDim2.new(1, -48, 0, 17),
+    Position = UDim2.new(1, -44, 0, 12),
 
     Text = "×",
 
@@ -982,7 +980,7 @@ local Close = new("TextButton", {
 
     Font = Enum.Font.GothamBold,
 
-    TextSize = 22,
+    TextSize = 21,
 
     BorderSizePixel = 0
 })
@@ -995,10 +993,10 @@ round(Close, 10)
 
 local Status = label(
     Main,
-    "Pesquisa parada.",
-    UDim2.new(1, -36, 0, 26),
-    UDim2.fromOffset(18, 82),
-    10
+    "Pesquisa parada • pressione INICIAR LEITURA DE BOTS.",
+    UDim2.new(1, -36, 0, 21),
+    UDim2.fromOffset(18, 67),
+    9
 )
 
 Status.TextColor3 = COLORS.sub
@@ -1010,9 +1008,9 @@ Status.TextColor3 = COLORS.sub
 local Scan = new("TextButton", {
     Parent = Main,
 
-    Size = UDim2.new(0.5, -25, 0, 44),
+    Size = UDim2.new(0.5, -23, 0, 40),
 
-    Position = UDim2.fromOffset(18, 112),
+    Position = UDim2.fromOffset(18, 91),
 
     Text = "INICIAR LEITURA DE BOTS",
 
@@ -1032,9 +1030,9 @@ round(Scan, 9)
 local Export = new("TextButton", {
     Parent = Main,
 
-    Size = UDim2.new(0.5, -25, 0, 44),
+    Size = UDim2.new(0.5, -23, 0, 40),
 
-    Position = UDim2.new(0.5, 7, 0, 112),
+    Position = UDim2.new(0.5, 5, 0, 91),
 
     Text = "BAIXAR ARQUIVO DE LEITURA",
 
@@ -1052,30 +1050,30 @@ local Export = new("TextButton", {
 round(Export, 9)
 
 -- ============================================================
--- RESUMO
+-- RESUMO COMPACTO
 -- ============================================================
 
 local Summary = label(
     Main,
     "Nenhuma leitura realizada.",
-    UDim2.new(1, -36, 0, 50),
-    UDim2.fromOffset(18, 164),
-    10
+    UDim2.new(1, -36, 0, 26),
+    UDim2.fromOffset(18, 137),
+    9
 )
 
 Summary.TextWrapped = true
-Summary.TextYAlignment = Enum.TextYAlignment.Top
+Summary.TextYAlignment = Enum.TextYAlignment.Center
 
 -- ============================================================
--- ÁREA ROLÁVEL
+-- ÁREA DE LEITURA
 -- ============================================================
 
 local Viewer = new("ScrollingFrame", {
     Parent = Main,
 
-    Size = UDim2.new(1, -36, 1, -230),
+    Size = UDim2.new(1, -36, 1, -177),
 
-    Position = UDim2.fromOffset(18, 220),
+    Position = UDim2.fromOffset(18, 168),
 
     BackgroundColor3 = COLORS.panel,
 
@@ -1093,7 +1091,9 @@ local Viewer = new("ScrollingFrame", {
 
     Active = true,
 
-    ClipsDescendants = true
+    ClipsDescendants = true,
+
+    ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
 })
 
 round(Viewer, 9)
@@ -1268,7 +1268,6 @@ local function updatePreview()
     lines[#lines + 1] = "════════════════════════════════"
     lines[#lines + 1] = ""
 
-    -- Mostra os eventos mais recentes primeiro
     local startIndex = math.max(
         1,
         #State.Events - 150
@@ -1333,12 +1332,11 @@ task.spawn(function()
         end
 
         task.wait(2)
-
     end
 end)
 
 -- ============================================================
--- BOTÃO INICIAR / PARAR
+-- INICIAR / PARAR
 -- ============================================================
 
 Scan.Activated:Connect(function()
@@ -1402,6 +1400,8 @@ Export.Activated:Connect(function()
 
     Status.Text =
         "Preparando arquivo de leitura..."
+
+    Status.TextColor3 = COLORS.sub
 
     local data = jsonExport()
 
@@ -1515,8 +1515,6 @@ end)
 local function makeDraggable(handle, target)
 
     local dragging = false
-    local dragInput = nil
-
     local dragStart = nil
     local startPosition = nil
 
@@ -1547,14 +1545,12 @@ local function makeDraggable(handle, target)
             local targetSize =
                 target.AbsoluteSize
 
-            -- Limites horizontais
             local minX =
                 -(viewport.X - targetSize.X) / 2
 
             local maxX =
                 (viewport.X - targetSize.X) / 2
 
-            -- Limites verticais
             local minY =
                 -(viewport.Y - targetSize.Y) / 2
 
@@ -1599,19 +1595,6 @@ local function makeDraggable(handle, target)
 
             startPosition =
                 target.Position
-
-            dragInput = input
-        end
-    end)
-
-    handle.InputChanged:Connect(function(input)
-
-        if input.UserInputType
-            == Enum.UserInputType.MouseMovement
-        or input.UserInputType
-            == Enum.UserInputType.Touch then
-
-            dragInput = input
         end
     end)
 
@@ -1637,15 +1620,15 @@ local function makeDraggable(handle, target)
             == Enum.UserInputType.Touch then
 
             dragging = false
-            dragInput = nil
         end
     end)
 end
 
--- Menu inteiro é arrastado pelo Header
-makeDraggable(Header, Main)
+-- ============================================================
+-- ARRASTAR
+-- ============================================================
 
--- Botão minimizado é arrastado independentemente
+makeDraggable(Header, Main)
 makeDraggable(Mini, Mini)
 
 -- ============================================================
