@@ -1,566 +1,554 @@
---==============================================================--
--- CAFEÍNA • BOT READER
--- INTERFACE BASE — V0
---
--- ESTA VERSÃO É SOMENTE A INTERFACE.
--- Nenhuma função do menu antigo foi reutilizada.
---
--- Botões preparados para receber funções posteriormente:
--- • LEITURA DE BOTS
--- • BAIXAR ARQUIVO
---
--- Recursos da interface:
--- • Janela independente
--- • Minimizar
--- • Fechar
--- • Botão flutuante azul-escuro
--- • Botão flutuante pode ser movido livremente
--- • Janela pode ser arrastada
--- • Compatível com mouse e toque
---==============================================================--
+--// CAFÉÍNA • BOT READER
+--// Interface criada em Luau para Roblox
 
 local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local CoreGui = game:GetService("CoreGui")
 
-local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
 
---==============================================================--
--- CORES
---==============================================================--
+--==================================================
+-- CONFIGURAÇÕES
+--==================================================
 
 local COLORS = {
-    Background = Color3.fromRGB(12, 12, 16),
-    Panel = Color3.fromRGB(20, 20, 25),
-    Panel2 = Color3.fromRGB(28, 28, 35),
-    Stroke = Color3.fromRGB(55, 55, 65),
+    Background = Color3.fromRGB(10, 9, 13),
+    Panel = Color3.fromRGB(22, 21, 27),
+    Panel2 = Color3.fromRGB(25, 24, 30),
 
-    Text = Color3.fromRGB(245, 245, 248),
-    SubText = Color3.fromRGB(160, 160, 172),
+    White = Color3.fromRGB(245, 245, 248),
+    Gray = Color3.fromRGB(165, 163, 173),
 
-    Red = Color3.fromRGB(235, 38, 52),
-    RedDark = Color3.fromRGB(115, 20, 30),
+    Red = Color3.fromRGB(242, 29, 48),
+    DarkRed = Color3.fromRGB(128, 18, 31),
 
-    -- Botão flutuante de minimizar
-    BlueDark = Color3.fromRGB(20, 55, 105),
-    BlueStroke = Color3.fromRGB(45, 105, 180),
+    Blue = Color3.fromRGB(18, 38, 75),
+    BlueHover = Color3.fromRGB(24, 52, 98),
+
+    Green = Color3.fromRGB(50, 220, 125),
 }
 
---==============================================================--
--- HELPERS
---==============================================================--
+--==================================================
+-- SCREEN GUI
+--==================================================
 
-local function Create(className, properties)
-    local object = Instance.new(className)
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "CafeinaBotReader"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = PlayerGui
 
-    for property, value in pairs(properties or {}) do
-        object[property] = value
-    end
+--==================================================
+-- FUNÇÕES AUXILIARES
+--==================================================
 
-    return object
+local function Corner(parent, radius)
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, radius)
+    corner.Parent = parent
+    return corner
 end
 
-local function AddCorner(parent, radius)
-    return Create("UICorner", {
-        CornerRadius = UDim.new(0, radius or 10),
-        Parent = parent,
-    })
+local function Stroke(parent, color, thickness, transparency)
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = color
+    stroke.Thickness = thickness or 1
+    stroke.Transparency = transparency or 0
+    stroke.Parent = parent
+    return stroke
 end
 
-local function AddStroke(parent, color, thickness)
-    return Create("UIStroke", {
-        Color = color or COLORS.Stroke,
-        Thickness = thickness or 1,
-        Parent = parent,
-    })
+local function CreateText(parent, text, size, font, color)
+    local label = Instance.new("TextLabel")
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextSize = size
+    label.Font = font
+    label.TextColor3 = color
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = parent
+    return label
 end
 
---==============================================================--
--- GUI
---==============================================================--
-
-local GUI_NAME = "CafeinaBotReader_NewInterface"
-
--- Remove SOMENTE uma instância desta nova interface.
--- Nenhuma interface antiga é procurada ou alterada.
-pcall(function()
-    local old = CoreGui:FindFirstChild(GUI_NAME)
-    if old then
-        old:Destroy()
-    end
-end)
-
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-
-local Gui = Create("ScreenGui", {
-    Name = GUI_NAME,
-    ResetOnSpawn = false,
-    IgnoreGuiInset = true,
-    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-})
-
-local parented = false
-
-pcall(function()
-    if typeof(gethui) == "function" then
-        local holder = gethui()
-        if holder then
-            Gui.Parent = holder
-            parented = true
-        end
-    end
-end)
-
-if not parented then
-    pcall(function()
-        Gui.Parent = CoreGui
-        parented = true
-    end)
-end
-
-if not parented then
-    Gui.Parent = PlayerGui
-end
-
---==============================================================--
+--==================================================
 -- JANELA PRINCIPAL
---==============================================================--
+--==================================================
 
-local Main = Create("Frame", {
-    Name = "Main",
-    Size = UDim2.fromScale(0.78, 0.62),
-    AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.5),
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+MainFrame.Position = UDim2.fromScale(0.5, 0.5)
+MainFrame.Size = UDim2.fromScale(0.92, 0.90)
+MainFrame.BackgroundColor3 = COLORS.Background
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
 
-    BackgroundColor3 = COLORS.Background,
-    BorderSizePixel = 0,
+Corner(MainFrame, 28)
+Stroke(MainFrame, Color3.fromRGB(48, 47, 55), 2, 0)
 
-    Parent = Gui,
-})
+--==================================================
+-- HEADER
+--==================================================
 
-AddCorner(Main, 15)
-AddStroke(Main, COLORS.Stroke, 1)
+local Header = Instance.new("Frame")
+Header.Name = "Header"
+Header.Size = UDim2.new(1, 0, 0.24, 0)
+Header.BackgroundColor3 = COLORS.Panel
+Header.BorderSizePixel = 0
+Header.Parent = MainFrame
 
---==============================================================--
--- CABEÇALHO
---==============================================================--
+Corner(Header, 28)
 
-local Header = Create("Frame", {
-    Name = "Header",
+local Title = CreateText(
+    Header,
+    "CAFÉÍNA • BOT READER",
+    30,
+    Enum.Font.GothamBold,
+    COLORS.White
+)
 
-    Size = UDim2.new(1, 0, 0, 62),
+Title.Position = UDim2.new(0, 42, 0, 30)
+Title.Size = UDim2.new(0.65, 0, 0, 40)
 
-    BackgroundColor3 = COLORS.Panel,
-    BorderSizePixel = 0,
+local Subtitle = CreateText(
+    Header,
+    "INTERFACE NOVA • V0",
+    19,
+    Enum.Font.Gotham,
+    COLORS.Gray
+)
 
-    Parent = Main,
-})
+Subtitle.Position = UDim2.new(0, 42, 0, 75)
+Subtitle.Size = UDim2.new(0.65, 0, 0, 30)
 
-AddCorner(Header, 15)
+--==================================================
+-- BOTÃO MINIMIZAR
+--==================================================
 
-Create("TextLabel", {
-    Name = "Title",
+local MinimizeButton = Instance.new("TextButton")
+MinimizeButton.Name = "MinimizeButton"
+MinimizeButton.AnchorPoint = Vector2.new(1, 0)
+MinimizeButton.Position = UDim2.new(1, -145, 0, 40)
+MinimizeButton.Size = UDim2.new(0, 90, 0, 90)
+MinimizeButton.BackgroundColor3 = Color3.fromRGB(28, 27, 34)
+MinimizeButton.Text = "—"
+MinimizeButton.TextColor3 = COLORS.White
+MinimizeButton.TextSize = 38
+MinimizeButton.Font = Enum.Font.GothamBold
+MinimizeButton.AutoButtonColor = false
+MinimizeButton.Parent = Header
 
-    Position = UDim2.fromOffset(16, 8),
-    Size = UDim2.new(1, -105, 0, 25),
+Corner(MinimizeButton, 24)
 
-    BackgroundTransparency = 1,
+--==================================================
+-- BOTÃO FECHAR
+--==================================================
 
-    Text = "CAFÉÍNA • BOT READER",
-    TextColor3 = COLORS.Text,
+local CloseButton = Instance.new("TextButton")
+CloseButton.Name = "CloseButton"
+CloseButton.AnchorPoint = Vector2.new(1, 0)
+CloseButton.Position = UDim2.new(1, -40, 0, 40)
+CloseButton.Size = UDim2.new(0, 90, 0, 90)
+CloseButton.BackgroundColor3 = COLORS.DarkRed
+CloseButton.Text = "×"
+CloseButton.TextColor3 = COLORS.White
+CloseButton.TextSize = 38
+CloseButton.Font = Enum.Font.GothamBold
+CloseButton.AutoButtonColor = false
+CloseButton.Parent = Header
 
-    Font = Enum.Font.GothamBold,
-    TextSize = 17,
+Corner(CloseButton, 24)
 
-    TextXAlignment = Enum.TextXAlignment.Left,
-
-    Parent = Header,
-})
-
-Create("TextLabel", {
-    Name = "Subtitle",
-
-    Position = UDim2.fromOffset(16, 34),
-    Size = UDim2.new(1, -105, 0, 17),
-
-    BackgroundTransparency = 1,
-
-    Text = "INTERFACE NOVA • V0",
-
-    TextColor3 = COLORS.SubText,
-
-    Font = Enum.Font.Gotham,
-    TextSize = 10,
-
-    TextXAlignment = Enum.TextXAlignment.Left,
-
-    Parent = Header,
-})
-
-local MinimizeButton = Create("TextButton", {
-    Name = "Minimize",
-
-    Position = UDim2.new(1, -78, 0, 13),
-    Size = UDim2.fromOffset(30, 30),
-
-    BackgroundColor3 = COLORS.Panel2,
-    BorderSizePixel = 0,
-
-    Text = "—",
-    TextColor3 = COLORS.Text,
-
-    Font = Enum.Font.GothamBold,
-    TextSize = 17,
-
-    Parent = Header,
-})
-
-AddCorner(MinimizeButton, 8)
-
-local CloseButton = Create("TextButton", {
-    Name = "Close",
-
-    Position = UDim2.new(1, -42, 0, 13),
-    Size = UDim2.fromOffset(30, 30),
-
-    BackgroundColor3 = COLORS.RedDark,
-    BorderSizePixel = 0,
-
-    Text = "×",
-    TextColor3 = COLORS.Text,
-
-    Font = Enum.Font.GothamBold,
-    TextSize = 19,
-
-    Parent = Header,
-})
-
-AddCorner(CloseButton, 8)
-
---==============================================================--
+--==================================================
 -- STATUS
---==============================================================--
-
-local Status = Create("Frame", {
-    Name = "Status",
-
-    Position = UDim2.new(0, 10, 0, 72),
-    Size = UDim2.new(1, -20, 0, 62),
-
-    BackgroundColor3 = COLORS.Panel,
-    BorderSizePixel = 0,
-
-    Parent = Main,
-})
-
-AddCorner(Status, 10)
-
-local StatusDot = Create("Frame", {
-    Size = UDim2.fromOffset(10, 10),
-    Position = UDim2.fromOffset(12, 13),
-
-    BackgroundColor3 = Color3.fromRGB(65, 210, 118),
-    BorderSizePixel = 0,
-
-    Parent = Status,
-})
-
-AddCorner(StatusDot, 99)
-
-Create("TextLabel", {
-    Name = "StatusText",
-
-    Position = UDim2.fromOffset(30, 7),
-    Size = UDim2.new(1, -40, 0, 22),
-
-    BackgroundTransparency = 1,
-
-    Text = "Interface pronta",
-    TextColor3 = COLORS.Text,
-
-    Font = Enum.Font.GothamBold,
-    TextSize = 11,
-
-    TextXAlignment = Enum.TextXAlignment.Left,
-
-    Parent = Status,
-})
-
-Create("TextLabel", {
-    Name = "StatusDetail",
-
-    Position = UDim2.fromOffset(12, 32),
-    Size = UDim2.new(1, -24, 0, 18),
-
-    BackgroundTransparency = 1,
-
-    Text = "Nenhuma leitura executada",
-
-    TextColor3 = COLORS.SubText,
-
-    Font = Enum.Font.Gotham,
-    TextSize = 9,
-
-    TextXAlignment = Enum.TextXAlignment.Left,
-
-    Parent = Status,
-})
-
---==============================================================--
--- CORPO
---==============================================================--
-
-local Sidebar = Create("Frame", {
-    Name = "Sidebar",
-
-    Position = UDim2.new(0, 10, 0, 144),
-    Size = UDim2.new(0.31, -15, 1, -154),
-
-    BackgroundColor3 = COLORS.Panel,
-    BorderSizePixel = 0,
-
-    Parent = Main,
-})
-
-AddCorner(Sidebar, 10)
-
-local Content = Create("Frame", {
-    Name = "Content",
-
-    Position = UDim2.new(0.31, 5, 0, 144),
-    Size = UDim2.new(0.69, -15, 1, -154),
-
-    BackgroundColor3 = COLORS.Panel,
-    BorderSizePixel = 0,
-
-    Parent = Main,
-})
-
-AddCorner(Content, 10)
-
---==============================================================--
--- BOTÕES NOVOS
---==============================================================--
-
-local ReadBotsButton = Create("TextButton", {
-    Name = "ReadBots",
-
-    Position = UDim2.fromOffset(8, 8),
-    Size = UDim2.new(1, -16, 0, 46),
-
-    BackgroundColor3 = COLORS.Red,
-    BorderSizePixel = 0,
-
-    Text = "LEITURA DE BOTS",
-
-    TextColor3 = COLORS.Text,
-
-    Font = Enum.Font.GothamBold,
-    TextSize = 11,
-
-    Parent = Sidebar,
-})
-
-AddCorner(ReadBotsButton, 9)
-
-local DownloadButton = Create("TextButton", {
-    Name = "Download",
-
-    Position = UDim2.fromOffset(8, 62),
-    Size = UDim2.new(1, -16, 0, 46),
-
-    BackgroundColor3 = COLORS.RedDark,
-    BorderSizePixel = 0,
-
-    Text = "BAIXAR ARQUIVO",
-
-    TextColor3 = COLORS.Text,
-
-    Font = Enum.Font.GothamBold,
-    TextSize = 10,
-
-    Parent = Sidebar,
-})
-
-AddCorner(DownloadButton, 9)
-
---==============================================================--
--- ÁREA DE VISUALIZAÇÃO
---==============================================================--
-
-Create("TextLabel", {
-    Name = "ContentTitle",
-
-    Position = UDim2.fromOffset(12, 10),
-    Size = UDim2.new(1, -24, 0, 24),
-
-    BackgroundTransparency = 1,
-
-    Text = "LEITURA DE BOTS",
-
-    TextColor3 = COLORS.Text,
-
-    Font = Enum.Font.GothamBold,
-    TextSize = 13,
-
-    TextXAlignment = Enum.TextXAlignment.Left,
-
-    Parent = Content,
-})
-
-local Viewer = Create("TextBox", {
-    Name = "Viewer",
-
-    Position = UDim2.fromOffset(10, 40),
-    Size = UDim2.new(1, -20, 1, -50),
-
-    BackgroundColor3 = COLORS.Background,
-    BorderSizePixel = 0,
-
-    Text = "Interface criada do zero.\n\nA função de leitura de bots será adicionada na próxima etapa.",
-
-    TextColor3 = COLORS.SubText,
-
-    Font = Enum.Font.Code,
-    TextSize = 10,
-
-    TextWrapped = false,
-    MultiLine = true,
-
-    ClearTextOnFocus = false,
-    TextEditable = false,
-
-    TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top,
-
-    Parent = Content,
-})
-
-AddCorner(Viewer, 8)
-
---==============================================================--
+--==================================================
+
+local StatusFrame = Instance.new("Frame")
+StatusFrame.Name = "StatusFrame"
+StatusFrame.Position = UDim2.new(0, 28, 0.27, 0)
+StatusFrame.Size = UDim2.new(1, -56, 0.25, 0)
+StatusFrame.BackgroundColor3 = COLORS.Panel
+StatusFrame.BorderSizePixel = 0
+StatusFrame.Parent = MainFrame
+
+Corner(StatusFrame, 24)
+
+local StatusDot = Instance.new("Frame")
+StatusDot.Name = "StatusDot"
+StatusDot.Position = UDim2.new(0, 32, 0, 32)
+StatusDot.Size = UDim2.new(0, 30, 0, 30)
+StatusDot.BackgroundColor3 = COLORS.Green
+StatusDot.BorderSizePixel = 0
+StatusDot.Parent = StatusFrame
+
+Corner(StatusDot, 50)
+
+local StatusTitle = CreateText(
+    StatusFrame,
+    "Interface pronta",
+    25,
+    Enum.Font.GothamBold,
+    COLORS.White
+)
+
+StatusTitle.Position = UDim2.new(0, 75, 0, 25)
+StatusTitle.Size = UDim2.new(0.7, 0, 0, 40)
+
+local StatusText = CreateText(
+    StatusFrame,
+    "Nenhuma leitura executada",
+    18,
+    Enum.Font.Gotham,
+    COLORS.Gray
+)
+
+StatusText.Position = UDim2.new(0, 32, 0, 75)
+StatusText.Size = UDim2.new(0.8, 0, 0, 30)
+
+--==================================================
+-- ÁREA DE CONTEÚDO
+--==================================================
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Name = "ContentFrame"
+ContentFrame.Position = UDim2.new(0, 28, 0.55, 0)
+ContentFrame.Size = UDim2.new(1, -56, 0.40, 0)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+--==================================================
+-- PAINEL DOS BOTÕES
+--==================================================
+
+local ButtonFrame = Instance.new("Frame")
+ButtonFrame.Name = "ButtonFrame"
+ButtonFrame.Size = UDim2.new(0.31, 0, 1, 0)
+ButtonFrame.BackgroundColor3 = COLORS.Panel
+ButtonFrame.BorderSizePixel = 0
+ButtonFrame.Parent = ContentFrame
+
+Corner(ButtonFrame, 24)
+
+local ButtonPadding = Instance.new("UIPadding")
+ButtonPadding.PaddingTop = UDim.new(0, 20)
+ButtonPadding.PaddingBottom = UDim.new(0, 20)
+ButtonPadding.PaddingLeft = UDim.new(0, 20)
+ButtonPadding.PaddingRight = UDim.new(0, 20)
+ButtonPadding.Parent = ButtonFrame
+
+local ButtonLayout = Instance.new("UIListLayout")
+ButtonLayout.FillDirection = Enum.FillDirection.Vertical
+ButtonLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+ButtonLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+ButtonLayout.Padding = UDim.new(0, 18)
+ButtonLayout.Parent = ButtonFrame
+
+--==================================================
+-- BOTÃO LEITURA DE BOTS
+--==================================================
+
+local BotsButton = Instance.new("TextButton")
+BotsButton.Name = "BotsButton"
+BotsButton.Size = UDim2.new(1, 0, 0, 110)
+BotsButton.BackgroundColor3 = COLORS.Red
+BotsButton.Text = "LEITURA DE BOTS"
+BotsButton.TextColor3 = COLORS.White
+BotsButton.TextSize = 22
+BotsButton.Font = Enum.Font.GothamBold
+BotsButton.AutoButtonColor = false
+BotsButton.Parent = ButtonFrame
+
+Corner(BotsButton, 22)
+
+--==================================================
+-- BOTÃO BAIXAR ARQUIVO
+--==================================================
+
+local DownloadButton = Instance.new("TextButton")
+DownloadButton.Name = "DownloadButton"
+DownloadButton.Size = UDim2.new(1, 0, 0, 110)
+DownloadButton.BackgroundColor3 = COLORS.DarkRed
+DownloadButton.Text = "BAIXAR ARQUIVO"
+DownloadButton.TextColor3 = COLORS.White
+DownloadButton.TextSize = 22
+DownloadButton.Font = Enum.Font.GothamBold
+DownloadButton.AutoButtonColor = false
+DownloadButton.Parent = ButtonFrame
+
+Corner(DownloadButton, 22)
+
+--==================================================
+-- PAINEL DE INFORMAÇÕES
+--==================================================
+
+local InfoFrame = Instance.new("Frame")
+InfoFrame.Name = "InfoFrame"
+InfoFrame.Position = UDim2.new(0.33, 0, 0, 0)
+InfoFrame.Size = UDim2.new(0.67, 0, 1, 0)
+InfoFrame.BackgroundColor3 = COLORS.Panel
+InfoFrame.BorderSizePixel = 0
+InfoFrame.Parent = ContentFrame
+
+Corner(InfoFrame, 24)
+
+local InfoTitle = CreateText(
+    InfoFrame,
+    "LEITURA DE BOTS",
+    25,
+    Enum.Font.GothamBold,
+    COLORS.White
+)
+
+InfoTitle.Position = UDim2.new(0, 30, 0, 30)
+InfoTitle.Size = UDim2.new(1, -60, 0, 40)
+
+local InfoBox = Instance.new("Frame")
+InfoBox.Position = UDim2.new(0, 25, 0.34, 0)
+InfoBox.Size = UDim2.new(1, -50, 0.55, 0)
+InfoBox.BackgroundColor3 = Color3.fromRGB(10, 9, 13)
+InfoBox.BorderSizePixel = 0
+InfoBox.Parent = InfoFrame
+
+Corner(InfoBox, 20)
+
+local InfoText = CreateText(
+    InfoBox,
+    "BAIXAR ARQUIVO\n\nBotão preparado.\nA função de geração/download será adicionada separadamente.",
+    18,
+    Enum.Font.Code,
+    COLORS.Gray
+)
+
+InfoText.Position = UDim2.new(0, 15, 0, 10)
+InfoText.Size = UDim2.new(1, -30, 1, -20)
+InfoText.TextWrapped = true
+InfoText.TextYAlignment = Enum.TextYAlignment.Top
+
+--==================================================
 -- BOTÃO FLUTUANTE
---==============================================================--
+--==================================================
 
-local FloatingButton = Create("TextButton", {
-    Name = "FloatingMinimize",
-
-    Size = UDim2.fromOffset(58, 58),
-
-    AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.88, 0.15),
-
-    BackgroundColor3 = COLORS.BlueDark,
-    BorderSizePixel = 0,
-
-    Text = "C",
-    TextColor3 = COLORS.Text,
-
-    Font = Enum.Font.GothamBlack,
-    TextSize = 20,
-
-    Parent = Gui,
-})
-
-AddCorner(FloatingButton, 99)
-AddStroke(FloatingButton, COLORS.BlueStroke, 2)
-
+local FloatingButton = Instance.new("TextButton")
+FloatingButton.Name = "FloatingButton"
+FloatingButton.AnchorPoint = Vector2.new(0.5, 0.5)
+FloatingButton.Position = UDim2.fromScale(0.85, 0.80)
+FloatingButton.Size = UDim2.new(0, 75, 0, 75)
+FloatingButton.BackgroundColor3 = COLORS.Blue
+FloatingButton.Text = "☰"
+FloatingButton.TextColor3 = COLORS.White
+FloatingButton.TextSize = 30
+FloatingButton.Font = Enum.Font.GothamBold
+FloatingButton.AutoButtonColor = false
 FloatingButton.Visible = false
+FloatingButton.ZIndex = 100
+FloatingButton.Parent = ScreenGui
 
---==============================================================--
--- ARRASTAR
---==============================================================--
+Corner(FloatingButton, 22)
+Stroke(FloatingButton, Color3.fromRGB(45, 70, 120), 2, 0.2)
 
-local function MakeDraggable(target, handle)
-    local dragging = false
-    local dragStart = nil
-    local startPosition = nil
+--==================================================
+-- EFEITO DOS BOTÕES
+--==================================================
 
-    handle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch
-            or input.UserInputType == Enum.UserInputType.MouseButton1 then
-
-            dragging = true
-            dragStart = input.Position
-            startPosition = target.Position
-        end
+local function ButtonHover(button, normalColor, hoverColor)
+    button.MouseEnter:Connect(function()
+        TweenService:Create(
+            button,
+            TweenInfo.new(0.15),
+            {BackgroundColor3 = hoverColor}
+        ):Play()
     end)
 
-    UserInputService.InputChanged:Connect(function(input)
-        if not dragging then
-            return
-        end
-
-        if input.UserInputType ~= Enum.UserInputType.Touch
-            and input.UserInputType ~= Enum.UserInputType.MouseMovement then
-            return
-        end
-
-        if not dragStart or not startPosition then
-            return
-        end
-
-        local delta = input.Position - dragStart
-
-        target.Position = UDim2.new(
-            startPosition.X.Scale,
-            startPosition.X.Offset + delta.X,
-
-            startPosition.Y.Scale,
-            startPosition.Y.Offset + delta.Y
-        )
-    end)
-
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch
-            or input.UserInputType == Enum.UserInputType.MouseButton1 then
-
-            dragging = false
-        end
+    button.MouseLeave:Connect(function()
+        TweenService:Create(
+            button,
+            TweenInfo.new(0.15),
+            {BackgroundColor3 = normalColor}
+        ):Play()
     end)
 end
 
-MakeDraggable(Main, Header)
-MakeDraggable(FloatingButton, FloatingButton)
+ButtonHover(
+    BotsButton,
+    COLORS.Red,
+    Color3.fromRGB(255, 45, 62)
+)
 
---==============================================================--
--- EVENTOS DA INTERFACE
---==============================================================--
+ButtonHover(
+    DownloadButton,
+    COLORS.DarkRed,
+    Color3.fromRGB(155, 22, 38)
+)
 
-MinimizeButton.Activated:Connect(function()
-    Main.Visible = false
+ButtonHover(
+    MinimizeButton,
+    Color3.fromRGB(28, 27, 34),
+    Color3.fromRGB(38, 37, 45)
+)
+
+ButtonHover(
+    CloseButton,
+    COLORS.DarkRed,
+    Color3.fromRGB(155, 22, 38)
+)
+
+ButtonHover(
+    FloatingButton,
+    COLORS.Blue,
+    COLORS.BlueHover
+)
+
+--==================================================
+-- MINIMIZAR
+--==================================================
+
+local function Minimize()
+    MainFrame.Visible = false
     FloatingButton.Visible = true
-end)
 
-FloatingButton.Activated:Connect(function()
+    FloatingButton.Size = UDim2.new(0, 0, 0, 0)
+
+    TweenService:Create(
+        FloatingButton,
+        TweenInfo.new(
+            0.25,
+            Enum.EasingStyle.Back,
+            Enum.EasingDirection.Out
+        ),
+        {
+            Size = UDim2.new(0, 75, 0, 75)
+        }
+    ):Play()
+end
+
+MinimizeButton.MouseButton1Click:Connect(Minimize)
+
+--==================================================
+-- ABRIR NOVAMENTE
+--==================================================
+
+FloatingButton.MouseButton1Click:Connect(function()
+
     FloatingButton.Visible = false
-    Main.Visible = true
+    MainFrame.Visible = true
+
+    MainFrame.Size = UDim2.fromScale(0.85, 0.83)
+
+    TweenService:Create(
+        MainFrame,
+        TweenInfo.new(
+            0.25,
+            Enum.EasingStyle.Back,
+            Enum.EasingDirection.Out
+        ),
+        {
+            Size = UDim2.fromScale(0.92, 0.90)
+        }
+    ):Play()
+
 end)
 
-CloseButton.Activated:Connect(function()
-    Gui:Destroy()
+--==================================================
+-- BOTÃO FECHAR
+--==================================================
+
+CloseButton.MouseButton1Click:Connect(function()
+
+    local tween = TweenService:Create(
+        MainFrame,
+        TweenInfo.new(0.2),
+        {
+            Size = UDim2.fromScale(0, 0),
+            BackgroundTransparency = 1
+        }
+    )
+
+    tween:Play()
+
+    tween.Completed:Connect(function()
+        ScreenGui:Destroy()
+    end)
+
 end)
 
---==============================================================--
--- BOTÕES DE FUNÇÃO
---==============================================================--
+--==================================================
+-- BOTÃO LEITURA DE BOTS
+--==================================================
 
--- IMPORTANTE:
--- Estes dois botões estão propositalmente SEM lógica de leitura.
--- As funções serão adicionadas individualmente nas próximas versões.
+BotsButton.MouseButton1Click:Connect(function()
 
-ReadBotsButton.Activated:Connect(function()
-    Viewer.Text =
-        "LEITURA DE BOTS\n\n" ..
-        "Botão preparado.\n" ..
-        "A função de leitura será adicionada separadamente."
+    StatusTitle.Text = "Leitura iniciada"
+    StatusText.Text = "Processando informações..."
+
+    task.wait(1)
+
+    StatusTitle.Text = "Interface pronta"
+    StatusText.Text = "Leitura executada."
+
 end)
 
-DownloadButton.Activated:Connect(function()
-    Viewer.Text =
-        "BAIXAR ARQUIVO\n\n" ..
-        "Botão preparado.\n" ..
-        "A função de geração/download será adicionada separadamente."
+--==================================================
+-- BOTÃO DOWNLOAD
+--==================================================
+
+DownloadButton.MouseButton1Click:Connect(function()
+
+    StatusTitle.Text = "Download"
+    StatusText.Text = "Função de download ainda não configurada."
+
 end)
 
-print("[CAFEINA BOT READER] Interface nova V0 carregada.")
+--==================================================
+-- ARRASTAR BOTÃO FLUTUANTE
+--==================================================
+
+local dragging = false
+local dragStart
+local startPosition
+
+FloatingButton.InputBegan:Connect(function(input)
+
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        dragging = true
+        dragStart = input.Position
+        startPosition = FloatingButton.Position
+
+        input.Changed:Connect(function()
+
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+
+        end)
+    end
+
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+
+    if not dragging then
+        return
+    end
+
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement
+        and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
+    end
+
+    local delta = input.Position - dragStart
+
+    local newX = startPosition.X.Offset + delta.X
+    local newY = startPosition.Y.Offset + delta.Y
+
+    FloatingButton.Position = UDim2.new(
+        startPosition.X.Scale,
+        newX,
+        startPosition.Y.Scale,
+        newY
+    )
+
+end)
