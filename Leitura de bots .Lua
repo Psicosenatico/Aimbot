@@ -2,21 +2,26 @@
 -- CAFEÍNA • BOT RESEARCH V3
 -- SOMENTE LEITURA / COLETA PASSIVA
 --
--- V3 — AJUSTE DE INTERFACE
+-- V3:
 -- • Interface responsiva
 -- • Altura máxima de 70% da tela
 -- • ScrollingFrame para dados
 -- • Menu principal arrastável
 -- • Botão minimizado arrastável
--- • Identificação visual V3
+-- • Identificação visual V3 no cabeçalho
 -- • Registro de spawn/remoção/mudanças
 -- • Exportação JSON
--- • INDICADOR DE TAMANHO ESTIMADO DA LEITURA
--- • LIMITE RECOMENDADO DE 450 MB
--- • TAMANHO DO ÚLTIMO ARQUIVO EXPORTADO
+-- • MONITORAMENTO VISUAL DO TAMANHO DA LEITURA
 --
--- IMPORTANTE:
--- O MOTOR DE COLETA NÃO FOI ALTERADO.
+-- NOVO:
+-- • Tamanho estimado do JSON em MB
+-- • Atualização periódica do tamanho
+-- • Limite visual configurável
+-- • Aviso em 80% do limite
+-- • Tamanho final real após exportação
+--
+-- OBS:
+-- A medição de tamanho NÃO interrompe a coleta.
 -- ============================================================
 
 local Players = game:GetService("Players")
@@ -81,19 +86,7 @@ local COLORS = {
 }
 
 -- ============================================================
--- CONFIGURAÇÃO DO INDICADOR
--- ============================================================
-
-local SIZE_LIMIT_MB = 450
-local SIZE_WARNING_MB = 350
-
-local LastEstimatedBytes = 0
-local LastExportedBytes = 0
-
-local SizeCalculationBusy = false
-
--- ============================================================
--- HELPERS DE UI
+-- HELPERS
 -- ============================================================
 
 local function new(class, props)
@@ -157,6 +150,25 @@ local State = {
     Connections = {}
 }
 
+local MonitorRunning = false
+
+-- ============================================================
+-- CONTROLE DE TAMANHO DA LEITURA
+-- SOMENTE VISUAL / INTERFACE
+-- ============================================================
+
+local ReadingSizeMB = 0
+local ReadingSizeBytes = 0
+
+-- Limite visual de referência.
+-- NÃO interrompe a leitura automaticamente.
+local ReadingLimitMB = 500
+
+-- Intervalo entre atualizações da estimativa.
+-- Não é a frequência da coleta.
+local LastSizeUpdate = 0
+local SizeUpdateInterval = 5
+
 -- ============================================================
 -- UTILITÁRIOS
 -- ============================================================
@@ -214,7 +226,7 @@ local function clock()
 end
 
 -- ============================================================
--- EVENTO
+-- EVENTOS
 -- ============================================================
 
 local function addEvent(eventType, data)
@@ -588,14 +600,13 @@ local function scanExisting()
         if inst:IsA("Model") then
             registerBot(inst, "EXISTING_ON_SCAN")
         end
-
     end
 
     scanPatrolPoints()
 end
 
 -- ============================================================
--- CONEXÕES
+-- MONITORAMENTO DE SPAWN / REMOÇÃO
 -- ============================================================
 
 local function connectMonitoring()
@@ -673,7 +684,7 @@ local function monitorAttributeChanges(model, record)
 end
 
 -- ============================================================
--- ATUALIZA EQUIPE
+-- ATUALIZAÇÃO DE EQUIPE
 -- ============================================================
 
 local function updateTeamClassification()
@@ -707,10 +718,8 @@ local function updateTeamClassification()
 end
 
 -- ============================================================
--- PESQUISA
+-- INÍCIO / PARADA
 -- ============================================================
-
-local MonitorRunning = false
 
 local function startScanner()
 
@@ -724,6 +733,10 @@ local function startScanner()
     State.Scanned = false
     State.StartUnix = unix()
     State.EndUnix = nil
+
+    ReadingSizeMB = 0
+    ReadingSizeBytes = 0
+    LastSizeUpdate = 0
 
     scanExisting()
     connectMonitoring()
@@ -752,6 +765,16 @@ local function stopScanner()
     end
 
     State.Connections = {}
+
+    -- Atualiza o tamanho final estimado ao parar
+    local ok, json = pcall(function()
+        return HttpService:JSONEncode(buildExport())
+    end)
+
+    if ok and json then
+        ReadingSizeBytes = #json
+        ReadingSizeMB = ReadingSizeBytes / (1024 * 1024)
+    end
 
     addEvent("SCAN_STOPPED", {})
 end
@@ -825,6 +848,42 @@ local function buildExport()
     }
 end
 
+-- ============================================================
+-- CÁLCULO DO TAMANHO DA LEITURA
+-- ============================================================
+
+local function calculateReadingSize()
+
+    local ok, json = pcall(function()
+        return HttpService:JSONEncode(buildExport())
+    end)
+
+    if not ok or not json then
+        return 0, 0
+    end
+
+    local bytes = #json
+    local megabytes = bytes / (1024 * 1024)
+
+    return bytes, megabytes
+end
+
+local function updateReadingSize()
+
+    local now = clock()
+
+    if now - LastSizeUpdate < SizeUpdateInterval then
+        return
+    end
+
+    LastSizeUpdate = now
+
+    local bytes, megabytes = calculateReadingSize()
+
+    ReadingSizeBytes = bytes
+    ReadingSizeMB = megabytes
+end
+
 local function jsonExport()
 
     local ok, result = pcall(function()
@@ -839,42 +898,7 @@ local function jsonExport()
 end
 
 -- ============================================================
--- TAMANHO
--- ============================================================
-
-local function formatBytes(bytes)
-
-    if not bytes or bytes <= 0 then
-        return "0 B"
-    end
-
-    local kb = bytes / 1024
-    local mb = kb / 1024
-
-    if mb >= 1 then
-        return string.format("%.2f MB", mb)
-    elseif kb >= 1 then
-        return string.format("%.1f KB", kb)
-    else
-        return string.format("%d B", bytes)
-    end
-end
-
-local function getSizeColor(bytes)
-
-    local mb = bytes / (1024 * 1024)
-
-    if mb >= SIZE_LIMIT_MB then
-        return COLORS.red
-    elseif mb >= SIZE_WARNING_MB then
-        return COLORS.yellow
-    else
-        return COLORS.green
-    end
-end
-
--- ============================================================
--- INTERFACE RESPONSIVA
+-- INTERFACE
 -- ============================================================
 
 local Main = new("Frame", {
@@ -889,6 +913,10 @@ local Main = new("Frame", {
 })
 
 round(Main, 16)
+
+-- ============================================================
+-- RESPONSIVIDADE
+-- ============================================================
 
 local function updateMainSize()
 
@@ -921,19 +949,21 @@ end
 updateMainSize()
 
 if workspace.CurrentCamera then
+
     workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(
         updateMainSize
     )
+
 end
 
 -- ============================================================
--- HEADER
+-- HEADER COMPACTO
 -- ============================================================
 
 local Header = new("Frame", {
     Parent = Main,
 
-    Size = UDim2.new(1, 0, 0, 72),
+    Size = UDim2.new(1, 0, 0, 61),
 
     BackgroundColor3 = COLORS.panel,
 
@@ -942,64 +972,46 @@ local Header = new("Frame", {
 
 round(Header, 16)
 
+-- ============================================================
+-- TÍTULO
+-- ============================================================
+
 local Title = label(
     Header,
     "CAFÉINA • BOT RESEARCH",
-    UDim2.new(1, -150, 0, 28),
-    UDim2.fromOffset(18, 8),
+    UDim2.new(1, -150, 0, 25),
+    UDim2.fromOffset(18, 7),
     17
 )
-
-local Subtitle = label(
-    Header,
-    "PESQUISA DE COMPORTAMENTO • SOMENTE LEITURA",
-    UDim2.new(1, -150, 0, 18),
-    UDim2.fromOffset(18, 38),
-    9
-)
-
-Subtitle.TextColor3 = COLORS.sub
 
 -- ============================================================
 -- V3
 -- ============================================================
 
 local Version = label(
-    Main,
+    Header,
     "V3",
-    UDim2.fromOffset(40, 22),
-    UDim2.new(1, -55, 0, 76),
-    10
+    UDim2.fromOffset(40, 17),
+    UDim2.fromOffset(18, 34),
+    9
 )
 
-Version.TextXAlignment = Enum.TextXAlignment.Right
-Version.TextYAlignment = Enum.TextYAlignment.Center
 Version.TextColor3 = COLORS.sub
+Version.TextXAlignment = Enum.TextXAlignment.Left
 
 -- ============================================================
--- TAMANHO DA LEITURA
+-- SUBTÍTULO
 -- ============================================================
 
-local SizeInfo = label(
-    Main,
-    "Tamanho estimado: 0 B",
-    UDim2.new(0.5, -25, 0, 20),
-    UDim2.fromOffset(18, 76),
-    9
+local Subtitle = label(
+    Header,
+    "PESQUISA DE COMPORTAMENTO • SOMENTE LEITURA",
+    UDim2.new(1, -190, 0, 17),
+    UDim2.fromOffset(48, 34),
+    8
 )
 
-SizeInfo.TextColor3 = COLORS.green
-
-local LimitInfo = label(
-    Main,
-    "Limite recomendado: 450 MB",
-    UDim2.new(0.5, -25, 0, 20),
-    UDim2.new(0.5, 7, 0, 76),
-    9
-)
-
-LimitInfo.TextXAlignment = Enum.TextXAlignment.Right
-LimitInfo.TextColor3 = COLORS.sub
+Subtitle.TextColor3 = COLORS.sub
 
 -- ============================================================
 -- MINIMIZAR
@@ -1008,9 +1020,9 @@ LimitInfo.TextColor3 = COLORS.sub
 local Min = new("TextButton", {
     Parent = Header,
 
-    Size = UDim2.fromOffset(42, 38),
+    Size = UDim2.fromOffset(38, 36),
 
-    Position = UDim2.new(1, -96, 0, 17),
+    Position = UDim2.new(1, -88, 0, 12),
 
     Text = "—",
 
@@ -1020,7 +1032,7 @@ local Min = new("TextButton", {
 
     Font = Enum.Font.GothamBold,
 
-    TextSize = 20,
+    TextSize = 19,
 
     BorderSizePixel = 0
 })
@@ -1034,9 +1046,9 @@ round(Min, 10)
 local Close = new("TextButton", {
     Parent = Header,
 
-    Size = UDim2.fromOffset(42, 38),
+    Size = UDim2.fromOffset(38, 36),
 
-    Position = UDim2.new(1, -48, 0, 17),
+    Position = UDim2.new(1, -44, 0, 12),
 
     Text = "×",
 
@@ -1046,7 +1058,7 @@ local Close = new("TextButton", {
 
     Font = Enum.Font.GothamBold,
 
-    TextSize = 22,
+    TextSize = 21,
 
     BorderSizePixel = 0
 })
@@ -1059,10 +1071,10 @@ round(Close, 10)
 
 local Status = label(
     Main,
-    "Pesquisa parada.",
-    UDim2.new(1, -36, 0, 26),
-    UDim2.fromOffset(18, 100),
-    10
+    "Pesquisa parada • pressione INICIAR LEITURA DE BOTS.",
+    UDim2.new(1, -36, 0, 21),
+    UDim2.fromOffset(18, 67),
+    9
 )
 
 Status.TextColor3 = COLORS.sub
@@ -1074,9 +1086,9 @@ Status.TextColor3 = COLORS.sub
 local Scan = new("TextButton", {
     Parent = Main,
 
-    Size = UDim2.new(0.5, -25, 0, 44),
+    Size = UDim2.new(0.5, -23, 0, 40),
 
-    Position = UDim2.fromOffset(18, 130),
+    Position = UDim2.fromOffset(18, 91),
 
     Text = "INICIAR LEITURA DE BOTS",
 
@@ -1096,9 +1108,9 @@ round(Scan, 9)
 local Export = new("TextButton", {
     Parent = Main,
 
-    Size = UDim2.new(0.5, -25, 0, 44),
+    Size = UDim2.new(0.5, -23, 0, 40),
 
-    Position = UDim2.new(0.5, 7, 0, 130),
+    Position = UDim2.new(0.5, 5, 0, 91),
 
     Text = "BAIXAR ARQUIVO DE LEITURA",
 
@@ -1116,44 +1128,45 @@ local Export = new("TextButton", {
 round(Export, 9)
 
 -- ============================================================
--- ÚLTIMO ARQUIVO EXPORTADO
--- ============================================================
-
-local ExportInfo = label(
-    Main,
-    "Último arquivo exportado: nenhum",
-    UDim2.new(1, -36, 0, 20),
-    UDim2.fromOffset(18, 178),
-    9
-)
-
-ExportInfo.TextColor3 = COLORS.sub
-
--- ============================================================
--- RESUMO
+-- RESUMO COMPACTO
 -- ============================================================
 
 local Summary = label(
     Main,
     "Nenhuma leitura realizada.",
-    UDim2.new(1, -36, 0, 42),
-    UDim2.fromOffset(18, 198),
-    10
+    UDim2.new(1, -36, 0, 20),
+    UDim2.fromOffset(18, 137),
+    9
 )
 
 Summary.TextWrapped = true
-Summary.TextYAlignment = Enum.TextYAlignment.Top
+Summary.TextYAlignment = Enum.TextYAlignment.Center
 
 -- ============================================================
--- ÁREA ROLÁVEL
+-- TAMANHO DA LEITURA
+-- ============================================================
+
+local SizeStatus = label(
+    Main,
+    "Tamanho estimado: 0.00 MB / 500 MB",
+    UDim2.new(1, -36, 0, 20),
+    UDim2.fromOffset(18, 157),
+    9
+)
+
+SizeStatus.TextColor3 = COLORS.sub
+SizeStatus.TextYAlignment = Enum.TextYAlignment.Center
+
+-- ============================================================
+-- ÁREA DE LEITURA
 -- ============================================================
 
 local Viewer = new("ScrollingFrame", {
     Parent = Main,
 
-    Size = UDim2.new(1, -36, 1, -264),
+    Size = UDim2.new(1, -36, 1, -197),
 
-    Position = UDim2.fromOffset(18, 244),
+    Position = UDim2.fromOffset(18, 188),
 
     BackgroundColor3 = COLORS.panel,
 
@@ -1171,7 +1184,9 @@ local Viewer = new("ScrollingFrame", {
 
     Active = true,
 
-    ClipsDescendants = true
+    ClipsDescendants = true,
+
+    ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
 })
 
 round(Viewer, 9)
@@ -1233,71 +1248,6 @@ local Mini = new("TextButton", {
 round(Mini, 99)
 
 -- ============================================================
--- ATUALIZA INDICADOR DE TAMANHO
--- ============================================================
-
-local function updateSizeIndicator()
-
-    if SizeCalculationBusy then
-        return
-    end
-
-    SizeCalculationBusy = true
-
-    task.spawn(function()
-
-        local ok, data = pcall(function()
-            return jsonExport()
-        end)
-
-        if ok and data then
-
-            LastEstimatedBytes = #data
-
-            local mb = LastEstimatedBytes / (1024 * 1024)
-
-            SizeInfo.Text =
-                "Tamanho estimado: "
-                .. formatBytes(LastEstimatedBytes)
-
-            SizeInfo.TextColor3 =
-                getSizeColor(LastEstimatedBytes)
-
-            if mb >= SIZE_LIMIT_MB then
-
-                LimitInfo.Text =
-                    "⚠ LIMITE RECOMENDADO ATINGIDO"
-
-                LimitInfo.TextColor3 =
-                    COLORS.red
-
-            elseif mb >= SIZE_WARNING_MB then
-
-                LimitInfo.Text =
-                    "⚠ Aproximando do limite • "
-                    .. SIZE_LIMIT_MB
-                    .. " MB"
-
-                LimitInfo.TextColor3 =
-                    COLORS.yellow
-
-            else
-
-                LimitInfo.Text =
-                    "Limite recomendado: "
-                    .. SIZE_LIMIT_MB
-                    .. " MB"
-
-                LimitInfo.TextColor3 =
-                    COLORS.sub
-            end
-        end
-
-        SizeCalculationBusy = false
-    end)
-end
-
--- ============================================================
 -- PREVIEW
 -- ============================================================
 
@@ -1321,6 +1271,14 @@ local function updatePreview()
     lines[#lines + 1] =
         "SNAPSHOTS: "
         .. tostring(#State.Snapshots)
+
+    lines[#lines + 1] =
+        "TAMANHO ESTIMADO: "
+        .. string.format("%.2f MB", ReadingSizeMB)
+
+    lines[#lines + 1] =
+        "LIMITE VISUAL: "
+        .. string.format("%.0f MB", ReadingLimitMB)
 
     lines[#lines + 1] =
         "BOTS REGISTRADOS: "
@@ -1467,21 +1425,48 @@ task.spawn(function()
         if MonitorRunning then
 
             pcall(function()
+
+                -- Coleta original da V3
                 monitorBots()
                 updateTeamClassification()
+
+                -- Atualização visual do tamanho
+                updateReadingSize()
+
+                SizeStatus.Text =
+                    string.format(
+                        "Tamanho estimado: %.2f MB / %.0f MB",
+                        ReadingSizeMB,
+                        ReadingLimitMB
+                    )
+
+                if ReadingSizeMB >= ReadingLimitMB then
+
+                    SizeStatus.TextColor3 = COLORS.red
+
+                elseif ReadingSizeMB >= ReadingLimitMB * 0.80 then
+
+                    SizeStatus.TextColor3 = COLORS.yellow
+
+                else
+
+                    SizeStatus.TextColor3 = COLORS.sub
+
+                end
+
                 updatePreview()
-                updateSizeIndicator()
+
             end)
 
         end
 
+        -- Mantido em 2 segundos, igual à V3 original.
         task.wait(2)
-
     end
 end)
 
 -- ============================================================
--- BOTÃO INICIAR / PARAR
+-- INICIAR / PARAR
 -- ============================================================
 
 Scan.Activated:Connect(function()
@@ -1523,7 +1508,22 @@ Scan.Activated:Connect(function()
 
         Status.TextColor3 = COLORS.sub
 
-        updateSizeIndicator()
+        SizeStatus.Text =
+            string.format(
+                "Tamanho final estimado: %.2f MB / %.0f MB",
+                ReadingSizeMB,
+                ReadingLimitMB
+            )
+
+        if ReadingSizeMB >= ReadingLimitMB then
+            SizeStatus.TextColor3 = COLORS.red
+
+        elseif ReadingSizeMB >= ReadingLimitMB * 0.80 then
+            SizeStatus.TextColor3 = COLORS.yellow
+
+        else
+            SizeStatus.TextColor3 = COLORS.sub
+        end
     end
 
     updatePreview()
@@ -1548,6 +1548,8 @@ Export.Activated:Connect(function()
     Status.Text =
         "Preparando arquivo de leitura..."
 
+    Status.TextColor3 = COLORS.sub
+
     local data = jsonExport()
 
     if not data then
@@ -1560,9 +1562,31 @@ Export.Activated:Connect(function()
         return
     end
 
-    local byteSize = #data
+    -- ========================================================
+    -- TAMANHO REAL DO JSON
+    -- ========================================================
 
-    LastExportedBytes = byteSize
+    ReadingSizeBytes = #data
+    ReadingSizeMB = ReadingSizeBytes / (1024 * 1024)
+
+    SizeStatus.Text =
+        string.format(
+            "Tamanho real do arquivo: %.2f MB",
+            ReadingSizeMB
+        )
+
+    if ReadingSizeMB >= ReadingLimitMB then
+
+        SizeStatus.TextColor3 = COLORS.red
+
+    elseif ReadingSizeMB >= ReadingLimitMB * 0.80 then
+
+        SizeStatus.TextColor3 = COLORS.yellow
+
+    else
+
+        SizeStatus.TextColor3 = COLORS.green
+    end
 
     local filename =
         "Cafeina_BotResearch_V3_"
@@ -1573,6 +1597,10 @@ Export.Activated:Connect(function()
 
     local wrote = false
 
+    -- ========================================================
+    -- WRITEFILE
+    -- ========================================================
+
     if typeof(writefile) == "function" then
 
         local ok = pcall(function()
@@ -1582,20 +1610,19 @@ Export.Activated:Connect(function()
         wrote = ok
     end
 
+    -- ========================================================
+    -- RESULTADO
+    -- ========================================================
+
     if wrote then
 
         Status.Text =
             "✓ ARQUIVO EXPORTADO COM SUCESSO: "
             .. filename
+            .. " | "
+            .. string.format("%.2f MB", ReadingSizeMB)
 
         Status.TextColor3 = COLORS.green
-
-        ExportInfo.Text =
-            "Último arquivo exportado: "
-            .. formatBytes(byteSize)
-
-        ExportInfo.TextColor3 =
-            getSizeColor(byteSize)
 
     elseif typeof(setclipboard) == "function" then
 
@@ -1607,15 +1634,10 @@ Export.Activated:Connect(function()
 
             Status.Text =
                 "✓ DADOS EXPORTADOS PARA A ÁREA DE TRANSFERÊNCIA."
+                .. " | "
+                .. string.format("%.2f MB", ReadingSizeMB)
 
             Status.TextColor3 = COLORS.green
-
-            ExportInfo.Text =
-                "Última exportação/copiar: "
-                .. formatBytes(byteSize)
-
-            ExportInfo.TextColor3 =
-                getSizeColor(byteSize)
 
         else
 
@@ -1632,6 +1654,8 @@ Export.Activated:Connect(function()
 
         Status.TextColor3 = COLORS.yellow
     end
+
+    updatePreview()
 end)
 
 -- ============================================================
@@ -1779,6 +1803,10 @@ local function makeDraggable(handle, target)
     end)
 end
 
+-- ============================================================
+-- ARRASTAR
+-- ============================================================
+
 makeDraggable(Header, Main)
 makeDraggable(Mini, Mini)
 
@@ -1793,12 +1821,16 @@ Mini.Position =
     UDim2.fromScale(0.5, 0.5)
 
 updatePreview()
-updateSizeIndicator()
 
 Status.Text =
     "Pesquisa parada • pressione INICIAR LEITURA DE BOTS."
 
 Status.TextColor3 = COLORS.sub
+
+SizeStatus.Text =
+    "Tamanho estimado: 0.00 MB / 500 MB"
+
+SizeStatus.TextColor3 = COLORS.sub
 
 -- ============================================================
 -- FIM DA V3
