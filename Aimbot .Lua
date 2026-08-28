@@ -1,7 +1,21 @@
 --========================================================
 -- TEST CONTROL PANEL
 -- ESP + AIMBOT
--- TEAM CHECK POR PLAYER.TEAM / BOT ATTRIBUTE "Team"
+--
+-- PLAYERS:
+--     Player.Team
+--
+-- BOTS:
+--     Workspace.Soldiers
+--     Model.Team
+--     BotPatrolPoints = FONTE AUXILIAR
+--
+-- ESP:
+--     MEU TIME = VERDE
+--     INIMIGO  = VERMELHO
+--
+-- O Highlight original do jogo NÃO é utilizado
+-- para definir a cor do nosso ESP.
 --========================================================
 
 local Players = game:GetService("Players")
@@ -56,11 +70,9 @@ local WHITE =
 local FOV_COLOR =
     Color3.fromRGB(80, 170, 255)
 
--- ALIADOS SEMPRE VERDE
 local ALLY_COLOR =
     Color3.fromRGB(0, 255, 90)
 
--- INIMIGOS SEMPRE VERMELHO
 local ENEMY_COLOR =
     Color3.fromRGB(255, 60, 60)
 
@@ -85,9 +97,7 @@ end
 
 local function DisconnectAll()
 
-    for _, connection in ipairs(
-        Connections
-    ) do
+    for _, connection in ipairs(Connections) do
 
         if connection
         and connection.Connected then
@@ -112,7 +122,7 @@ end
 
 
 --========================================================
--- NORMALIZAR TIME
+-- NORMALIZAÇÃO DO TIME
 --========================================================
 
 local function NormalizeTeamName(name)
@@ -157,6 +167,8 @@ end
 
 --========================================================
 -- TIME DO PLAYER
+--
+-- NÃO ALTERAR A LÓGICA DOS PLAYERS.
 --========================================================
 
 local function GetPlayerTeam(player)
@@ -165,23 +177,17 @@ local function GetPlayerTeam(player)
         return nil
     end
 
-    local team =
-        player.Team
+    if player.Team then
 
-    if team then
-
-        local normalized =
+        local team =
             NormalizeTeamName(
-                team.Name
+                player.Team.Name
             )
 
-        if normalized then
-            return normalized
+        if team then
+            return team
         end
     end
-
-    -- Fallback para jogos que armazenam
-    -- o time como atributo no Player.
 
     local attributeTeam =
         player:GetAttribute("Team")
@@ -201,27 +207,159 @@ end
 
 
 --========================================================
--- TIME DE UM BOT
+-- BOT PATROL POINTS
 --
--- IMPORTANTE:
--- Não procuramos mais Army/Rebels pelo caminho.
--- O próprio Model precisa possuir:
+-- AUXILIAR SOMENTE.
 --
--- Model
--- ├─ Humanoid
--- ├─ HumanoidRootPart
--- └─ Attribute Team = Army/Rebels
+-- NÃO usamos:
+--
+-- BotPatrolPoints.Army = Army
+-- BotPatrolPoints.Rebels = Rebels
+--
+-- porque o arquivo mostra que existem pontos cujo
+-- atributo Team não corresponde ao nome da pasta.
+--
+-- Procuramos somente o atributo Team dos pontos.
 --========================================================
 
-local function GetBotTeam(character)
+local function GetPatrolPoints()
+
+    local result = {}
+
+    local patrolFolder =
+        workspace:FindFirstChild(
+            "BotPatrolPoints"
+        )
+
+    if not patrolFolder then
+        return result
+    end
+
+
+    for _, object in ipairs(
+        patrolFolder:GetDescendants()
+    ) do
+
+        if object:IsA("BasePart") then
+
+            local team =
+                NormalizeTeamName(
+                    object:GetAttribute("Team")
+                )
+
+            if team then
+
+                table.insert(
+                    result,
+                    {
+                        Part = object,
+                        Team = team
+                    }
+                )
+
+            end
+        end
+    end
+
+
+    return result
+end
+
+
+--========================================================
+-- TIME AUXILIAR PELO PATROL POINT
+--
+-- Usado somente quando o bot não possui Team válido.
+--
+-- O ponto mais próximo é utilizado.
+--========================================================
+
+local function GetPatrolPointTeam(character)
 
     if not character then
         return nil
     end
 
-    if not character:IsA("Model") then
+    local root =
+        character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    if not root then
         return nil
     end
+
+    local patrolPoints =
+        GetPatrolPoints()
+
+    if #patrolPoints == 0 then
+        return nil
+    end
+
+
+    local closestTeam = nil
+    local closestDistance = math.huge
+
+
+    for _, data in ipairs(
+        patrolPoints
+    ) do
+
+        local part = data.Part
+
+        if part
+        and part.Parent then
+
+            local distance =
+                (
+                    root.Position -
+                    part.Position
+                ).Magnitude
+
+
+            if distance <
+                closestDistance then
+
+                closestDistance =
+                    distance
+
+                closestTeam =
+                    data.Team
+            end
+        end
+    end
+
+
+    return closestTeam
+end
+
+
+--========================================================
+-- DETECTAR BOT
+--
+-- PRINCIPALMENTE Workspace.Soldiers
+--========================================================
+
+local function IsBot(character)
+
+    if not character then
+        return false
+    end
+
+    if not character:IsA("Model") then
+        return false
+    end
+
+
+    -- Nunca classificar Player como bot.
+
+    if Players:GetPlayerFromCharacter(
+        character
+    ) then
+
+        return false
+    end
+
 
     local humanoid =
         character:FindFirstChildOfClass(
@@ -233,67 +371,73 @@ local function GetBotTeam(character)
             "HumanoidRootPart"
         )
 
+
     if not humanoid
     or not root then
 
-        return nil
+        return false
     end
 
-    local team =
-        character:GetAttribute(
-            "Team"
-        )
 
-    return NormalizeTeamName(
-        team
-    )
+    if humanoid.Health <= 0 then
+        return false
+    end
+
+
+    return true
 end
 
 
 --========================================================
--- TIME DO PERSONAGEM
+-- LOCALIZAR TIME DO BOT
+--
+-- 1. Model.Team
+-- 2. atributo Team
+-- 3. Patrol Point auxiliar
 --========================================================
 
-local function GetCharacterTeam(character)
+local function GetBotTeam(character)
 
-    if not character then
-        return nil
-    end
-
-    if not character:IsA("Model") then
+    if not IsBot(character) then
         return nil
     end
 
 
     --====================================================
-    -- PLAYER
+    -- FONTE PRINCIPAL
     --====================================================
 
-    local player =
-        Players:GetPlayerFromCharacter(
-            character
+    local botTeam =
+        character:GetAttribute(
+            "Team"
         )
 
-    if player then
 
-        return GetPlayerTeam(
-            player
+    local normalized =
+        NormalizeTeamName(
+            botTeam
         )
+
+
+    if normalized then
+
+        return normalized
+
     end
 
 
     --====================================================
-    -- BOT / NPC
+    -- FONTE AUXILIAR
     --====================================================
 
-    return GetBotTeam(
+    return GetPatrolPointTeam(
         character
     )
 end
 
 
 --========================================================
--- VERIFICAR PERSONAGEM
+-- PERSONAGEM VÁLIDO
 --========================================================
 
 local function IsValidCharacter(character)
@@ -335,54 +479,20 @@ end
 
 
 --========================================================
--- VERIFICAR SE É BOT VÁLIDO
+-- TIME DO PERSONAGEM
+--
+-- PLAYER:
+--     Player.Team
+--
+-- BOT:
+--     Model.Team
+--     Patrol Point auxiliar
 --========================================================
 
-local function IsValidBot(character)
+local function GetCharacterTeam(character)
 
-    if not IsValidCharacter(
-        character
-    ) then
-
-        return false
-    end
-
-
-    -- Se é Player, não é bot.
-    if Players:GetPlayerFromCharacter(
-        character
-    ) then
-
-        return false
-    end
-
-
-    -- O bot precisa possuir Team válido.
-    local botTeam =
-        GetBotTeam(
-            character
-        )
-
-    if not botTeam then
-        return false
-    end
-
-
-    return true
-end
-
-
---========================================================
--- PERSONAGEM VÁLIDO PARA ESP
---========================================================
-
-local function IsESPCharacter(character)
-
-    if not IsValidCharacter(
-        character
-    ) then
-
-        return false
+    if not character then
+        return nil
     end
 
 
@@ -397,7 +507,10 @@ local function IsESPCharacter(character)
     --====================================================
 
     if player then
-        return true
+
+        return GetPlayerTeam(
+            player
+        )
     end
 
 
@@ -405,7 +518,48 @@ local function IsESPCharacter(character)
     -- BOT
     --====================================================
 
-    return IsValidBot(
+    if IsBot(character) then
+
+        return GetBotTeam(
+            character
+        )
+    end
+
+
+    return nil
+end
+
+
+--========================================================
+-- PERSONAGEM DE ESP
+--========================================================
+
+local function IsESPCharacter(character)
+
+    if not IsValidCharacter(
+        character
+    ) then
+
+        return false
+    end
+
+
+    -- Player
+
+    local player =
+        Players:GetPlayerFromCharacter(
+            character
+        )
+
+
+    if player then
+        return true
+    end
+
+
+    -- Bot
+
+    return IsBot(
         character
     )
 end
@@ -498,21 +652,8 @@ local function IsEnemyCharacter(character)
     end
 
 
-    -- Team Check ON:
-    -- somente o time diferente do nosso
-    -- é inimigo.
-
-    if TeamCheckEnabled then
-
-        return characterTeam ~=
-            localTeam
-    end
-
-
-    -- Quando Team Check está OFF,
-    -- personagens válidos dos dois times
-    -- continuam podendo receber ESP.
-    return true
+    return characterTeam ~=
+        localTeam
 end
 
 
@@ -537,7 +678,7 @@ end
 
 
 --========================================================
--- CRIAR / ATUALIZAR ESP
+-- APLICAR ESP
 --========================================================
 
 local function ApplyESP(
@@ -595,13 +736,7 @@ local function ApplyESP(
 
 
     --====================================================
-    -- IMPORTANTE:
-    --
-    -- Não usamos a cor do Highlight original.
-    -- Não usamos aura.
-    -- Não usamos cor do nome.
-    --
-    -- Nosso Highlight é independente.
+    -- NOSSA COR É INDEPENDENTE DO JOGO
     --====================================================
 
     if enemy then
@@ -624,27 +759,97 @@ end
 
 
 --========================================================
--- ENCONTRAR TODOS OS MODELS DE PERSONAGEM
+-- PEGAR TODOS OS BOTS
 --
--- Não procuramos mais somente em:
--- Workspace.Army
--- Workspace.Rebels
+-- PRIMEIRA FONTE:
+--     Workspace.Soldiers
 --
--- Procuramos Models no Workspace inteiro.
+-- FALLBACK:
+--     Workspace inteiro
 --
--- Isso permite encontrar:
--- Workspace.Soldiers.Goober9000
--- Workspace.Soldiers.ChunkyOtter8
--- etc.
---
--- Parts de BotPatrolPoints são ignoradas porque
--- não possuem Humanoid + HumanoidRootPart.
+-- BotPatrolPoints NÃO é usado para transformar Parts
+-- em bots. Ele apenas auxilia a descobrir o Team.
+--========================================================
+
+local function GetAllBots()
+
+    local bots = {}
+    local added = {}
+
+
+    --====================================================
+    -- SOLDIERS
+    --====================================================
+
+    local soldiers =
+        workspace:FindFirstChild(
+            "Soldiers"
+        )
+
+
+    if soldiers then
+
+        for _, object in ipairs(
+            soldiers:GetDescendants()
+        ) do
+
+            if object:IsA("Model")
+            and not added[object] then
+
+                if IsBot(object) then
+
+                    added[object] =
+                        true
+
+                    table.insert(
+                        bots,
+                        object
+                    )
+                end
+            end
+        end
+    end
+
+
+    --====================================================
+    -- FALLBACK GLOBAL
+    --
+    -- Caso algum bot esteja fora de Soldiers.
+    --====================================================
+
+    for _, object in ipairs(
+        workspace:GetDescendants()
+    ) do
+
+        if object:IsA("Model")
+        and not added[object] then
+
+            if IsBot(object) then
+
+                added[object] =
+                    true
+
+                table.insert(
+                    bots,
+                    object
+                )
+            end
+        end
+    end
+
+
+    return bots
+end
+
+
+--========================================================
+-- TODOS OS PERSONAGENS
 --========================================================
 
 local function GetAllCharacters()
 
     local characters = {}
-    local alreadyAdded = {}
+    local added = {}
 
 
     --====================================================
@@ -660,69 +865,37 @@ local function GetAllCharacters()
 
 
         if character
-        and not alreadyAdded[
-            character
-        ] then
+        and not added[character]
+        and IsValidCharacter(character) then
 
-            if IsValidCharacter(
+            added[character] =
+                true
+
+            table.insert(
+                characters,
                 character
-            ) then
-
-                alreadyAdded[
-                    character
-                ] = true
-
-                table.insert(
-                    characters,
-                    character
-                )
-            end
+            )
         end
     end
 
 
     --====================================================
-    -- BOTS / NPCS
+    -- BOTS
     --====================================================
 
-    for _, object in ipairs(
-        workspace:GetDescendants()
+    for _, bot in ipairs(
+        GetAllBots()
     ) do
 
-        if object:IsA("Model") then
+        if not added[bot] then
 
-            if not alreadyAdded[
-                object
-            ] then
+            added[bot] =
+                true
 
-                -- Não adicionar Players aqui.
-                local player =
-                    Players:GetPlayerFromCharacter(
-                        object
-                    )
-
-
-                if not player then
-
-                    -- O modelo precisa possuir
-                    -- Humanoid + RootPart + Team.
-
-                    if IsValidBot(
-                        object
-                    ) then
-
-                        alreadyAdded[
-                            object
-                        ] = true
-
-
-                        table.insert(
-                            characters,
-                            object
-                        )
-                    end
-                end
-            end
+            table.insert(
+                characters,
+                bot
+            )
         end
     end
 
@@ -732,7 +905,7 @@ end
 
 
 --========================================================
--- LIMPAR TODOS OS ESP
+-- LIMPAR ESP
 --========================================================
 
 local function ClearAllESP()
@@ -786,7 +959,7 @@ local function UpdateESP()
                 character
             ) then
 
-                -- INIMIGO = VERMELHO
+                -- INIMIGO
 
                 ApplyESP(
                     character,
@@ -798,7 +971,7 @@ local function UpdateESP()
                 character
             ) then
 
-                -- ALIADO = VERDE
+                -- ALIADO
 
                 ApplyESP(
                     character,
@@ -817,7 +990,7 @@ local function UpdateESP()
 
 
     --====================================================
-    -- LIMPAR PERSONAGENS QUE SUMIRAM
+    -- REMOVER ESP DE OBJETOS QUE SUMIRAM
     --====================================================
 
     for character, highlight in pairs(
@@ -889,12 +1062,8 @@ local function GetTarget()
         GetScreenCenter()
 
 
-    local bestTarget =
-        nil
-
-
-    local closestWorldDistance =
-        math.huge
+    local bestTarget = nil
+    local closestWorldDistance = math.huge
 
 
     for _, character in ipairs(
@@ -929,8 +1098,7 @@ local function GetTarget()
 
                     local worldDistance =
                         (
-                            camera.CFrame.Position
-                            -
+                            camera.CFrame.Position -
                             root.Position
                         ).Magnitude
 
@@ -1215,9 +1383,7 @@ local function CreateMinimizedButton()
 
 
     --====================================================
-    -- ESCUDO
-    --
-    -- Usamos TextLabel separado e centralizado.
+    -- ESCUDO CENTRALIZADO
     --====================================================
 
     local Shield =
@@ -1230,8 +1396,8 @@ local function CreateMinimizedButton()
 
     Shield.Size =
         UDim2.fromScale(
-            0.70,
-            0.70
+            0.62,
+            0.62
         )
 
 
@@ -1251,6 +1417,10 @@ local function CreateMinimizedButton()
 
     Shield.BackgroundTransparency =
         1
+
+
+    Shield.BorderSizePixel =
+        0
 
 
     Shield.Text =
@@ -1298,9 +1468,7 @@ local function CreateMinimizedButton()
     -- DRAG
     --====================================================
 
-    local dragging =
-        false
-
+    local dragging = false
     local dragStart
     local startPosition
 
@@ -1314,8 +1482,7 @@ local function CreateMinimizedButton()
             or input.UserInputType ==
                 Enum.UserInputType.Touch then
 
-                dragging =
-                    true
+                dragging = true
 
                 dragStart =
                     input.Position
@@ -1373,8 +1540,7 @@ local function CreateMinimizedButton()
             or input.UserInputType ==
                 Enum.UserInputType.Touch then
 
-                dragging =
-                    false
+                dragging = false
             end
         end
     )
@@ -1590,8 +1756,7 @@ local function CreateSlider(
         slider
 
 
-    local dragging =
-        false
+    local dragging = false
 
 
     local function SetValue(x)
@@ -1655,8 +1820,7 @@ local function CreateSlider(
             or input.UserInputType ==
                 Enum.UserInputType.Touch then
 
-                dragging =
-                    true
+                dragging = true
 
                 SetValue(
                     input.Position.X
@@ -1697,8 +1861,7 @@ local function CreateSlider(
             or input.UserInputType ==
                 Enum.UserInputType.Touch then
 
-                dragging =
-                    false
+                dragging = false
             end
         end
     )
@@ -1711,15 +1874,10 @@ end
 
 local function ResetScript()
 
-    AimbotEnabled =
-        false
-
-    ESPEnabled =
-        false
-
+    AimbotEnabled = false
+    ESPEnabled = false
 
     ClearAllESP()
-
 
     DisconnectAll()
 
@@ -1728,16 +1886,12 @@ local function ResetScript()
 
         Gui:Destroy()
 
-        Gui =
-            nil
+        Gui = nil
     end
 
 
-    FOVCircle =
-        nil
-
-    MinimizedButton =
-        nil
+    FOVCircle = nil
+    MinimizedButton = nil
 
 
     task.wait(0.15)
@@ -1758,8 +1912,7 @@ function CreateInterface()
     end
 
 
-    CreatingInterface =
-        true
+    CreatingInterface = true
 
 
     --====================================================
@@ -1996,12 +2149,10 @@ function CreateInterface()
 
 
     --====================================================
-    -- DRAG
+    -- DRAG DO MENU
     --====================================================
 
-    local dragging =
-        false
-
+    local dragging = false
     local dragStart
     local startPosition
 
@@ -2015,8 +2166,7 @@ function CreateInterface()
             or input.UserInputType ==
                 Enum.UserInputType.Touch then
 
-                dragging =
-                    true
+                dragging = true
 
                 dragStart =
                     input.Position
@@ -2074,8 +2224,7 @@ function CreateInterface()
             or input.UserInputType ==
                 Enum.UserInputType.Touch then
 
-                dragging =
-                    false
+                dragging = false
             end
         end
     )
@@ -2220,7 +2369,7 @@ function CreateInterface()
 
 
     --====================================================
-    -- FOV LABEL
+    -- FOV
     --====================================================
 
     local FOVLabel =
@@ -2271,10 +2420,6 @@ function CreateInterface()
     FOVLabel.Parent =
         Main
 
-
-    --====================================================
-    -- FOV SLIDER
-    --====================================================
 
     CreateSlider(
         Main,
@@ -2353,10 +2498,6 @@ function CreateInterface()
         Main
 
 
-    --====================================================
-    -- DISTÂNCIA SLIDER
-    --====================================================
-
     CreateSlider(
         Main,
         285,
@@ -2404,7 +2545,7 @@ function CreateInterface()
 
 
     --====================================================
-    -- INFORMAÇÃO
+    -- INFORMAÇÕES
     --====================================================
 
     local Info =
@@ -2433,7 +2574,7 @@ function CreateInterface()
 
     Info.Text =
         "Aliados: VERDE  |  Inimigos: VERMELHO\n" ..
-        "Players: Player.Team  |  Bots: Model.Team"
+        "Players: Player.Team  |  Bots: Soldiers.Model.Team"
 
 
     Info.TextColor3 =
@@ -2457,7 +2598,7 @@ function CreateInterface()
 
 
     --====================================================
-    -- MINIMIZADO
+    -- FLUTUANTE
     --====================================================
 
     CreateMinimizedButton()
@@ -2556,15 +2697,9 @@ function CreateInterface()
 
 
     --====================================================
-    -- NOVOS OBJETOS
+    -- NOVOS MODELS
     --
-    -- Não tentamos classificar imediatamente qualquer
-    -- Model. O UpdateESP fará a validação completa:
-    --
-    -- Model
-    -- + Humanoid
-    -- + HumanoidRootPart
-    -- + Team válido
+    -- Isso permite detectar bots recém-gerados.
     --====================================================
 
     Connect(
@@ -2581,12 +2716,10 @@ function CreateInterface()
                 task.defer(
                     function()
 
-                        task.wait(
-                            0.05
-                        )
-
+                        task.wait(0.05)
 
                         UpdateESP()
+
                     end
                 )
             end
@@ -2635,7 +2768,7 @@ function CreateInterface()
 
 
     --====================================================
-    -- RESPAWN LOCAL
+    -- RESPAWN
     --====================================================
 
     Connect(
