@@ -1,20 +1,22 @@
---==============================================================
--- CAFÉÍNA • BOT RESEARCH V2
--- Coletor passivo de ciclo de vida de bots
+-- ============================================================
+-- CAFEÍNA • LEITURA DE BOTS V3
+-- ============================================================
+-- Pesquisa somente de bots / entidades Soldier.
 --
--- V2:
---  • Snapshots periódicos individuais
---  • Spawn / remoção / morte
---  • Team por múltiplas fontes
---  • Histórico de Team
---  • Highlight como verificação complementar
---  • Objetos criados/removidos
---  • Attributes alterados
---  • Identidade e caminho
---  • Contexto do jogador
---  • Exportação JSON
---  • Confirmação explícita de exportação
---==============================================================
+-- V3:
+-- • Mantém as funções principais da V2
+-- • Identificador visual V3
+-- • Análise de atribuição de Team
+-- • Histórico de Team
+-- • Verificação complementar de Highlight
+-- • Eventos de criação/remoção
+-- • Correlação temporal Players x Soldiers
+-- • Spawn / estado inicial / remoção
+-- • Exportação JSON
+-- • Mensagem de sucesso na exportação
+--
+-- SOMENTE LEITURA.
+-- ============================================================
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -23,9 +25,9 @@ local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
---==============================================================
--- PARENT DA GUI
---==============================================================
+-- ============================================================
+-- PARENT
+-- ============================================================
 
 local function getParent()
     if typeof(gethui) == "function" then
@@ -41,26 +43,30 @@ end
 local Parent = getParent()
 
 for _, v in ipairs(Parent:GetChildren()) do
-    if v.Name == "CafeinaBotResearchV2" then
+    if v.Name == "CafeinaBotReader_V3" then
         pcall(function()
             v:Destroy()
         end)
     end
 end
 
+-- ============================================================
+-- GUI
+-- ============================================================
+
 local Gui = Instance.new("ScreenGui")
-Gui.Name = "CafeinaBotResearchV2"
+Gui.Name = "CafeinaBotReader_V3"
 Gui.ResetOnSpawn = false
 Gui.IgnoreGuiInset = true
 Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 Gui.Parent = Parent
 
---==============================================================
+-- ============================================================
 -- CORES
---==============================================================
+-- ============================================================
 
 local COLORS = {
-    bg = Color3.fromRGB(10,10,13),
+    bg = Color3.fromRGB(12,12,15),
     panel = Color3.fromRGB(20,20,25),
     panel2 = Color3.fromRGB(29,29,36),
 
@@ -75,14 +81,14 @@ local COLORS = {
     yellow = Color3.fromRGB(242,184,57),
 }
 
---==============================================================
--- HELPERS DE GUI
---==============================================================
+-- ============================================================
+-- HELPERS
+-- ============================================================
 
 local function new(class, props)
     local x = Instance.new(class)
 
-    for k,v in pairs(props or {}) do
+    for k, v in pairs(props or {}) do
         x[k] = v
     end
 
@@ -110,1500 +116,631 @@ local function label(parent, text, size, pos, textSize)
     })
 end
 
---==============================================================
--- CONFIGURAÇÃO DO COLETOR
---==============================================================
-
-local CONFIG = {
-    SnapshotInterval = 5,
-
-    -- Evita arquivos absurdamente grandes.
-    MaxSnapshotsPerBot = 300,
-    MaxObjectEventsPerBot = 250,
-    MaxAttributeEventsPerBot = 250,
-
-    MaxImportantEvents = 1000,
-    MaxVisualEvents = 500,
-
-    -- A pasta observada no arquivo anterior.
-    PrimaryContainer = "Soldiers",
-}
-
---==============================================================
--- ESTADO
---==============================================================
-
-local State = {
-    Running = false,
-    Scanned = false,
-
-    StartAt = nil,
-    StartAtUnix = nil,
-
-    EndAt = nil,
-    EndAtUnix = nil,
-
-    NextBotId = 0,
-
-    Bots = {},
-    BotsByInstance = {},
-
-    ImportantEvents = {},
-    VisualEvents = {},
-
-    Connections = {},
-}
-
---==============================================================
--- TEMPO
---==============================================================
-
-local function now()
-    return os.clock()
-end
-
-local function unix()
-    return os.time()
-end
-
---==============================================================
--- SEGURANÇA
---==============================================================
-
-local function safeName(x)
-    local ok, result = pcall(function()
-        return x.Name
-    end)
-
-    return ok and tostring(result) or "?"
-end
-
 local function safeFullName(x)
-    local ok, result = pcall(function()
+    local ok, v = pcall(function()
         return x:GetFullName()
     end)
 
-    return ok and tostring(result) or safeName(x)
-end
-
-local function safeClass(x)
-    local ok, result = pcall(function()
-        return x.ClassName
-    end)
-
-    return ok and tostring(result) or "?"
+    return ok and tostring(v) or tostring(x.Name)
 end
 
 local function getAttribute(x, key)
-    local ok, result = pcall(function()
+    local ok, v = pcall(function()
         return x:GetAttribute(key)
     end)
 
-    return ok and result or nil
-end
-
-local function getAttributes(x)
-    local result = {}
-
-    pcall(function()
-        for k,v in pairs(x:GetAttributes()) do
-            result[tostring(k)] = tostring(v)
-        end
-    end)
-
-    return result
-end
-
-local function isA(x, class)
-    local ok, result = pcall(function()
-        return x:IsA(class)
-    end)
-
-    return ok and result
-end
-
---==============================================================
--- PLAYER CHARACTER
---==============================================================
-
-local function isPlayerCharacter(model)
-    if not model or not isA(model, "Model") then
-        return false
-    end
-
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player.Character == model then
-            return true
-        end
-    end
-
-    return false
-end
-
---==============================================================
--- HUMANOID / ROOT
---==============================================================
-
-local function getHumanoid(model)
-    if not model then
-        return nil
-    end
-
-    return model:FindFirstChildOfClass("Humanoid")
+    return ok and v or nil
 end
 
 local function getRoot(model)
-    if not model then
-        return nil
-    end
-
     return model:FindFirstChild("HumanoidRootPart")
         or model.PrimaryPart
         or model:FindFirstChildWhichIsA("BasePart")
 end
 
---==============================================================
--- SOLIDERS
---==============================================================
+local function getHumanoid(model)
+    return model:FindFirstChildOfClass("Humanoid")
+end
 
-local function isInsideSoldiers(model)
-    if not model then
-        return false
-    end
-
-    local current = model.Parent
-
-    while current and current ~= workspace do
-        if current.Name == CONFIG.PrimaryContainer then
+local function isPlayerCharacter(model)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character == model then
             return true
         end
-
-        current = current.Parent
     end
 
     return false
 end
 
---==============================================================
+-- ============================================================
+-- ESTADO
+-- ============================================================
+
+local State = {
+    Records = {},
+
+    Army = {},
+    Rebels = {},
+
+    Mannequins = {},
+    Playable = {},
+
+    PatrolPoints = {},
+
+    SoldierEvents = {},
+    PlayerEvents = {},
+
+    TeamChanges = {},
+
+    ScanStartedUnix = nil,
+    ScanFinishedUnix = nil,
+
+    Scanned = false,
+}
+
+-- ============================================================
+-- PLAYER SNAPSHOT
+-- ============================================================
+
+local function getPlayerTeam(player)
+    local teamName = nil
+
+    pcall(function()
+        if player.Team then
+            teamName = player.Team.Name
+        end
+    end)
+
+    if not teamName then
+        local attr = getAttribute(player, "Team")
+
+        if attr ~= nil then
+            teamName = tostring(attr)
+        end
+    end
+
+    return teamName
+end
+
+local function getPlayerSnapshot()
+    local result = {}
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        result[#result + 1] = {
+            name = player.Name,
+            displayName = player.DisplayName,
+            userId = player.UserId,
+            team = getPlayerTeam(player),
+            hasCharacter = player.Character ~= nil,
+        }
+    end
+
+    return result
+end
+
+-- ============================================================
 -- TEAM
---
--- Não depende somente de "Team".
--- Registra também de onde a informação veio.
---==============================================================
+-- ============================================================
 
-local function inspectTeam(model)
-    local result = {
-        value = nil,
-        source = nil,
+local function readTeamSources(model)
+    local sources = {}
+    local values = {}
 
-        attribute = nil,
-        stringValue = nil,
-        objectValue = nil,
+    -- Attribute Team
+    local attrTeam = getAttribute(model, "Team")
 
-        candidates = {},
-    }
-
-    -- -----------------------------------------
-    -- Attribute "Team"
-    -- -----------------------------------------
-
-    local attributeTeam = getAttribute(model, "Team")
-
-    if attributeTeam ~= nil then
-        result.attribute = tostring(attributeTeam)
-        result.value = tostring(attributeTeam)
-        result.source = "Attribute"
-        table.insert(result.candidates, {
-            source = "Attribute",
-            value = tostring(attributeTeam)
-        })
+    if attrTeam ~= nil then
+        sources[#sources + 1] = "Attribute.Team"
+        values["Attribute.Team"] = tostring(attrTeam)
     end
 
-    -- -----------------------------------------
-    -- StringValue direto
-    -- -----------------------------------------
+    -- Attribute TeamName
+    local attrTeamName = getAttribute(model, "TeamName")
 
-    local teamValue = model:FindFirstChild("Team")
+    if attrTeamName ~= nil then
+        sources[#sources + 1] = "Attribute.TeamName"
+        values["Attribute.TeamName"] = tostring(attrTeamName)
+    end
 
-    if teamValue and teamValue:IsA("StringValue") then
-        result.stringValue = tostring(teamValue.Value)
+    -- Attribute Faction
+    local attrFaction = getAttribute(model, "Faction")
 
-        table.insert(result.candidates, {
-            source = "StringValue",
-            value = tostring(teamValue.Value)
-        })
+    if attrFaction ~= nil then
+        sources[#sources + 1] = "Attribute.Faction"
+        values["Attribute.Faction"] = tostring(attrFaction)
+    end
 
-        if result.value == nil then
-            result.value = tostring(teamValue.Value)
-            result.source = "StringValue"
+    -- Child Team
+    local teamObject = model:FindFirstChild("Team")
+
+    if teamObject then
+        if teamObject:IsA("StringValue") then
+            sources[#sources + 1] = "StringValue.Team"
+            values["StringValue.Team"] = tostring(teamObject.Value)
+
+        elseif teamObject:IsA("ObjectValue") then
+            sources[#sources + 1] = "ObjectValue.Team"
+
+            pcall(function()
+                values["ObjectValue.Team"] =
+                    teamObject.Value and teamObject.Value.Name or "nil"
+            end)
+
+        elseif teamObject:IsA("IntValue")
+            or teamObject:IsA("NumberValue") then
+
+            sources[#sources + 1] = "Value.Team"
+            values["Value.Team"] = tostring(teamObject.Value)
         end
     end
 
-    -- -----------------------------------------
-    -- ObjectValue direto
-    -- -----------------------------------------
+    -- Child TeamName
+    local teamNameObject = model:FindFirstChild("TeamName")
 
-    if teamValue and teamValue:IsA("ObjectValue") then
-        local object = teamValue.Value
-
-        if object then
-            result.objectValue = safeName(object)
-
-            table.insert(result.candidates, {
-                source = "ObjectValue",
-                value = safeName(object),
-                path = safeFullName(object),
-                className = safeClass(object)
-            })
-
-            if result.value == nil then
-                result.value = safeName(object)
-                result.source = "ObjectValue"
-            end
-        end
+    if teamNameObject and teamNameObject:IsA("StringValue") then
+        sources[#sources + 1] = "StringValue.TeamName"
+        values["StringValue.TeamName"] =
+            tostring(teamNameObject.Value)
     end
 
-    -- -----------------------------------------
-    -- TeamColor
-    -- -----------------------------------------
+    -- Child Faction
+    local factionObject = model:FindFirstChild("Faction")
 
-    local teamColor = getAttribute(model, "TeamColor")
-
-    if teamColor ~= nil then
-        table.insert(result.candidates, {
-            source = "TeamColorAttribute",
-            value = tostring(teamColor)
-        })
+    if factionObject and factionObject:IsA("StringValue") then
+        sources[#sources + 1] = "StringValue.Faction"
+        values["StringValue.Faction"] =
+            tostring(factionObject.Value)
     end
 
-    -- -----------------------------------------
-    -- Container como pista secundária
-    -- -----------------------------------------
+    -- Escolha da fonte principal.
+    local primary = nil
+    local primarySource = nil
 
-    local parent = model.Parent
-
-    if parent then
-        local parentName = tostring(parent.Name)
-
-        if parentName == "Army"
-        or parentName == "Rebels" then
-
-            table.insert(result.candidates, {
-                source = "ParentNameHint",
-                value = parentName
-            })
-        end
-    end
-
-    return result
-end
-
---==============================================================
--- PLAYER STATE
---==============================================================
-
-local function getPlayerState()
-    local result = {
-        team = nil,
-        teamColor = nil,
-        userId = nil,
-        name = nil,
+    local priority = {
+        "Attribute.Team",
+        "StringValue.Team",
+        "ObjectValue.Team",
+        "Value.Team",
+        "Attribute.TeamName",
+        "StringValue.TeamName",
+        "Attribute.Faction",
+        "StringValue.Faction",
     }
 
-    pcall(function()
-        result.team = LocalPlayer.Team and LocalPlayer.Team.Name or nil
-        result.teamColor =
-            LocalPlayer.TeamColor
-            and tostring(LocalPlayer.TeamColor.Name)
-            or nil
-
-        result.userId = LocalPlayer.UserId
-        result.name = LocalPlayer.Name
-    end)
-
-    return result
-end
-
---==============================================================
--- HIGHLIGHT
---==============================================================
-
-local function inspectHighlights(model)
-    local result = {
-        exists = false,
-        count = 0,
-        items = {},
-    }
-
-    pcall(function()
-        for _, obj in ipairs(model:GetDescendants()) do
-            if obj:IsA("Highlight") then
-
-                result.exists = true
-                result.count += 1
-
-                local item = {
-                    path = safeFullName(obj),
-                    enabled = obj.Enabled,
-                    depthMode = tostring(obj.DepthMode),
-
-                    fillColor = {
-                        r = obj.FillColor.R,
-                        g = obj.FillColor.G,
-                        b = obj.FillColor.B,
-                    },
-
-                    outlineColor = {
-                        r = obj.OutlineColor.R,
-                        g = obj.OutlineColor.G,
-                        b = obj.OutlineColor.B,
-                    },
-
-                    fillTransparency = obj.FillTransparency,
-                    outlineTransparency = obj.OutlineTransparency,
-                }
-
-                table.insert(result.items, item)
-            end
+    for _, source in ipairs(priority) do
+        if values[source] ~= nil then
+            primary = values[source]
+            primarySource = source
+            break
         end
-    end)
-
-    return result
-end
-
---==============================================================
--- HUMANOID
---==============================================================
-
-local function inspectHumanoid(hum)
-    if not hum then
-        return nil
-    end
-
-    local result = {
-        health = hum.Health,
-        maxHealth = hum.MaxHealth,
-
-        walkSpeed = hum.WalkSpeed,
-        jumpPower = hum.JumpPower,
-
-        rigType = tostring(hum.RigType),
-        state = tostring(hum:GetState()),
-
-        moveDirection = {
-            x = hum.MoveDirection.X,
-            y = hum.MoveDirection.Y,
-            z = hum.MoveDirection.Z,
-        },
-    }
-
-    return result
-end
-
---==============================================================
--- POSITION
---==============================================================
-
-local function inspectPosition(model)
-    local root = getRoot(model)
-
-    if not root then
-        return nil
     end
 
     return {
-        x = root.Position.X,
-        y = root.Position.Y,
-        z = root.Position.Z,
+        team = primary,
+        source = primarySource,
+        sources = sources,
+        values = values,
     }
 end
 
---==============================================================
--- INTERESTING OBJECTS
---==============================================================
+-- ============================================================
+-- HIGHLIGHT
+-- ============================================================
 
-local function inspectInterestingObjects(model)
-    local result = {}
+local function inspectHighlight(model)
+    local result = {
+        exists = false,
+        enabled = nil,
+        depthMode = nil,
+        fillColor = nil,
+        outlineColor = nil,
+        path = nil,
+    }
+
+    local highlight = model:FindFirstChildWhichIsA(
+        "Highlight",
+        true
+    )
+
+    if not highlight then
+        return result
+    end
+
+    result.exists = true
+    result.path = safeFullName(highlight)
 
     pcall(function()
-        for _, obj in ipairs(model:GetDescendants()) do
+        result.enabled = highlight.Enabled
+    end)
 
-            if obj:IsA("Tool")
-            or obj:IsA("Highlight")
-            or obj:IsA("Humanoid")
-            or obj:IsA("ValueBase")
-            or obj:IsA("Folder")
-            or obj:IsA("ObjectValue") then
+    pcall(function()
+        result.depthMode = tostring(highlight.DepthMode)
+    end)
 
-                table.insert(result, {
-                    name = safeName(obj),
-                    className = safeClass(obj),
-                    path = safeFullName(obj),
-                })
-            end
-        end
+    pcall(function()
+        result.fillColor = {
+            r = highlight.FillColor.R,
+            g = highlight.FillColor.G,
+            b = highlight.FillColor.B,
+        }
+    end)
+
+    pcall(function()
+        result.outlineColor = {
+            r = highlight.OutlineColor.R,
+            g = highlight.OutlineColor.G,
+            b = highlight.OutlineColor.B,
+        }
     end)
 
     return result
 end
 
---==============================================================
--- BOT SNAPSHOT
---==============================================================
+-- ============================================================
+-- MODELO
+-- ============================================================
 
-local function buildBotSnapshot(bot)
-    local model = bot.instance
-
-    if not model or not model.Parent then
+local function inspectModel(model)
+    if not model:IsA("Model") then
         return nil
-    end
-
-    local hum = getHumanoid(model)
-    local root = getRoot(model)
-    local teamInfo = inspectTeam(model)
-
-    local snapshot = {
-        time = now(),
-        unix = unix(),
-
-        path = safeFullName(model),
-
-        name = safeName(model),
-        className = safeClass(model),
-
-        parent = model.Parent and safeFullName(model.Parent) or nil,
-
-        insideSoldiers = isInsideSoldiers(model),
-
-        position = inspectPosition(model),
-
-        team = {
-            value = teamInfo.value,
-            source = teamInfo.source,
-            attribute = teamInfo.attribute,
-            stringValue = teamInfo.stringValue,
-            objectValue = teamInfo.objectValue,
-            candidates = teamInfo.candidates,
-        },
-
-        humanoid = inspectHumanoid(hum),
-
-        attributes = getAttributes(model),
-
-        highlight = inspectHighlights(model),
-
-        interestingObjects = inspectInterestingObjects(model),
-
-        playerState = getPlayerState(),
-    }
-
-    return snapshot
-end
-
---==============================================================
--- EVENT HELPERS
---==============================================================
-
-local function addImportantEvent(eventType, data)
-    if #State.ImportantEvents >= CONFIG.MaxImportantEvents then
-        table.remove(State.ImportantEvents, 1)
-    end
-
-    table.insert(State.ImportantEvents, {
-        type = eventType,
-        time = now(),
-        unix = unix(),
-        data = data,
-    })
-end
-
-local function addVisualEvent(eventType, data)
-    if #State.VisualEvents >= CONFIG.MaxVisualEvents then
-        table.remove(State.VisualEvents, 1)
-    end
-
-    table.insert(State.VisualEvents, {
-        type = eventType,
-        time = now(),
-        unix = unix(),
-        data = data,
-    })
-end
-
---==============================================================
--- BOT EVENT STORAGE
---==============================================================
-
-local function addBotObjectEvent(bot, eventType, data)
-    if #bot.objectEvents >= CONFIG.MaxObjectEventsPerBot then
-        table.remove(bot.objectEvents, 1)
-    end
-
-    table.insert(bot.objectEvents, {
-        type = eventType,
-        time = now(),
-        unix = unix(),
-        data = data,
-    })
-end
-
-local function addBotAttributeEvent(bot, data)
-    if #bot.attributeEvents >= CONFIG.MaxAttributeEventsPerBot then
-        table.remove(bot.attributeEvents, 1)
-    end
-
-    table.insert(bot.attributeEvents, {
-        time = now(),
-        unix = unix(),
-        data = data,
-    })
-end
-
---==============================================================
--- TEAM HISTORY
---==============================================================
-
-local function addTeamHistory(bot, teamInfo, reason)
-    local value = teamInfo and teamInfo.value or nil
-
-    local previous = bot.lastTeam
-
-    if previous == value and bot.teamHistoryInitialized then
-        return
-    end
-
-    bot.teamHistoryInitialized = true
-    bot.lastTeam = value
-
-    local entry = {
-        time = now(),
-        unix = unix(),
-
-        previous = previous,
-        current = value,
-
-        source = teamInfo and teamInfo.source or nil,
-
-        attribute = teamInfo and teamInfo.attribute or nil,
-        stringValue = teamInfo and teamInfo.stringValue or nil,
-        objectValue = teamInfo and teamInfo.objectValue or nil,
-
-        candidates = teamInfo and teamInfo.candidates or {},
-
-        reason = reason,
-    }
-
-    table.insert(bot.teamHistory, entry)
-
-    addImportantEvent("BOT_TEAM_CHANGED", {
-        botId = bot.id,
-        path = safeFullName(bot.instance),
-
-        previous = previous,
-        current = value,
-
-        source = entry.source,
-        reason = reason,
-
-        playerState = getPlayerState(),
-    })
-end
-
---==============================================================
--- HIGHLIGHT HISTORY
---==============================================================
-
-local function highlightSignature(h)
-    if not h then
-        return "nil"
-    end
-
-    return HttpService:JSONEncode(h)
-end
-
-local function checkHighlight(bot, reason)
-    local current = inspectHighlights(bot.instance)
-
-    local signature = highlightSignature(current)
-    local previous = bot.lastHighlightSignature
-
-    if previous == nil then
-        bot.lastHighlightSignature = signature
-        bot.highlightInitial = current
-        return
-    end
-
-    if previous ~= signature then
-
-        bot.lastHighlightSignature = signature
-
-        local event = {
-            botId = bot.id,
-            path = safeFullName(bot.instance),
-
-            previous = bot.lastHighlight,
-            current = current,
-
-            reason = reason,
-
-            playerState = getPlayerState(),
-        }
-
-        addVisualEvent("HIGHLIGHT_CHANGED", event)
-
-        addImportantEvent("HIGHLIGHT_CHANGED", event)
-
-        bot.lastHighlight = current
-    end
-end
-
---==============================================================
--- BOT REGISTRATION
---==============================================================
-
-local function shouldRegister(model)
-    if not model then
-        return false
-    end
-
-    if not isA(model, "Model") then
-        return false
     end
 
     if isPlayerCharacter(model) then
-        return false
-    end
-
-    local hum = getHumanoid(model)
-
-    if not hum then
-        return false
-    end
-
-    -- Principal evidência:
-    -- Models dentro de Workspace.Soldiers.
-    --
-    -- Também aceitamos Models fora de Soldiers
-    -- quando possuem sinal explícito de Team.
-    local insideSoldiers = isInsideSoldiers(model)
-
-    local teamInfo = inspectTeam(model)
-
-    local hasTeamEvidence =
-        teamInfo.value ~= nil
-        or #teamInfo.candidates > 0
-
-    return insideSoldiers or hasTeamEvidence
-end
-
---==============================================================
--- MONITORAMENTO DE UM BOT
---==============================================================
-
-local function monitorBot(bot)
-    local model = bot.instance
-
-    -- -----------------------------------------
-    -- Estado inicial
-    -- -----------------------------------------
-
-    local initialTeam = inspectTeam(model)
-
-    bot.initialTeam = {
-        value = initialTeam.value,
-        source = initialTeam.source,
-
-        attribute = initialTeam.attribute,
-        stringValue = initialTeam.stringValue,
-        objectValue = initialTeam.objectValue,
-
-        candidates = initialTeam.candidates,
-    }
-
-    bot.lastTeam = initialTeam.value
-    bot.teamHistoryInitialized = true
-
-    bot.initialAttributes = getAttributes(model)
-    bot.lastAttributes = getAttributes(model)
-
-    bot.highlightInitial = inspectHighlights(model)
-    bot.lastHighlight = bot.highlightInitial
-    bot.lastHighlightSignature = highlightSignature(bot.highlightInitial)
-
-    -- -----------------------------------------
-    -- knownObjects
-    -- -----------------------------------------
-
-    bot.knownObjects = {}
-
-    pcall(function()
-        for _, obj in ipairs(model:GetDescendants()) do
-            bot.knownObjects[obj] = true
-        end
-    end)
-
-    -- -----------------------------------------
-    -- Primeiro snapshot
-    -- -----------------------------------------
-
-    local firstSnapshot = buildBotSnapshot(bot)
-
-    if firstSnapshot then
-        table.insert(bot.snapshots, firstSnapshot)
-    end
-
-    -- -----------------------------------------
-    -- Team inicial
-    -- -----------------------------------------
-
-    table.insert(bot.teamHistory, {
-        time = bot.spawn.time,
-        unix = bot.spawn.unix,
-
-        previous = nil,
-        current = initialTeam.value,
-
-        source = initialTeam.source,
-
-        attribute = initialTeam.attribute,
-        stringValue = initialTeam.stringValue,
-        objectValue = initialTeam.objectValue,
-
-        candidates = initialTeam.candidates,
-
-        reason = bot.spawn.observedExisting
-            and "INITIAL_SCAN"
-            or "SPAWN",
-    })
-
-    -- -----------------------------------------
-    -- ChildAdded
-    -- -----------------------------------------
-
-    bot.connections = {}
-
-    table.insert(bot.connections,
-        model.DescendantAdded:Connect(function(obj)
-
-            if not bot.active then
-                return
-            end
-
-            bot.knownObjects[obj] = true
-
-            addBotObjectEvent(bot, "OBJECT_CREATED", {
-                name = safeName(obj),
-                className = safeClass(obj),
-                path = safeFullName(obj),
-            })
-
-            if obj:IsA("Highlight") then
-                task.defer(function()
-                    checkHighlight(bot, "OBJECT_CREATED")
-                end)
-            end
-
-            if obj.Name == "Team"
-            or obj:IsA("StringValue")
-            or obj:IsA("ObjectValue") then
-
-                task.defer(function()
-                    local teamInfo = inspectTeam(model)
-                    addTeamHistory(bot, teamInfo, "OBJECT_CREATED")
-                end)
-            end
-        end)
-    )
-
-    -- -----------------------------------------
-    -- DescendantRemoving
-    -- -----------------------------------------
-
-    table.insert(bot.connections,
-        model.DescendantRemoving:Connect(function(obj)
-
-            if not bot.active then
-                return
-            end
-
-            addBotObjectEvent(bot, "OBJECT_REMOVED", {
-                name = safeName(obj),
-                className = safeClass(obj),
-                path = safeFullName(obj),
-            })
-
-            if obj:IsA("Highlight") then
-                task.defer(function()
-                    checkHighlight(bot, "OBJECT_REMOVED")
-                end)
-            end
-        end)
-    )
-
-    -- -----------------------------------------
-    -- AttributeChanged
-    -- -----------------------------------------
-
-    table.insert(bot.connections,
-        model.AttributeChanged:Connect(function(attributeName)
-
-            if not bot.active then
-                return
-            end
-
-            local currentAttributes = getAttributes(model)
-            local oldValue = bot.lastAttributes[attributeName]
-            local newValue = currentAttributes[attributeName]
-
-            bot.lastAttributes = currentAttributes
-
-            local eventData = {
-                attribute = tostring(attributeName),
-                previous = oldValue,
-                current = newValue,
-            }
-
-            addBotAttributeEvent(bot, eventData)
-
-            if tostring(attributeName) == "Team"
-            or tostring(attributeName) == "TeamColor" then
-
-                local teamInfo = inspectTeam(model)
-
-                addTeamHistory(
-                    bot,
-                    teamInfo,
-                    "ATTRIBUTE_CHANGED:" .. tostring(attributeName)
-                )
-            end
-        end)
-    )
-
-    -- -----------------------------------------
-    -- Humanoid morreu
-    -- -----------------------------------------
-
-    local hum = getHumanoid(model)
-
-    if hum then
-
-        table.insert(bot.connections,
-            hum.Died:Connect(function()
-
-                if not bot.active then
-                    return
-                end
-
-                bot.death = {
-                    detected = true,
-                    time = now(),
-                    unix = unix(),
-                    health = hum.Health,
-                }
-
-                addImportantEvent("BOT_DIED", {
-                    botId = bot.id,
-                    path = safeFullName(model),
-                    name = safeName(model),
-
-                    team = inspectTeam(model),
-
-                    playerState = getPlayerState(),
-                })
-            end)
-        )
-    end
-
-    -- -----------------------------------------
-    -- Monitoramento periódico
-    -- -----------------------------------------
-
-    task.spawn(function()
-
-        while bot.active and State.Running do
-
-            task.wait(CONFIG.SnapshotInterval)
-
-            if not bot.active then
-                break
-            end
-
-            if not model.Parent then
-                break
-            end
-
-            -- Team
-            local teamInfo = inspectTeam(model)
-
-            addTeamHistory(
-                bot,
-                teamInfo,
-                "PERIODIC_CHECK"
-            )
-
-            -- Attributes
-            bot.lastAttributes = getAttributes(model)
-
-            -- Highlight
-            checkHighlight(bot, "PERIODIC_CHECK")
-
-            -- Snapshot
-            local snapshot = buildBotSnapshot(bot)
-
-            if snapshot then
-
-                if #bot.snapshots >= CONFIG.MaxSnapshotsPerBot then
-                    table.remove(bot.snapshots, 1)
-                end
-
-                table.insert(bot.snapshots, snapshot)
-            end
-        end
-    end)
-end
-
---==============================================================
--- REGISTRA BOT
---==============================================================
-
-local function registerBot(model, observedExisting)
-
-    if State.BotsByInstance[model] then
-        return State.BotsByInstance[model]
-    end
-
-    if not shouldRegister(model) then
         return nil
     end
 
-    State.NextBotId += 1
+    local humanoid = getHumanoid(model)
 
-    local teamInfo = inspectTeam(model)
+    if not humanoid then
+        return nil
+    end
 
-    local bot = {
-        id = State.NextBotId,
+    local root = getRoot(model)
 
-        instance = model,
+    local teamInfo = readTeamSources(model)
+    local highlightInfo = inspectHighlight(model)
 
-        name = safeName(model),
-        className = safeClass(model),
+    local signals = {}
 
-        spawn = {
-            time = now(),
-            unix = unix(),
+    if root then
+        signals[#signals + 1] = "RootPart"
+    end
 
-            path = safeFullName(model),
-            className = safeClass(model),
+    signals[#signals + 1] = "Humanoid"
 
-            observedExisting = observedExisting == true,
+    if humanoid.Health > 0 then
+        signals[#signals + 1] = "Health>0"
+    end
+
+    if humanoid.WalkSpeed > 0 then
+        signals[#signals + 1] = "WalkSpeed"
+    end
+
+    if humanoid.MoveDirection.Magnitude > 0 then
+        signals[#signals + 1] = "MoveDirection"
+    end
+
+    if model:FindFirstChildWhichIsA("Tool", true) then
+        signals[#signals + 1] = "Tool"
+    end
+
+    if highlightInfo.exists then
+        signals[#signals + 1] = "Highlight"
+    end
+
+    if teamInfo.team then
+        signals[#signals + 1] = "Team"
+    end
+
+    local likelyMannequin =
+        model.Name:lower():find("dummy", 1, true) ~= nil
+        or model.Name:lower():find("mannequin", 1, true) ~= nil
+        or model.Name:lower():find("manequim", 1, true) ~= nil
+
+    local likelyPlayable =
+        not likelyMannequin
+        and root ~= nil
+
+    local rec = {
+        name = model.Name,
+        path = safeFullName(model),
+        className = model.ClassName,
+
+        team = teamInfo.team,
+        teamSource = teamInfo.source,
+        teamSources = teamInfo.sources,
+        teamValues = teamInfo.values,
+
+        health = humanoid.Health,
+        maxHealth = humanoid.MaxHealth,
+
+        walkSpeed = humanoid.WalkSpeed,
+        jumpPower = humanoid.JumpPower,
+
+        rigType = tostring(humanoid.RigType),
+
+        rootPart = root and root.Name or nil,
+
+        position = root and {
+            x = root.Position.X,
+            y = root.Position.Y,
+            z = root.Position.Z
+        } or nil,
+
+        moveDirection = {
+            x = humanoid.MoveDirection.X,
+            y = humanoid.MoveDirection.Y,
+            z = humanoid.MoveDirection.Z
         },
 
-        initialTeam = nil,
+        highlight = highlightInfo,
+
+        attributes = {},
+        signals = signals,
+
+        likelyMannequin = likelyMannequin,
+        likelyPlayable = likelyPlayable,
+
+        firstSeenUnix = os.time(),
+        lastSeenUnix = os.time(),
 
         teamHistory = {},
-
-        initialAttributes = {},
-        lastAttributes = {},
-
-        initialHighlight = nil,
-        lastHighlight = nil,
-        lastHighlightSignature = nil,
-
-        knownObjects = {},
-
-        snapshots = {},
-
-        objectEvents = {},
-        attributeEvents = {},
-
-        death = {
-            detected = false,
-        },
-
-        removed = false,
-
-        active = true,
-
-        connections = {},
     }
 
-    State.Bots[#State.Bots + 1] = bot
-    State.BotsByInstance[model] = bot
+    -- Attributes completos
+    pcall(function()
+        for k, v in pairs(model:GetAttributes()) do
+            rec.attributes[tostring(k)] = tostring(v)
+        end
+    end)
 
-    -- Registro inicial
-    addImportantEvent("BOT_SPAWN", {
-        botId = bot.id,
+    rec.teamHistory[#rec.teamHistory + 1] = {
+        time = os.clock(),
+        unix = os.time(),
+        team = teamInfo.team,
+        source = teamInfo.source,
+    }
 
-        path = safeFullName(model),
-        name = safeName(model),
-        className = safeClass(model),
-
-        initialTeam = teamInfo,
-
-        insideSoldiers = isInsideSoldiers(model),
-
-        observedExisting = observedExisting == true,
-
-        playerState = getPlayerState(),
-    })
-
-    monitorBot(bot)
-
-    return bot
+    return rec
 end
 
---==============================================================
--- REMOVE BOT
---==============================================================
+-- ============================================================
+-- PATROL POINTS
+-- ============================================================
 
-local function removeBot(bot, reason)
+local function scanPatrolPoints()
+    State.PatrolPoints = {}
 
-    if not bot or not bot.active then
+    local folder = workspace:FindFirstChild("BotPatrolPoints")
+
+    if not folder then
         return
     end
 
-    bot.active = false
-    bot.removed = true
+    for _, teamFolder in ipairs(folder:GetChildren()) do
 
-    bot.removedAt = {
-        time = now(),
-        unix = unix(),
+        if teamFolder:IsA("Folder") then
 
-        reason = reason,
-    }
+            local list = {}
 
-    addImportantEvent("BOT_REMOVED", {
-        botId = bot.id,
+            for _, p in ipairs(teamFolder:GetDescendants()) do
 
-        path = bot.spawn.path,
-        name = bot.name,
+                if p:IsA("BasePart") then
 
-        reason = reason,
+                    list[#list + 1] = {
+                        name = p.Name,
+                        path = safeFullName(p),
 
-        deathDetected =
-            bot.death
-            and bot.death.detected
-            or false,
+                        teamAttribute =
+                            getAttribute(p, "Team"),
 
-        team = inspectTeam(bot.instance),
+                        position = {
+                            x = p.Position.X,
+                            y = p.Position.Y,
+                            z = p.Position.Z
+                        },
 
-        playerState = getPlayerState(),
-    })
+                        anchored = p.Anchored,
+                        transparency = p.Transparency,
+                    }
 
-    for _, connection in ipairs(bot.connections or {}) do
-        pcall(function()
-            connection:Disconnect()
-        end)
-    end
-
-    bot.connections = {}
-
-    State.BotsByInstance[bot.instance] = nil
-end
-
---==============================================================
--- SCAN INICIAL
---==============================================================
-
-local function scanExisting()
-
-    for _, inst in ipairs(workspace:GetDescendants()) do
-
-        if isA(inst, "Model") then
-            registerBot(inst, true)
-        end
-    end
-end
-
---==============================================================
--- MONITORAMENTO GLOBAL
---==============================================================
-
-local function findRegisteredModelFromInstance(inst)
-
-    if State.BotsByInstance[inst] then
-        return State.BotsByInstance[inst]
-    end
-
-    return nil
-end
-
-local function setupGlobalMonitoring()
-
-    -- -----------------------------------------
-    -- Novos objetos
-    -- -----------------------------------------
-
-    table.insert(State.Connections,
-        workspace.DescendantAdded:Connect(function(inst)
-
-            if not State.Running then
-                return
-            end
-
-            -- Se for Model, tenta imediatamente.
-            if inst:IsA("Model") then
-
-                task.defer(function()
-                    registerBot(inst, false)
-                end)
-
-                -- Pequenos retries:
-                -- alguns modelos recebem Humanoid/Team
-                -- alguns instantes depois do spawn.
-
-                task.delay(0.15, function()
-                    if State.Running and inst.Parent then
-                        registerBot(inst, false)
-                    end
-                end)
-
-                task.delay(0.5, function()
-                    if State.Running and inst.Parent then
-                        registerBot(inst, false)
-                    end
-                end)
-
-                task.delay(1, function()
-                    if State.Running and inst.Parent then
-                        registerBot(inst, false)
-                    end
-                end)
-
-                return
-            end
-
-            -- Se um Humanoid foi adicionado depois,
-            -- tenta registrar o Model pai.
-
-            if inst:IsA("Humanoid") then
-
-                local model = inst.Parent
-
-                if model and model:IsA("Model") then
-                    task.defer(function()
-                        registerBot(model, false)
-                    end)
                 end
             end
-        end)
-    )
 
-    -- -----------------------------------------
-    -- Remoção global
-    -- -----------------------------------------
-
-    table.insert(State.Connections,
-        workspace.DescendantRemoving:Connect(function(inst)
-
-            local bot = findRegisteredModelFromInstance(inst)
-
-            if bot then
-                removeBot(bot, "DESCENDANT_REMOVING")
-            end
-        end)
-    )
+            State.PatrolPoints[teamFolder.Name] = list
+        end
+    end
 end
 
---==============================================================
--- SCAN MANUAL
---==============================================================
+-- ============================================================
+-- SOLDIER EVENTS
+-- ============================================================
 
-local function performScan()
+local function recordSoldierEvent(action, object)
+    State.SoldierEvents[#State.SoldierEvents + 1] = {
+        action = action,
+        time = os.clock(),
+        unix = os.time(),
 
-    Status.Text = "Realizando leitura..."
-    Status.TextColor3 = COLORS.sub
+        name = object.Name,
+        className = object.ClassName,
+        path = safeFullName(object),
 
-    task.spawn(function()
-
-        local ok, err = pcall(function()
-
-            -- Limpa conexões anteriores
-            for _, connection in ipairs(State.Connections) do
-                pcall(function()
-                    connection:Disconnect()
-                end)
-            end
-
-            State.Connections = {}
-
-            State.Bots = {}
-            State.BotsByInstance = {}
-
-            State.ImportantEvents = {}
-            State.VisualEvents = {}
-
-            State.NextBotId = 0
-
-            State.StartAt = now()
-            State.StartAtUnix = unix()
-
-            State.EndAt = nil
-            State.EndAtUnix = nil
-
-            State.Running = true
-            State.Scanned = true
-
-            addImportantEvent("RESEARCH_STARTED", {
-                playerState = getPlayerState(),
-                primaryContainer = CONFIG.PrimaryContainer,
-                snapshotInterval = CONFIG.SnapshotInterval,
-            })
-
-            -- Primeiro registra os existentes.
-            scanExisting()
-
-            -- Depois começa a observar novos.
-            setupGlobalMonitoring()
-
-        end)
-
-        if not ok then
-
-            State.Running = false
-
-            Status.Text = "Erro durante a leitura."
-            Status.TextColor3 = COLORS.red
-
-            Summary.Text = tostring(err)
-
-            return
-        end
-
-        Status.Text = "Monitoramento ativo."
-        Status.TextColor3 = COLORS.green
-
-        Summary.Text =
-            "Monitoramento ativo • "
-            .. tostring(#State.Bots)
-            .. " entidades registradas."
-    end)
-end
-
---==============================================================
--- PARAR MONITORAMENTO
---==============================================================
-
-local function stopResearch()
-
-    if not State.Running then
-        Status.Text = "Nenhuma pesquisa ativa."
-        return
-    end
-
-    State.Running = false
-
-    State.EndAt = now()
-    State.EndAtUnix = unix()
-
-    addImportantEvent("RESEARCH_STOPPED", {
-        playerState = getPlayerState(),
-    })
-
-    for _, connection in ipairs(State.Connections) do
-        pcall(function()
-            connection:Disconnect()
-        end)
-    end
-
-    State.Connections = {}
-
-    for _, bot in ipairs(State.Bots) do
-
-        if bot.active then
-            bot.active = false
-
-            for _, connection in ipairs(bot.connections or {}) do
-                pcall(function()
-                    connection:Disconnect()
-                end)
-            end
-
-            bot.connections = {}
-        end
-    end
-
-    Status.Text = "Monitoramento parado."
-    Status.TextColor3 = COLORS.yellow
-
-    Summary.Text =
-        "Pesquisa encerrada • "
-        .. tostring(#State.Bots)
-        .. " entidades registradas."
-end
-
---==============================================================
--- RESUMO
---==============================================================
-
-local function getSummary()
-
-    local total = #State.Bots
-
-    local army = 0
-    local rebels = 0
-    local unknown = 0
-
-    local alive = 0
-    local dead = 0
-    local removed = 0
-
-    local insideSoldiers = 0
-    local highlightBots = 0
-
-    for _, bot in ipairs(State.Bots) do
-
-        local team = bot.lastTeam
-
-        if team == "Army" then
-            army += 1
-        elseif team == "Rebels" then
-            rebels += 1
-        else
-            unknown += 1
-        end
-
-        if bot.death and bot.death.detected then
-            dead += 1
-        else
-            alive += 1
-        end
-
-        if bot.removed then
-            removed += 1
-        end
-
-        if bot.spawn and bot.spawn.path then
-            if bot.spawn.path:find("Workspace.Soldiers", 1, true) then
-                insideSoldiers += 1
-            end
-        end
-
-        if bot.initialHighlight
-        and bot.initialHighlight.exists then
-            highlightBots += 1
-        end
-    end
-
-    return {
-        total = total,
-
-        army = army,
-        rebels = rebels,
-        unknown = unknown,
-
-        alive = alive,
-        dead = dead,
-        removed = removed,
-
-        insideSoldiers = insideSoldiers,
-        highlightObserved = highlightBots,
-
-        importantEvents = #State.ImportantEvents,
-        visualEvents = #State.VisualEvents,
+        playerCount = #Players:GetPlayers(),
     }
 end
 
---==============================================================
+local function recordPlayerEvent(action, player)
+    State.PlayerEvents[#State.PlayerEvents + 1] = {
+        action = action,
+        time = os.clock(),
+        unix = os.time(),
+
+        name = player.Name,
+        userId = player.UserId,
+
+        team = getPlayerTeam(player),
+
+        playerCount = #Players:GetPlayers(),
+    }
+end
+
+-- ============================================================
+-- SCAN
+-- ============================================================
+
+local function scanBots()
+
+    State.Records = {}
+    State.Army = {}
+    State.Rebels = {}
+    State.Mannequins = {}
+    State.Playable = {}
+
+    State.SoldierEvents = {}
+    State.PlayerEvents = {}
+    State.TeamChanges = {}
+
+    State.ScanStartedUnix = os.time()
+
+    scanPatrolPoints()
+
+    -- Snapshot dos jogadores no início
+    local initialPlayers = getPlayerSnapshot()
+
+    -- Procura apenas modelos relevantes
+    for _, inst in ipairs(workspace:GetDescendants()) do
+
+        local rec = inspectModel(inst)
+
+        if rec then
+
+            State.Records[#State.Records + 1] = rec
+
+            if rec.team == "Army" then
+                State.Army[#State.Army + 1] = rec
+
+            elseif rec.team == "Rebels" then
+                State.Rebels[#State.Rebels + 1] = rec
+            end
+
+            if rec.likelyMannequin then
+                State.Mannequins[#State.Mannequins + 1] = rec
+
+            elseif rec.likelyPlayable then
+                State.Playable[#State.Playable + 1] = rec
+            end
+        end
+    end
+
+    State.ScanFinishedUnix = os.time()
+    State.Scanned = true
+
+    return initialPlayers
+end
+
+-- ============================================================
 -- EXPORTAÇÃO
---==============================================================
+-- ============================================================
 
 local function buildExport()
 
-    local bots = {}
-
-    for _, bot in ipairs(State.Bots) do
-
-        local output = {
-            id = bot.id,
-
-            name = bot.name,
-            className = bot.className,
-
-            spawn = bot.spawn,
-
-            initialTeam = bot.initialTeam,
-
-            teamHistory = bot.teamHistory,
-
-            initialAttributes = bot.initialAttributes,
-
-            initialHighlight = bot.initialHighlight,
-
-            snapshots = bot.snapshots,
-
-            objectEvents = bot.objectEvents,
-
-            attributeEvents = bot.attributeEvents,
-
-            death = bot.death,
-
-            removed = bot.removed,
-            removedAt = bot.removedAt,
-
-            finalState = nil,
-        }
-
-        -- Último estado disponível
-        if #bot.snapshots > 0 then
-            output.finalState =
-                bot.snapshots[#bot.snapshots]
-        end
-
-        bots[tostring(bot.id)] = output
-    end
-
     return {
         format = "Cafeina Bot Research",
-        version = "2.0",
+        version = "V3",
 
-        session = {
-            startedAt = State.StartAt,
-            startedAtUnix = State.StartAtUnix,
+        generatedAtUnix = os.time(),
 
-            endedAt = State.EndAt,
-            endedAtUnix = State.EndAtUnix,
-
+        game = {
             placeId = game.PlaceId,
             gameId = game.GameId,
             jobId = game.JobId,
         },
 
-        playerState = getPlayerState(),
-
-        configuration = {
-            snapshotInterval = CONFIG.SnapshotInterval,
-            primaryContainer = CONFIG.PrimaryContainer,
-
-            maxSnapshotsPerBot = CONFIG.MaxSnapshotsPerBot,
-            maxObjectEventsPerBot = CONFIG.MaxObjectEventsPerBot,
-            maxAttributeEventsPerBot = CONFIG.MaxAttributeEventsPerBot,
+        localPlayer = {
+            name = LocalPlayer.Name,
+            userId = LocalPlayer.UserId,
+            team = getPlayerTeam(LocalPlayer),
         },
 
-        summary = getSummary(),
+        scan = {
+            startedUnix = State.ScanStartedUnix,
+            finishedUnix = State.ScanFinishedUnix,
 
-        importantEvents = State.ImportantEvents,
+            duration =
+                State.ScanFinishedUnix
+                and State.ScanStartedUnix
+                and (
+                    State.ScanFinishedUnix
+                    - State.ScanStartedUnix
+                )
+                or nil,
 
-        visualEvents = State.VisualEvents,
-
-        bots = bots,
-
-        notes = {
-            "Coleta passiva.",
-            "Nenhuma alteração foi realizada nos bots.",
-            "Team é registrado por múltiplas fontes.",
-            "Highlight é tratado como verificação complementar.",
-            "observedExisting=true significa que a entidade já existia quando a pesquisa começou.",
-            "observedExisting=false indica que a entidade foi observada após o início da pesquisa.",
-            "A presença em Workspace.Soldiers é registrada como evidência estrutural, não como prova isolada de equipe.",
+            note =
+                "Dados observados pelo cliente. "
+                .."Team e Highlight são registrados como "
+                .."evidências independentes.",
         },
+
+        detection = {
+
+            bots = #State.Records,
+
+            army = #State.Army,
+
+            rebels = #State.Rebels,
+
+            mannequins =
+                #State.Mannequins,
+
+            likelyPlayable =
+                #State.Playable,
+
+            soldierEvents =
+                #State.SoldierEvents,
+
+            playerEvents =
+                #State.PlayerEvents,
+        },
+
+        players = getPlayerSnapshot(),
+
+        bots = State.Records,
+
+        teamAnalysis = {
+
+            note =
+                "Prioridade: Team observado diretamente. "
+                .."Highlight funciona como confirmação complementar.",
+
+            army = State.Army,
+
+            rebels = State.Rebels,
+        },
+
+        events = {
+
+            soldiers =
+                State.SoldierEvents,
+
+            players =
+                State.PlayerEvents,
+
+            teamChanges =
+                State.TeamChanges,
+        },
+
+        patrolPoints =
+            State.PatrolPoints,
     }
 end
 
 local function jsonExport()
 
     local ok, result = pcall(function()
-        return HttpService:JSONEncode(buildExport())
+        return HttpService:JSONEncode(
+            buildExport()
+        )
     end)
 
     if ok then
@@ -1613,280 +750,338 @@ local function jsonExport()
     return nil
 end
 
---==============================================================
--- PREVIEW
---==============================================================
-
-local function updatePreview()
-
-    local summary = getSummary()
-
-    local lines = {
-        "CAFÉÍNA • BOT RESEARCH V2",
-        "",
-        "STATUS:",
-        State.Running and "  MONITORAMENTO ATIVO"
-            or "  MONITORAMENTO PARADO",
-
-        "",
-        "ENTIDADES:",
-        "  Total: "..summary.total,
-        "  Army: "..summary.army,
-        "  Rebels: "..summary.rebels,
-        "  Unknown: "..summary.unknown,
-
-        "",
-        "CICLO DE VIDA:",
-        "  Ativos: "..summary.alive,
-        "  Mortos: "..summary.dead,
-        "  Removidos: "..summary.removed,
-
-        "",
-        "ESTRUTURA:",
-        "  Dentro de Soldiers: "..summary.insideSoldiers,
-        "  Com Highlight inicial: "..summary.highlightObserved,
-
-        "",
-        "EVENTOS:",
-        "  Importantes: "..summary.importantEvents,
-        "  Visuais: "..summary.visualEvents,
-
-        "",
-        "BOTS REGISTRADOS:",
-    }
-
-    for _, bot in ipairs(State.Bots) do
-
-        local team = bot.lastTeam or "UNKNOWN"
-
-        local status = "ATIVO"
-
-        if bot.death and bot.death.detected then
-            status = "MORTO"
-        end
-
-        if bot.removed then
-            status = "REMOVIDO"
-        end
-
-        lines[#lines + 1] =
-            "["..tostring(bot.id).."] "
-            ..bot.name
-            .." | "
-            ..team
-            .." | "
-            ..status
-            .." | snapshots="
-            ..tostring(#bot.snapshots)
-    end
-
-    Viewer.Text = table.concat(lines, "\n")
-end
-
---==============================================================
--- GUI
---==============================================================
+-- ============================================================
+-- INTERFACE
+-- ============================================================
 
 local Main = new("Frame", {
     Parent = Gui,
 
-    Size = UDim2.fromOffset(700,560),
-
-    Position = UDim2.new(
-        0.5,-350,
-        0.5,-280
+    Size = UDim2.fromOffset(
+        520,
+        430
     ),
 
-    BackgroundColor3 = COLORS.bg,
-    BorderSizePixel = 0,
+    Position =
+        UDim2.new(
+            .5,
+            -260,
+            .5,
+            -215
+        ),
+
+    BackgroundColor3 =
+        COLORS.bg,
+
+    BorderSizePixel = 0
 })
 
-round(Main,16)
+round(Main, 14)
 
+-- ============================================================
 -- HEADER
+-- ============================================================
 
 local Header = new("Frame", {
     Parent = Main,
 
-    Size = UDim2.new(1,0,0,76),
+    Size =
+        UDim2.new(
+            1,
+            0,
+            0,
+            55
+        ),
 
-    BackgroundColor3 = COLORS.panel,
-    BorderSizePixel = 0,
+    BackgroundColor3 =
+        COLORS.panel,
+
+    BorderSizePixel = 0
 })
 
-round(Header,16)
+round(Header, 14)
 
 label(
     Header,
-    "CAFÉÍNA • BOT RESEARCH V2",
-    UDim2.new(1,-150,0,28),
-    UDim2.fromOffset(20,12),
-    19
+    "CAFEÍNA • LEITURA DE BOTS",
+    UDim2.new(1,-95,0,24),
+    UDim2.fromOffset(14,7),
+    15
 )
 
-local SubTitle = label(
-    Header,
-    "COLETA PASSIVA • CICLO DE VIDA DOS BOTS",
-    UDim2.new(1,-150,0,18),
-    UDim2.fromOffset(20,43),
-    9
-)
+local sub =
+    label(
+        Header,
+        "INTERFACE STANDALONE • SOMENTE LEITURA",
+        UDim2.new(1,-95,0,16),
+        UDim2.fromOffset(14,31),
+        9
+    )
 
-SubTitle.TextColor3 = COLORS.sub
+sub.TextColor3 = COLORS.sub
 
--- MINIMIZAR
+-- ============================================================
+-- V3
+-- ============================================================
+
+local Version = new("TextLabel", {
+    Parent = Main,
+
+    BackgroundTransparency = 1,
+
+    Size =
+        UDim2.fromOffset(
+            30,
+            18
+        ),
+
+    Position =
+        UDim2.new(
+            1,
+            -40,
+            1,
+            -23
+        ),
+
+    Text = "V3",
+
+    TextColor3 =
+        COLORS.sub,
+
+    Font =
+        Enum.Font.GothamBold,
+
+    TextSize = 10,
+
+    TextXAlignment =
+        Enum.TextXAlignment.Right,
+
+    TextYAlignment =
+        Enum.TextYAlignment.Center
+})
+
+-- ============================================================
+-- BOTÕES HEADER
+-- ============================================================
 
 local Min = new("TextButton", {
     Parent = Header,
 
-    Size = UDim2.fromOffset(38,38),
+    Size =
+        UDim2.fromOffset(
+            30,
+            30
+        ),
 
-    Position = UDim2.new(
-        1,-92,
-        0,19
-    ),
+    Position =
+        UDim2.new(
+            1,
+            -76,
+            0,
+            11
+        ),
 
     Text = "—",
 
-    BackgroundColor3 = COLORS.panel2,
+    BackgroundColor3 =
+        COLORS.panel2,
 
-    TextColor3 = COLORS.text,
+    TextColor3 =
+        COLORS.text,
 
-    Font = Enum.Font.GothamBold,
+    Font =
+        Enum.Font.GothamBold,
 
-    TextSize = 19,
+    TextSize = 17,
 
-    BorderSizePixel = 0,
+    BorderSizePixel = 0
 })
 
-round(Min,9)
-
--- FECHAR
+round(Min, 8)
 
 local Close = new("TextButton", {
     Parent = Header,
 
-    Size = UDim2.fromOffset(38,38),
+    Size =
+        UDim2.fromOffset(
+            30,
+            30
+        ),
 
-    Position = UDim2.new(
-        1,-47,
-        0,19
-    ),
+    Position =
+        UDim2.new(
+            1,
+            -40,
+            0,
+            11
+        ),
 
     Text = "×",
 
-    BackgroundColor3 = COLORS.red,
+    BackgroundColor3 =
+        COLORS.red,
 
-    TextColor3 = COLORS.text,
+    TextColor3 =
+        COLORS.text,
 
-    Font = Enum.Font.GothamBold,
+    Font =
+        Enum.Font.GothamBold,
 
-    TextSize = 21,
+    TextSize = 18,
 
-    BorderSizePixel = 0,
+    BorderSizePixel = 0
 })
 
-round(Close,9)
+round(Close, 8)
 
+-- ============================================================
 -- STATUS
+-- ============================================================
 
-Status = label(
-    Main,
-    "Pronto para iniciar a pesquisa.",
-    UDim2.new(1,-40,0,24),
-    UDim2.fromOffset(20,91),
-    11
-)
+local Status =
+    label(
+        Main,
+        "Pronto para realizar a leitura.",
+        UDim2.new(1,-28,0,28),
+        UDim2.fromOffset(14,66),
+        11
+    )
 
 Status.TextColor3 = COLORS.sub
 
--- BOTÃO SCAN
+-- ============================================================
+-- SCAN
+-- ============================================================
 
 local Scan = new("TextButton", {
     Parent = Main,
 
-    Size = UDim2.new(0.5,-25,0,48),
+    Size =
+        UDim2.new(
+            .5,
+            -20,
+            0,
+            42
+        ),
 
-    Position = UDim2.fromOffset(20,122),
+    Position =
+        UDim2.fromOffset(
+            14,
+            98
+        ),
 
-    Text = "INICIAR LEITURA",
+    Text =
+        "REALIZAR LEITURA DE BOTS",
 
-    BackgroundColor3 = COLORS.blue2,
+    BackgroundColor3 =
+        COLORS.blue2,
 
-    TextColor3 = COLORS.text,
+    TextColor3 =
+        COLORS.text,
 
-    Font = Enum.Font.GothamBold,
+    Font =
+        Enum.Font.GothamBold,
 
-    TextSize = 11,
+    TextSize = 10,
 
-    BorderSizePixel = 0,
+    BorderSizePixel = 0
 })
 
-round(Scan,9)
+round(Scan, 8)
 
--- BOTÃO STOP
+-- ============================================================
+-- EXPORT
+-- ============================================================
 
-local Stop = new("TextButton", {
+local Export = new("TextButton", {
     Parent = Main,
 
-    Size = UDim2.new(0.5,-25,0,48),
+    Size =
+        UDim2.new(
+            .5,
+            -20,
+            0,
+            42
+        ),
 
-    Position = UDim2.new(
-        0.5,5,
-        0,122
-    ),
+    Position =
+        UDim2.new(
+            .5,
+            6,
+            0,
+            98
+        ),
 
-    Text = "PARAR MONITORAMENTO",
+    Text =
+        "BAIXAR ARQUIVO DE LEITURA",
 
-    BackgroundColor3 = COLORS.panel2,
+    BackgroundColor3 =
+        COLORS.blue,
 
-    TextColor3 = COLORS.text,
+    TextColor3 =
+        COLORS.text,
 
-    Font = Enum.Font.GothamBold,
+    Font =
+        Enum.Font.GothamBold,
 
-    TextSize = 11,
+    TextSize = 10,
 
-    BorderSizePixel = 0,
+    BorderSizePixel = 0
 })
 
-round(Stop,9)
+round(Export, 8)
 
+-- ============================================================
 -- SUMMARY
+-- ============================================================
 
-local Summary = label(
-    Main,
-    "Nenhuma pesquisa realizada.",
-    UDim2.new(1,-40,0,48),
-    UDim2.fromOffset(20,184),
-    11
-)
+local Summary =
+    label(
+        Main,
+        "Nenhuma leitura realizada.",
+        UDim2.new(1,-28,0,52),
+        UDim2.fromOffset(14,150),
+        10
+    )
 
-Summary.TextColor3 = COLORS.text
 Summary.TextWrapped = true
+Summary.TextColor3 = COLORS.text
 
+-- ============================================================
 -- VIEWER
+-- ============================================================
 
 local Viewer = new("TextBox", {
     Parent = Main,
 
-    Size = UDim2.new(
-        1,-40,
-        1,-255
-    ),
+    Size =
+        UDim2.new(
+            1,
+            -28,
+            1,
+            -222
+        ),
 
-    Position = UDim2.fromOffset(20,232),
+    Position =
+        UDim2.fromOffset(
+            14,
+            204
+        ),
 
-    BackgroundColor3 = COLORS.panel,
+    BackgroundColor3 =
+        COLORS.panel,
 
     BorderSizePixel = 0,
 
     Text = "",
 
-    TextColor3 = COLORS.text,
+    TextColor3 =
+        COLORS.text,
 
-    Font = Enum.Font.Code,
+    Font =
+        Enum.Font.Code,
 
-    TextSize = 10,
+    TextSize = 9,
 
     MultiLine = true,
 
@@ -1894,176 +1089,261 @@ local Viewer = new("TextBox", {
 
     TextEditable = false,
 
-    TextXAlignment = Enum.TextXAlignment.Left,
+    TextXAlignment =
+        Enum.TextXAlignment.Left,
 
-    TextYAlignment = Enum.TextYAlignment.Top,
+    TextYAlignment =
+        Enum.TextYAlignment.Top
 })
 
-round(Viewer,9)
+round(Viewer, 8)
 
--- EXPORTAR
-
-local Export = new("TextButton", {
-    Parent = Main,
-
-    Size = UDim2.fromOffset(250,42),
-
-    Position = UDim2.new(
-        1,-270,
-        1,-58
-    ),
-
-    Text = "BAIXAR ARQUIVO DE LEITURA",
-
-    BackgroundColor3 = COLORS.blue,
-
-    TextColor3 = COLORS.text,
-
-    Font = Enum.Font.GothamBold,
-
-    TextSize = 10,
-
-    BorderSizePixel = 0,
-})
-
-round(Export,9)
-
---==============================================================
+-- ============================================================
 -- BOTÃO FLUTUANTE
---==============================================================
+-- ============================================================
 
 local Mini = new("TextButton", {
     Parent = Gui,
 
-    Size = UDim2.fromOffset(58,58),
+    Size =
+        UDim2.fromOffset(
+            54,
+            54
+        ),
 
-    Position = UDim2.new(
-        0.5,-29,
-        0.5,-29
-    ),
+    Position =
+        UDim2.new(
+            .5,
+            -27,
+            .5,
+            -27
+        ),
 
-    BackgroundColor3 = COLORS.blue,
+    BackgroundColor3 =
+        COLORS.blue,
 
     Text = "C",
 
-    TextColor3 = COLORS.text,
+    TextColor3 =
+        COLORS.text,
 
-    Font = Enum.Font.GothamBlack,
+    Font =
+        Enum.Font.GothamBlack,
 
-    TextSize = 21,
+    TextSize = 19,
 
     BorderSizePixel = 0,
 
-    Visible = false,
+    Visible = false
 })
 
-round(Mini,99)
+round(Mini, 99)
 
---==============================================================
--- SCAN
---==============================================================
+-- ============================================================
+-- PREVIEW
+-- ============================================================
+
+local function preview()
+
+    local lines = {
+
+        "LEITURA DE BOTS • V3",
+        "",
+
+        "ENTIDADES",
+        "Total: "..#State.Records,
+        "Army: "..#State.Army,
+        "Rebels: "..#State.Rebels,
+
+        "Possíveis jogáveis: "
+            ..#State.Playable,
+
+        "Possíveis manequins: "
+            ..#State.Mannequins,
+
+        "",
+
+        "EVENTOS",
+        "Soldier events: "
+            ..#State.SoldierEvents,
+
+        "Player events: "
+            ..#State.PlayerEvents,
+
+        "",
+
+        "TEAM ANALYSIS",
+    }
+
+    local teamSources = {}
+
+    for _, r in ipairs(State.Records) do
+
+        if r.team then
+
+            local key =
+                tostring(r.teamSource)
+                .." = "
+                ..tostring(r.team)
+
+            teamSources[key] =
+                (teamSources[key] or 0) + 1
+        end
+    end
+
+    for source, amount in pairs(teamSources) do
+
+        lines[#lines + 1] =
+            "  "
+            ..source
+            .." : "
+            ..amount
+    end
+
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "ENTIDADES:"
+
+    for _, r in ipairs(State.Records) do
+
+        local team =
+            tostring(r.team or "?")
+
+        local source =
+            tostring(r.teamSource or "?")
+
+        local highlight =
+            r.highlight
+            and r.highlight.exists
+            and "HIGHLIGHT"
+            or "SEM HIGHLIGHT"
+
+        lines[#lines + 1] =
+            "["
+            ..team
+            .."] "
+            ..r.name
+            .." | fonte="
+            ..source
+            .." | "
+            ..highlight
+    end
+
+    Viewer.Text =
+        table.concat(
+            lines,
+            "\n"
+        )
+end
+
+-- ============================================================
+-- SCAN EVENT
+-- ============================================================
 
 Scan.Activated:Connect(function()
 
-    if State.Running then
+    Scan.Text = "LENDO..."
 
-        Status.Text = "O monitoramento já está ativo."
-        Status.TextColor3 = COLORS.yellow
+    Status.Text =
+        "Analisando Soldiers, Team, Highlight e eventos..."
 
-        return
-    end
+    Status.TextColor3 =
+        COLORS.sub
 
-    Scan.Text = "INICIANDO..."
+    task.spawn(function()
 
-    performScan()
+        local ok, result =
+            pcall(scanBots)
 
-    task.delay(0.5, function()
+        if ok then
 
-        Scan.Text = "INICIAR LEITURA"
+            preview()
 
+            Summary.Text =
+                "Leitura concluída • "
+                ..#State.Records
+                .." entidades • "
+                ..#State.Army
+                .." Army • "
+                ..#State.Rebels
+                .." Rebels • "
+                ..#State.SoldierEvents
+                .." eventos Soldier"
+
+            Status.Text =
+                "Leitura concluída com sucesso."
+
+            Status.TextColor3 =
+                COLORS.green
+
+        else
+
+            Status.Text =
+                "Erro durante a leitura: "
+                ..tostring(result)
+
+            Status.TextColor3 =
+                COLORS.red
+        end
+
+        Scan.Text =
+            "REALIZAR LEITURA DE BOTS"
     end)
 end)
 
---==============================================================
--- STOP
---==============================================================
-
-Stop.Activated:Connect(function()
-
-    stopResearch()
-
-    updatePreview()
-end)
-
---==============================================================
--- PREVIEW AUTOMÁTICO
---==============================================================
-
-task.spawn(function()
-
-    while Gui.Parent do
-
-        task.wait(2)
-
-        if State.Scanned then
-
-            pcall(function()
-                updatePreview()
-            end)
-        end
-    end
-end)
-
---==============================================================
--- EXPORTAÇÃO
---==============================================================
+-- ============================================================
+-- EXPORT EVENT
+-- ============================================================
 
 Export.Activated:Connect(function()
 
     if not State.Scanned then
 
-        Status.Text = "Faça a leitura primeiro."
-        Status.TextColor3 = COLORS.yellow
+        Status.Text =
+            "Faça a leitura primeiro."
+
+        Status.TextColor3 =
+            COLORS.yellow
 
         return
     end
 
-    -- Se ainda estiver rodando, encerra primeiro
-    -- para registrar corretamente EndAt/EndAtUnix.
+    Status.Text =
+        "Gerando arquivo..."
 
-    if State.Running then
-        stopResearch()
+    Status.TextColor3 =
+        COLORS.sub
+
+    local data =
+        jsonExport()
+
+    if not data then
+
+        Status.Text =
+            "Não foi possível gerar o JSON."
+
+        Status.TextColor3 =
+            COLORS.red
+
+        return
     end
 
-    Status.Text = "Preparando arquivo..."
-    Status.TextColor3 = COLORS.sub
+    local filename =
+        "Cafeina_BotResearch_V3_"
+        ..tostring(game.PlaceId)
+        .."_"
+        ..tostring(os.time())
+        ..".json"
 
-    task.spawn(function()
+    local wrote = false
 
-        local data = jsonExport()
+    -- ========================================================
+    -- WRITEFILE
+    -- ========================================================
 
-        if not data then
+    if typeof(writefile) == "function" then
 
-            Status.Text = "Erro ao gerar o JSON."
-            Status.TextColor3 = COLORS.red
-
-            return
-        end
-
-        local filename =
-            "Cafeina_BotResearchV2_"
-            ..tostring(game.PlaceId)
-            .."_"
-            ..tostring(os.time())
-            ..".json"
-
-        -- -----------------------------------------
-        -- WRITEFILE
-        -- -----------------------------------------
-
-        if typeof(writefile) == "function" then
-
-            local ok, err = pcall(function()
+        local ok =
+            pcall(function()
 
                 writefile(
                     filename,
@@ -2072,67 +1352,66 @@ Export.Activated:Connect(function()
 
             end)
 
-            if ok then
+        wrote = ok
+    end
 
-                Status.Text =
-                    "Arquivo exportado com sucesso!"
+    -- ========================================================
+    -- FALLBACK CLIPBOARD
+    -- ========================================================
 
-                Status.TextColor3 = COLORS.green
-
-                Summary.Text =
-                    "Exportação concluída • "
-                    ..filename
-
-                updatePreview()
-
-                return
-            end
-        end
-
-        -- -----------------------------------------
-        -- CLIPBOARD
-        -- -----------------------------------------
-
-        if typeof(setclipboard) == "function" then
-
-            local copied = pcall(function()
-
-                setclipboard(data)
-
-            end)
-
-            if copied then
-
-                Status.Text =
-                    "Dados copiados para a área de transferência."
-
-                Status.TextColor3 = COLORS.yellow
-
-                Summary.Text =
-                    "writefile indisponível • JSON copiado."
-
-                return
-            end
-        end
-
-        -- -----------------------------------------
-        -- SEM MÉTODO
-        -- -----------------------------------------
+    if wrote then
 
         Status.Text =
-            "Não foi possível exportar o arquivo."
+            "ARQUIVO EXPORTADO COM SUCESSO!"
 
-        Status.TextColor3 = COLORS.red
+        Status.TextColor3 =
+            COLORS.green
 
         Summary.Text =
-            "O ambiente não disponibiliza writefile nem clipboard."
+            "Arquivo salvo com sucesso:\n"
+            ..filename
 
-    end)
+    elseif typeof(setclipboard) == "function" then
+
+        local ok =
+            pcall(function()
+                setclipboard(data)
+            end)
+
+        if ok then
+
+            Status.Text =
+                "JSON COPIADO COM SUCESSO!"
+
+            Status.TextColor3 =
+                COLORS.green
+
+            Summary.Text =
+                "writefile indisponível.\n"
+                .."O conteúdo completo foi copiado para a área de transferência."
+
+        else
+
+            Status.Text =
+                "Falha ao salvar/copiar."
+
+            Status.TextColor3 =
+                COLORS.red
+        end
+
+    else
+
+        Status.Text =
+            "writefile/clipboard indisponíveis."
+
+        Status.TextColor3 =
+            COLORS.red
+    end
 end)
 
---==============================================================
+-- ============================================================
 -- MINIMIZAR
---==============================================================
+-- ============================================================
 
 Min.Activated:Connect(function()
 
@@ -2141,9 +1420,9 @@ Min.Activated:Connect(function()
 
 end)
 
---==============================================================
--- REABRIR
---==============================================================
+-- ============================================================
+-- BOTÃO FLUTUANTE
+-- ============================================================
 
 Mini.Activated:Connect(function()
 
@@ -2152,35 +1431,11 @@ Mini.Activated:Connect(function()
 
 end)
 
---==============================================================
+-- ============================================================
 -- FECHAR
---==============================================================
+-- ============================================================
 
 Close.Activated:Connect(function()
-
-    State.Running = false
-
-    for _, connection in ipairs(State.Connections) do
-
-        pcall(function()
-            connection:Disconnect()
-        end)
-
-    end
-
-    for _, bot in ipairs(State.Bots) do
-
-        bot.active = false
-
-        for _, connection in ipairs(bot.connections or {}) do
-
-            pcall(function()
-                connection:Disconnect()
-            end)
-
-        end
-
-    end
 
     pcall(function()
         Gui:Destroy()
@@ -2188,29 +1443,32 @@ Close.Activated:Connect(function()
 
 end)
 
---==============================================================
+-- ============================================================
 -- ARRASTAR BOTÃO FLUTUANTE
---==============================================================
+-- ============================================================
 
 do
 
     local dragging = false
 
-    local dragStart = nil
-    local startPos = nil
+    local dragStart
+    local startPos
 
     Mini.InputBegan:Connect(function(input)
 
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
+        if input.UserInputType ==
+            Enum.UserInputType.MouseButton1
+            or input.UserInputType ==
+            Enum.UserInputType.Touch then
 
             dragging = true
 
-            dragStart = input.Position
-            startPos = Mini.Position
+            dragStart =
+                input.Position
 
+            startPos =
+                Mini.Position
         end
-
     end)
 
     UserInputService.InputChanged:Connect(function(input)
@@ -2219,64 +1477,129 @@ do
             return
         end
 
-        if input.UserInputType ~= Enum.UserInputType.MouseMovement
-        and input.UserInputType ~= Enum.UserInputType.Touch then
+        if input.UserInputType ~=
+            Enum.UserInputType.MouseMovement
+            and input.UserInputType ~=
+            Enum.UserInputType.Touch then
 
             return
         end
 
         local delta =
-            input.Position - dragStart
+            input.Position
+            - dragStart
 
-        Mini.Position = UDim2.new(
+        Mini.Position =
+            UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
 
-            startPos.X.Scale,
-            startPos.X.Offset + delta.X,
-
-            startPos.Y.Scale,
-            startPos.Y.Offset + delta.Y
-
-        )
-
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
     end)
 
     UserInputService.InputEnded:Connect(function(input)
 
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
+        if input.UserInputType ==
+            Enum.UserInputType.MouseButton1
+            or input.UserInputType ==
+            Enum.UserInputType.Touch then
 
             dragging = false
-
         end
-
     end)
 
 end
 
---==============================================================
--- ESTADO INICIAL
---==============================================================
+-- ============================================================
+-- MONITORAMENTO DE PLAYERS
+-- ============================================================
 
-Status.Text = "Pronto para iniciar a pesquisa."
-Status.TextColor3 = COLORS.sub
+Players.PlayerAdded:Connect(function(player)
 
-Summary.Text =
-    "A V2 registra spawn, equipe, alterações, snapshots, "
-    .."Highlight, morte e remoção."
+    recordPlayerEvent(
+        "PLAYER_ADDED",
+        player
+    )
 
-Viewer.Text =
-    "CAFÉÍNA • BOT RESEARCH V2\n\n"
-    .."Coletor passivo pronto.\n\n"
-    .."A pesquisa registra:\n"
-    .."• Spawn observado\n"
-    .."• Identidade e caminho\n"
-    .."• Team e fonte da informação\n"
-    .."• Histórico de Team\n"
-    .."• Attributes\n"
-    .."• Objetos criados/removidos\n"
-    .."• Highlight (verificação complementar)\n"
-    .."• Humanoid\n"
-    .."• Snapshots periódicos\n"
-    .."• Morte\n"
-    .."• Remoção\n\n"
-    .."Clique em INICIAR LEITURA para começar."
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+
+    recordPlayerEvent(
+        "PLAYER_REMOVING",
+        player
+    )
+
+end)
+
+-- ============================================================
+-- MONITORAMENTO DE SOLDIERS
+-- ============================================================
+
+local SoldiersFolder =
+    workspace:FindFirstChild("Soldiers")
+
+if SoldiersFolder then
+
+    SoldiersFolder.ChildAdded:Connect(function(child)
+
+        recordSoldierEvent(
+            "CREATED",
+            child
+        )
+
+    end)
+
+    SoldiersFolder.ChildRemoved:Connect(function(child)
+
+        recordSoldierEvent(
+            "REMOVED",
+            child
+        )
+
+    end)
+
+else
+
+    -- Caso Soldiers ainda não exista no momento da execução.
+    workspace.ChildAdded:Connect(function(child)
+
+        if child.Name == "Soldiers" then
+
+            recordSoldierEvent(
+                "SOLDIERS_FOLDER_CREATED",
+                child
+            )
+
+            child.ChildAdded:Connect(function(bot)
+
+                recordSoldierEvent(
+                    "CREATED",
+                    bot
+                )
+
+            end)
+
+            child.ChildRemoved:Connect(function(bot)
+
+                recordSoldierEvent(
+                    "REMOVED",
+                    bot
+                )
+
+            end)
+        end
+    end)
+end
+
+-- ============================================================
+-- FIM
+-- ============================================================
+
+Status.Text =
+    "V3 carregada. Pronto para realizar a leitura."
+
+Status.TextColor3 =
+    COLORS.sub
