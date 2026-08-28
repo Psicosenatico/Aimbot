@@ -1,16 +1,8 @@
 --========================================================
 -- TEST CONTROL PANEL
 -- ESP + AIMBOT
+-- VERSÃO: TEAM ATTRIBUTE / SOLDIERS
 -- Para uso no seu próprio jogo no Roblox Studio
---
--- CORREÇÃO:
--- Bots são procurados em Workspace.Soldiers
--- e identificados pelo atributo "Team":
---     Army   = Exército
---     Rebels = Rebeldes
---
--- Manequins/objetos sem Humanoid + HumanoidRootPart
--- são ignorados.
 --========================================================
 
 local Players = game:GetService("Players")
@@ -92,9 +84,7 @@ end
 
 local function DisconnectAll()
 
-    for _, connection in ipairs(
-        Connections
-    ) do
+    for _, connection in ipairs(Connections) do
 
         if connection
         and connection.Connected then
@@ -124,7 +114,7 @@ end
 
 local function NormalizeTeamName(name)
 
-    if not name then
+    if name == nil then
         return nil
     end
 
@@ -167,6 +157,7 @@ end
 
 --========================================================
 -- TIME DO PLAYER
+-- ÚNICA FONTE PARA PLAYERS
 --========================================================
 
 local function GetPlayerTeam(player)
@@ -185,6 +176,10 @@ local function GetPlayerTeam(player)
 end
 
 
+--========================================================
+-- MEU TIME
+--========================================================
+
 local function GetLocalTeam()
 
     return GetPlayerTeam(
@@ -194,7 +189,7 @@ end
 
 
 --========================================================
--- SOLDIERS
+-- PASTA REAL DOS BOTS
 --========================================================
 
 local function GetSoldiersFolder()
@@ -253,7 +248,7 @@ end
 
 
 --========================================================
--- VERIFICAR PERSONAGEM ESTÁTICO
+-- VERIFICAR SE O MODELO POSSUI PARTES MÓVEIS
 --========================================================
 
 local function IsStaticDummy(character)
@@ -268,7 +263,6 @@ local function IsStaticDummy(character)
             "Humanoid"
         )
 
-
     local root =
         character:FindFirstChild(
             "HumanoidRootPart"
@@ -282,29 +276,14 @@ local function IsStaticDummy(character)
     end
 
 
-    -- Se o Humanoid estiver morto,
-    -- não tratamos como alvo válido.
-    if humanoid.Health <= 0 then
-        return true
-    end
-
-
-    -- Verificação de movimento físico.
-    --
-    -- Bots reais normalmente possuem partes
-    -- não ancoradas. Manequins estáticos tendem
-    -- a possuir as partes ancoradas.
-
     for _, object in ipairs(
         character:GetDescendants()
     ) do
 
-        if object:IsA("BasePart") then
+        if object:IsA("BasePart")
+        and not object.Anchored then
 
-            if not object.Anchored then
-
-                return false
-            end
+            return false
         end
     end
 
@@ -314,7 +293,17 @@ end
 
 
 --========================================================
--- TIME DO BOT
+-- IDENTIFICAR BOT
+--
+-- NOVA LÓGICA:
+-- Workspace.Soldiers.<BOT>.Team
+--
+-- NÃO USA:
+-- Army folder
+-- Rebels folder
+-- aura
+-- cor visual
+-- Highlight nativo
 --========================================================
 
 local function GetBotTeam(character)
@@ -341,26 +330,15 @@ local function GetBotTeam(character)
     end
 
 
-    --====================================================
-    -- FONTE PRINCIPAL:
-    -- atributo Team do próprio BOT
-    --====================================================
-
     local teamAttribute =
         character:GetAttribute(
             "Team"
         )
 
 
-    if teamAttribute then
-
-        return NormalizeTeamName(
-            teamAttribute
-        )
-    end
-
-
-    return nil
+    return NormalizeTeamName(
+        teamAttribute
+    )
 end
 
 
@@ -397,6 +375,11 @@ local function GetCharacterTeam(character)
     -- BOT
     --====================================================
 
+    if IsStaticDummy(character) then
+        return nil
+    end
+
+
     return GetBotTeam(
         character
     )
@@ -424,7 +407,6 @@ local function IsValidCharacter(character)
             "Humanoid"
         )
 
-
     local root =
         character:FindFirstChild(
             "HumanoidRootPart"
@@ -449,25 +431,21 @@ local function IsValidCharacter(character)
         )
 
 
-    -- Players são aceitos normalmente.
+    --====================================================
+    -- PLAYERS
+    --====================================================
+
     if player then
         return true
     end
 
 
-    -- Bots precisam estar dentro de Soldiers
-    -- e não podem ser manequins estáticos.
-    local soldiersFolder =
-        GetSoldiersFolder()
-
-
-    if not soldiersFolder then
-        return false
-    end
-
+    --====================================================
+    -- BOTS
+    --====================================================
 
     if not character:IsDescendantOf(
-        soldiersFolder
+        GetSoldiersFolder() or workspace
     ) then
 
         return false
@@ -479,7 +457,6 @@ local function IsValidCharacter(character)
     end
 
 
-    -- O bot precisa possuir Team.
     if not GetBotTeam(character) then
         return false
     end
@@ -567,8 +544,6 @@ local function IsEnemyCharacter(character)
     end
 
 
-    -- Com Team Check desligado,
-    -- qualquer personagem válido é alvo.
     if not TeamCheckEnabled then
         return true
     end
@@ -685,6 +660,12 @@ end
 
 --========================================================
 -- OBTER TODOS OS PERSONAGENS
+--
+-- PLAYERS:
+-- Players:GetPlayers()
+--
+-- BOTS:
+-- Workspace.Soldiers
 --========================================================
 
 local function GetAllCharacters()
@@ -730,9 +711,6 @@ local function GetAllCharacters()
 
     --====================================================
     -- BOTS
-    --
-    -- FONTE CORRETA:
-    -- Workspace.Soldiers
     --====================================================
 
     local soldiersFolder =
@@ -856,7 +834,7 @@ local function UpdateESP()
 
 
     --====================================================
-    -- LIMPAR PERSONAGENS ANTIGOS
+    -- REMOVER ESP ANTIGO
     --====================================================
 
     for character, highlight in pairs(
@@ -879,7 +857,7 @@ end
 
 
 --========================================================
--- CENTRO DA TELA
+-- CENTRO REAL DA TELA
 --========================================================
 
 local function GetScreenCenter()
@@ -909,8 +887,9 @@ end
 
 
 --========================================================
--- TARGET SELECTION
--- MAIS PRÓXIMO DENTRO DO FOV
+-- TARGET
+-- MAIS PRÓXIMO EM DISTÂNCIA 3D
+-- DENTRO DO FOV
 --========================================================
 
 local function GetTarget()
@@ -1006,9 +985,6 @@ local function GetTarget()
                             if screenDistance <=
                                 FOVRadius then
 
-
-                                -- Primeiro critério:
-                                -- menor distância física.
 
                                 if worldDistance <
                                     closestWorldDistance then
@@ -1188,7 +1164,8 @@ end
 
 
 --========================================================
--- MINIMIZAR
+-- BOTÃO FLUTUANTE
+-- ESCUDO CENTRALIZADO
 --========================================================
 
 local function CreateMinimizedButton()
@@ -1201,52 +1178,24 @@ local function CreateMinimizedButton()
         "MinimizedButton"
 
 
-    -- Tamanho ajustado para o emoji
     MinimizedButton.Size =
         UDim2.fromOffset(
-            52,
-            52
+            60,
+            60
         )
 
 
     MinimizedButton.Position =
         UDim2.new(
             0.5,
-            -26,
+            -30,
             0.5,
-            -26
+            -30
         )
 
 
-    --====================================================
-    -- ESCUDO
-    --====================================================
-
     MinimizedButton.Text =
-        "🛡️"
-
-
-    MinimizedButton.TextColor3 =
-        WHITE
-
-
-    -- Tamanho ligeiramente reduzido
-    -- para melhorar o alinhamento visual.
-    MinimizedButton.TextSize =
-        21
-
-
-    MinimizedButton.Font =
-        Enum.Font.GothamBold
-
-
-    -- Centralização explícita
-    MinimizedButton.TextXAlignment =
-        Enum.TextXAlignment.Center
-
-
-    MinimizedButton.TextYAlignment =
-        Enum.TextYAlignment.Center
+        ""
 
 
     MinimizedButton.BackgroundColor3 =
@@ -1262,7 +1211,7 @@ local function CreateMinimizedButton()
 
 
     MinimizedButton.AutoButtonColor =
-        false
+        true
 
 
     MinimizedButton.Visible =
@@ -1289,50 +1238,72 @@ local function CreateMinimizedButton()
 
 
     --====================================================
-    -- PEQUENO AJUSTE DE PADDING
-    --
-    -- Ajuda a manter o emoji visualmente no centro
-    -- independentemente do fallback de fonte.
+    -- ESCUDO
     --====================================================
 
-    local padding =
-        Instance.new("UIPadding")
+    local ShieldLabel =
+        Instance.new("TextLabel")
 
 
-    padding.PaddingLeft =
-        UDim.new(
-            0,
-            0
+    ShieldLabel.Name =
+        "ShieldIcon"
+
+
+    ShieldLabel.AnchorPoint =
+        Vector2.new(
+            0.5,
+            0.5
         )
 
 
-    padding.PaddingRight =
-        UDim.new(
-            0,
-            0
+    ShieldLabel.Position =
+        UDim2.fromScale(
+            0.5,
+            0.5
         )
 
 
-    padding.PaddingTop =
-        UDim.new(
-            0,
-            1
+    ShieldLabel.Size =
+        UDim2.fromScale(
+            0.72,
+            0.72
         )
 
 
-    padding.PaddingBottom =
-        UDim.new(
-            0,
-            0
-        )
+    ShieldLabel.BackgroundTransparency =
+        1
 
 
-    padding.Parent =
+    ShieldLabel.Text =
+        "🛡️"
+
+
+    ShieldLabel.TextColor3 =
+        WHITE
+
+
+    ShieldLabel.TextSize =
+        28
+
+
+    ShieldLabel.Font =
+        Enum.Font.GothamBold
+
+
+    ShieldLabel.TextXAlignment =
+        Enum.TextXAlignment.Center
+
+
+    ShieldLabel.TextYAlignment =
+        Enum.TextYAlignment.Center
+
+
+    ShieldLabel.Parent =
         MinimizedButton
 
 
     --====================================================
-    -- RESTAURAR
+    -- ABRIR
     --====================================================
 
     Connect(
@@ -1349,7 +1320,7 @@ local function CreateMinimizedButton()
 
 
     --====================================================
-    -- ARRASTAR CÍRCULO
+    -- DRAG
     --====================================================
 
     local dragging =
@@ -1910,7 +1881,7 @@ function CreateInterface()
 
 
     --====================================================
-    -- TITLE
+    -- TITLE BAR
     --====================================================
 
     local TitleBar =
@@ -2060,7 +2031,7 @@ function CreateInterface()
 
 
     --====================================================
-    -- DRAG
+    -- DRAG MAIN
     --====================================================
 
     local dragging =
@@ -2496,8 +2467,8 @@ function CreateInterface()
 
 
     Info.Text =
-        "Aliados: VERDE  |  Inimigos: VERMELHO\n" ..
-        "Bots: Workspace.Soldiers → atributo Team"
+        "Players: player.Team  |  Bots: Model.Team\n" ..
+        "Army / Rebels  |  Manequins estáticos: ignorados"
 
 
     Info.TextColor3 =
@@ -2521,7 +2492,7 @@ function CreateInterface()
 
 
     --====================================================
-    -- MINIMIZADO
+    -- BOTÃO FLUTUANTE
     --====================================================
 
     CreateMinimizedButton()
@@ -2620,10 +2591,9 @@ function CreateInterface()
 
 
     --====================================================
-    -- OBJETOS NOVOS
-    --
-    -- Importante para bots que aparecem
-    -- depois do início da partida.
+    -- NOVOS OBJETOS
+    -- SOMENTE PARA DETECTAR NOVOS MODELOS
+    -- DENTRO DE SOLDIERS
     --====================================================
 
     Connect(
@@ -2635,26 +2605,29 @@ function CreateInterface()
             end
 
 
-            if object:IsA("Model") then
+            local soldiersFolder =
+                GetSoldiersFolder()
+
+
+            if not soldiersFolder then
+                return
+            end
+
+
+            if object:IsA("Model")
+            and object:IsDescendantOf(
+                soldiersFolder
+            ) then
 
                 task.defer(
                     function()
 
-                        local character =
-                            FindCharacterModel(
-                                object
-                            )
+                        task.wait(
+                            0.05
+                        )
 
 
-                        if character then
-
-                            task.wait(
-                                0.05
-                            )
-
-
-                            UpdateESP()
-                        end
+                        UpdateESP()
                     end
                 )
             end
@@ -2672,9 +2645,7 @@ function CreateInterface()
         ),
         function()
 
-            task.wait(
-                0.1
-            )
+            task.wait(0.1)
 
 
             if ESPEnabled then
@@ -2692,9 +2663,7 @@ function CreateInterface()
         LocalPlayer.CharacterAdded,
         function()
 
-            task.wait(
-                0.2
-            )
+            task.wait(0.2)
 
 
             if ESPEnabled then
@@ -2705,7 +2674,8 @@ function CreateInterface()
 
 
     --====================================================
-    -- MONITORAMENTO DOS BOTS
+    -- ATUALIZAÇÃO CONTÍNUA
+    -- ÚTIL PARA BOTS QUE MORREM/RENASCEM
     --====================================================
 
     task.spawn(
@@ -2715,9 +2685,7 @@ function CreateInterface()
             and Gui.Parent do
 
                 if ESPEnabled then
-
                     UpdateESP()
-
                 end
 
                 task.wait(
