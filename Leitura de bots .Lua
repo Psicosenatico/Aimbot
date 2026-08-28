@@ -1,62 +1,32 @@
 --==============================================================--
--- CAFEÍNA • BOT READER V1
+-- CAFEÍNA • BOT READING SCANNER
+-- STANDALONE V1
 --
--- LEITURA ESPECÍFICA DE BOTS
+-- OBJETIVO:
+-- • Identificar bots ativos
+-- • Diferenciar bots jogáveis de manequins
+-- • Detectar Team
+-- • Ler atributos dos bots
+-- • Ler Humanoid
+-- • Ler movimento
+-- • Ler pontos de patrulha
+-- • Relacionar bots aos pontos mais próximos
+-- • Observar novos spawns
+-- • Observar remoções
+-- • Exportar leitura para JSON
 --
--- NÃO REALIZA SCAN GERAL DO JOGO
---
--- INVESTIGA:
--- • BotPatrolPoints
--- • Army / Rebels
--- • Pontos de patrulha
--- • Candidatos a NPC/Bot
--- • Player x NPC
--- • Bot ativo x possível manequim
--- • Humanoid / RootPart
--- • Health / movimento
--- • Attributes
--- • Tags
--- • Relação espacial com PatrolPoints
---
--- EXPORTAÇÃO:
--- • JSON
--- • writefile quando disponível
--- • clipboard como fallback
---
--- INTERFACE:
--- • Mantém estrutura do Menu anterior
--- • Minimizar
--- • Fechar
--- • Suporte mobile
+-- NÃO DEPENDE DO MENU ANTIGO
 --==============================================================--
 
-local Players =
-    game:GetService("Players")
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 
-local HttpService =
-    game:GetService("HttpService")
-
-local UserInputService =
-    game:GetService("UserInputService")
-
-local TweenService =
-    game:GetService("TweenService")
-
-local CollectionService =
-    game:GetService("CollectionService")
-
-local CoreGui =
-    game:GetService("CoreGui")
-
-local Workspace =
-    game:GetService("Workspace")
-
-local LocalPlayer =
-    Players.LocalPlayer
+local LocalPlayer = Players.LocalPlayer
 
 if not LocalPlayer then
-    LocalPlayer =
-        Players.PlayerAdded:Wait()
+    LocalPlayer = Players.PlayerAdded:Wait()
 end
 
 --==============================================================--
@@ -64,204 +34,84 @@ end
 --==============================================================--
 
 local CONFIG = {
+    GUI_NAME = "CafeinaBotReadingStandalone",
 
-    VERSION = "BOT-READER-V1",
+    BOT_FOLDER_NAME = "Soldiers",
 
-    MENU_NAME =
-        "CafeinaBotReader",
+    PATROL_FOLDER_NAME = "BotPatrolPoints",
 
-    PATROL_FOLDER =
-        "BotPatrolPoints",
+    SAMPLE_INTERVAL = 0.75,
 
-    MOVEMENT_SAMPLE_TIME =
-        3,
+    MAX_MOVEMENT_SAMPLES = 20,
 
-    MOVEMENT_SAMPLE_INTERVAL =
-        0.25,
+    MAX_BOTS = 500,
 
-    MAX_BOT_CANDIDATES =
-        500,
+    MAX_PATROL_POINTS = 1000,
 
-    MAX_PATROL_POINTS =
-        500,
+    EXPORT_FOLDER = "Cafeina",
 
-    PATROL_ASSOCIATION_DISTANCE =
-        80,
-
-    MAX_VIEW_CHARS =
-        120000,
-
-    EXPORT_FOLDER =
-        "CafeinaBotReads",
-
-    SERVICES_TO_CHECK = {
-        "Workspace",
-        "ReplicatedStorage",
-        "ServerStorage",
-        "ServerScriptService",
-    },
+    VERSION = "BOT-READING-V1",
 }
-
---==============================================================--
--- COLORS
---==============================================================--
-
-local COLORS = {
-
-    BG =
-        Color3.fromRGB(
-            12,
-            12,
-            15
-        ),
-
-    PANEL =
-        Color3.fromRGB(
-            20,
-            20,
-            24
-        ),
-
-    PANEL2 =
-        Color3.fromRGB(
-            29,
-            29,
-            35
-        ),
-
-    STROKE =
-        Color3.fromRGB(
-            55,
-            55,
-            65
-        ),
-
-    RED =
-        Color3.fromRGB(
-            235,
-            38,
-            52
-        ),
-
-    RED_DARK =
-        Color3.fromRGB(
-            110,
-            20,
-            30
-        ),
-
-    TEXT =
-        Color3.fromRGB(
-            245,
-            245,
-            248
-        ),
-
-    SUB =
-        Color3.fromRGB(
-            160,
-            160,
-            172
-        ),
-
-    GREEN =
-        Color3.fromRGB(
-            65,
-            210,
-            118
-        ),
-
-    YELLOW =
-        Color3.fromRGB(
-            242,
-            184,
-            57
-        ),
-
-    ORANGE =
-        Color3.fromRGB(
-            245,
-            130,
-            55
-        ),
-}
-
---==============================================================--
--- REQUEST / FILE HELPERS
---==============================================================--
-
-local SetClipboard =
-    typeof(setclipboard) == "function"
-    and setclipboard
-    or
-    (
-        typeof(toclipboard) == "function"
-        and toclipboard
-        or nil
-    )
-
-local WriteFile =
-    typeof(writefile) == "function"
-    and writefile
-    or nil
-
-local MakeFolder =
-    typeof(makefolder) == "function"
-    and makefolder
-    or nil
 
 --==============================================================--
 -- STATE
 --==============================================================--
 
 local State = {
+    Scanning = false,
 
-    Reading = false,
+    Monitoring = false,
 
-    CancelRequested = false,
+    Minimized = false,
 
-    ReadComplete = false,
+    StartedAt = os.time(),
 
-    CurrentArea =
-        "Resumo",
+    ScanCount = 0,
 
-    StartedAt = 0,
+    LastScanAt = 0,
 
-    PatrolFolderFound =
-        false,
+    Bots = {},
 
-    PatrolPoints = {
-        Army = {},
-        Rebels = {},
-        Other = {},
+    SpawnHistory = {},
+
+    RemovalHistory = {},
+
+    PatrolPoints = {},
+
+    TeamSummary = {
+        Army = 0,
+        Rebels = 0,
+        Unknown = 0,
     },
 
-    BotCandidates = {},
-
-    Results = {
-
-        Metadata = {},
-
-        PatrolSystem = {},
-
-        Bots = {},
-
-        Summary = {},
+    ClassificationSummary = {
+        PlayableBot = 0,
+        Mannequin = 0,
+        Unknown = 0,
     },
-
-    ExportText = "",
-
-    ExportPath = "",
-
-    LastMessage = "",
 }
 
 --==============================================================--
--- SAFE HELPERS
+-- SERVICES / REFERENCES
 --==============================================================--
 
-local function safeCall(fn)
+local Workspace = game:GetService("Workspace")
 
+local BotFolder =
+    Workspace:FindFirstChild(
+        CONFIG.BOT_FOLDER_NAME
+    )
+
+local PatrolFolder =
+    Workspace:FindFirstChild(
+        CONFIG.PATROL_FOLDER_NAME
+    )
+
+--==============================================================--
+-- HELPERS
+--==============================================================--
+
+local function safeCall(fn, fallback)
     local ok, result =
         pcall(fn)
 
@@ -269,1682 +119,1064 @@ local function safeCall(fn)
         return result
     end
 
-    return nil
+    return fallback
 end
 
-local function safeName(object)
-
-    local result =
-        safeCall(function()
-            return object.Name
-        end)
-
-    return tostring(
-        result or "?"
+local function getFullName(instance)
+    return safeCall(
+        function()
+            return instance:GetFullName()
+        end,
+        tostring(instance.Name)
     )
 end
 
-local function safeClass(object)
-
-    local result =
-        safeCall(function()
-            return object.ClassName
-        end)
-
-    return tostring(
-        result or "?"
+local function getAttribute(instance, name)
+    return safeCall(
+        function()
+            return instance:GetAttribute(name)
+        end,
+        nil
     )
 end
 
-local function safeFullName(object)
-
-    local result =
-        safeCall(function()
-            return object:GetFullName()
-        end)
-
-    return tostring(
-        result or safeName(object)
+local function getAttributes(instance)
+    return safeCall(
+        function()
+            return instance:GetAttributes()
+        end,
+        {}
     )
 end
 
-local function safeAttribute(
-    object,
-    name
-)
-
-    local result =
-        safeCall(function()
-            return object:GetAttribute(name)
-        end)
-
-    return result
-end
-
-local function safeAttributes(
-    object
-)
-
-    local attributes = {}
-
-    local result =
-        safeCall(function()
-            return object:GetAttributes()
-        end)
-
-    if type(result) ~= "table" then
-        return attributes
-    end
-
-    for key, value
-        in pairs(result)
-    do
-
-        local valueType =
-            typeof(value)
-
-        if
-            valueType == "string"
-            or valueType == "number"
-            or valueType == "boolean"
-        then
-
-            attributes[
-                tostring(key)
-            ] = value
-
-        else
-
-            attributes[
-                tostring(key)
-            ] =
-                tostring(value)
-
-        end
-    end
-
-    return attributes
-end
-
-local function safeTags(
-    object
-)
-
-    local tags = {}
-
-    local ok, result =
-        pcall(function()
-
-            return CollectionService:
-                GetTags(object)
-
-        end)
-
-    if not ok
-        or type(result) ~= "table"
-    then
-        return tags
-    end
-
-    for _, tag
-        in ipairs(result)
-    do
-
-        tags[
-            #tags + 1
-        ] =
-            tostring(tag)
-
-    end
-
-    return tags
-end
-
-local function vectorToTable(
-    value
-)
-
-    if typeof(value)
-        ~= "Vector3"
-    then
+local function vectorToTable(v)
+    if typeof(v) ~= "Vector3" then
         return nil
     end
 
     return {
-
-        x = value.X,
-
-        y = value.Y,
-
-        z = value.Z,
+        x = v.X,
+        y = v.Y,
+        z = v.Z,
     }
 end
 
-local function getPosition(
-    object
-)
-
-    if not object then
-        return nil
+local function roundNumber(number)
+    if type(number) ~= "number" then
+        return number
     end
 
-    local root
-
-    if object:IsA("BasePart") then
-
-        root = object
-
-    else
-
-        root =
-            object:FindFirstChild(
-                "HumanoidRootPart"
-            )
-
-            or
-            object.PrimaryPart
-
-    end
-
-    if not root then
-        return nil
-    end
-
-    local position =
-        safeCall(function()
-            return root.Position
-        end)
-
-    return vectorToTable(
-        position
-    )
+    return math.floor(
+        number * 1000 + 0.5
+    ) / 1000
 end
 
-local function distance(
-    a,
-    b
-)
-
+local function distance(a, b)
     if not a or not b then
         return math.huge
     end
 
     return (
-        Vector3.new(
-            a.x,
-            a.y,
-            a.z
-        )
-        -
-        Vector3.new(
-            b.x,
-            b.y,
-            b.z
-        )
+        a - b
     ).Magnitude
 end
 
-local function formatBytes(
-    bytes
-)
-
-    bytes =
-        tonumber(bytes)
-        or 0
-
-    if bytes >=
-        1024 * 1024
-    then
-
-        return string.format(
-            "%.2f MB",
-            bytes /
-            (
-                1024 * 1024
+local function getRoot(model)
+    return safeCall(
+        function()
+            return model:FindFirstChild(
+                "HumanoidRootPart"
             )
-        )
-
-    elseif bytes >= 1024 then
-
-        return string.format(
-            "%.1f KB",
-            bytes / 1024
-        )
-
-    end
-
-    return tostring(bytes)
-        .. " B"
+        end,
+        nil
+    )
 end
 
-local function countDictionary(
-    dictionary
-)
-
-    local amount = 0
-
-    for _ in pairs(dictionary) do
-        amount += 1
-    end
-
-    return amount
+local function getHumanoid(model)
+    return safeCall(
+        function()
+            return model:FindFirstChildOfClass(
+                "Humanoid"
+            )
+        end,
+        nil
+    )
 end
 
 --==============================================================--
--- PLAYER DETECTION
+-- CLASSIFICATION
 --==============================================================--
 
-local function getPlayerFromCharacter(
-    model
-)
-
-    if not model then
-        return nil
+local function classifyBot(model)
+    if not model
+        or not model:IsA("Model")
+    then
+        return "Unknown"
     end
 
-    local player =
-        Players:GetPlayerFromCharacter(
-            model
-        )
+    local humanoid =
+        getHumanoid(model)
 
-    return player
-end
+    local root =
+        getRoot(model)
 
-local function isPlayerCharacter(
-    model
-)
-
-    return
-        getPlayerFromCharacter(
-            model
-        ) ~= nil
-
-end
-
---==============================================================--
--- PATROL POINT SCANNER
---==============================================================--
-
-local function classifyPatrolGroup(
-    point
-)
-
-    local parent =
-        point.Parent
-
-    if not parent then
-        return "Other"
-    end
-
-    local parentName =
-        string.lower(
-            safeName(parent)
-        )
-
-    local teamAttribute =
-        safeAttribute(
-            point,
+    local team =
+        getAttribute(
+            model,
             "Team"
         )
 
-    if
-        typeof(teamAttribute)
-        == "string"
-    then
-
-        local teamLower =
-            string.lower(
-                teamAttribute
-            )
-
-        if teamLower == "army" then
-            return "Army"
-        end
-
-        if
-            teamLower == "rebels"
-        then
-            return "Rebels"
-        end
-    end
-
-    if string.find(
-        parentName,
-        "army",
-        1,
-        true
-    )
-    then
-        return "Army"
-    end
-
-    if string.find(
-        parentName,
-        "rebel",
-        1,
-        true
-    )
-    then
-        return "Rebels"
-    end
-
-    return "Other"
-end
-
-local function scanPatrolPoints()
-
-    local result = {
-
-        found = false,
-
-        path = nil,
-
-        className = nil,
-
-        children = 0,
-
-        groups = {
-
-            Army = 0,
-
-            Rebels = 0,
-
-            Other = 0,
-        },
-
-        points = {},
-    }
-
-    local folder
-
-    folder =
-        Workspace:FindFirstChild(
-            CONFIG.PATROL_FOLDER
+    local health =
+        getAttribute(
+            model,
+            "Health"
         )
 
-    if not folder then
+    local speedMult =
+        getAttribute(
+            model,
+            "SpeedMult"
+        )
 
-        result.found =
-            false
+    local gun =
+        getAttribute(
+            model,
+            "Gun"
+        )
 
-        return result
+    local hasMovementStructure =
+        humanoid ~= nil
+        and root ~= nil
 
+    local hasBotAttributes =
+        team ~= nil
+        or health ~= nil
+        or speedMult ~= nil
+        or gun ~= nil
+
+    if
+        hasMovementStructure
+        and hasBotAttributes
+    then
+        return "PlayableBot"
     end
 
-    result.found =
-        true
+    if humanoid == nil then
+        return "Mannequin"
+    end
 
-    result.path =
-        safeFullName(folder)
+    return "Unknown"
+end
 
-    result.className =
-        safeClass(folder)
+--==============================================================--
+-- PATROL POINT READING
+--==============================================================--
+
+local function readPatrolPoints()
+
+    State.PatrolPoints = {}
+
+    if not PatrolFolder then
+        return
+    end
 
     local descendants =
-        folder:GetDescendants()
+        safeCall(
+            function()
+                return PatrolFolder:GetDescendants()
+            end,
+            {}
+        )
 
     local total = 0
 
-    for _, object
-        in ipairs(descendants)
-    do
+    for _, object in ipairs(descendants) do
 
-        if State.CancelRequested then
-            break
-        end
-
-        if total >=
-            CONFIG.MAX_PATROL_POINTS
-        then
+        if total >= CONFIG.MAX_PATROL_POINTS then
             break
         end
 
         if object:IsA("BasePart") then
 
-            total += 1
+            local folderTeam = nil
 
-            local group =
-                classifyPatrolGroup(
-                    object
-                )
+            if object.Parent then
+                folderTeam =
+                    tostring(
+                        object.Parent.Name
+                    )
+            end
 
-            local position =
-                getPosition(
-                    object
-                )
-
-            local teamAttribute =
-                safeAttribute(
+            local attributeTeam =
+                getAttribute(
                     object,
                     "Team"
                 )
 
-            local parentName =
-                object.Parent
-                and safeName(
-                    object.Parent
+            local position =
+                safeCall(
+                    function()
+                        return object.Position
+                    end,
+                    nil
                 )
-                or nil
 
-            local consistency =
-                "unknown"
-
-            if
-                group == "Army"
-                and typeof(
-                    teamAttribute
-                ) == "string"
-            then
-
-                if
-                    string.lower(
-                        teamAttribute
-                    )
-                    == "army"
-                then
-
-                    consistency =
-                        "consistent"
-
-                else
-
-                    consistency =
-                        "attribute_mismatch"
-
-                end
-
-            elseif
-                group == "Rebels"
-                and typeof(
-                    teamAttribute
-                ) == "string"
-            then
-
-                if
-                    string.lower(
-                        teamAttribute
-                    )
-                    == "rebels"
-                then
-
-                    consistency =
-                        "consistent"
-
-                else
-
-                    consistency =
-                        "attribute_mismatch"
-
-                end
-
-            end
-
-            local record = {
-
+            local point = {
                 name =
-                    safeName(object),
-
-                className =
-                    safeClass(object),
+                    tostring(object.Name),
 
                 path =
-                    safeFullName(object),
+                    getFullName(object),
+
+                className =
+                    tostring(object.ClassName),
 
                 parent =
-                    parentName,
+                    object.Parent
+                    and getFullName(
+                        object.Parent
+                    )
+                    or nil,
 
-                group =
-                    group,
+                folderTeam =
+                    folderTeam,
 
-                teamAttribute =
-                    teamAttribute,
-
-                consistency =
-                    consistency,
+                attributeTeam =
+                    attributeTeam,
 
                 position =
-                    position,
-
-                attributes =
-                    safeAttributes(
-                        object
+                    vectorToTable(
+                        position
                     ),
 
-                tags =
-                    safeTags(
-                        object
+                anchored =
+                    safeCall(
+                        function()
+                            return object.Anchored
+                        end,
+                        nil
+                    ),
+
+                transparency =
+                    safeCall(
+                        function()
+                            return object.Transparency
+                        end,
+                        nil
                     ),
             }
 
-            result.points[
-                #result.points + 1
-            ] = record
+            State.PatrolPoints[
+                #State.PatrolPoints + 1
+            ] = point
 
-            result.groups[group] += 1
+            total += 1
+        end
+    end
+end
 
-            State.PatrolPoints[group][
-                #State.PatrolPoints[group] + 1
-            ] = record
+--==============================================================--
+-- FIND NEAREST PATROL POINT
+--==============================================================--
 
+local function findNearestPatrolPoint(
+    position
+)
+
+    if not position then
+        return nil
+    end
+
+    local closest = nil
+    local closestDistance =
+        math.huge
+
+    for _, point
+        in ipairs(State.PatrolPoints)
+    do
+
+        if point.position then
+
+            local pointPosition =
+                Vector3.new(
+                    point.position.x,
+                    point.position.y,
+                    point.position.z
+                )
+
+            local currentDistance =
+                distance(
+                    position,
+                    pointPosition
+                )
+
+            if currentDistance
+                < closestDistance
+            then
+                closestDistance =
+                    currentDistance
+
+                closest = {
+                    path =
+                        point.path,
+
+                    folderTeam =
+                        point.folderTeam,
+
+                    attributeTeam =
+                        point.attributeTeam,
+
+                    distance =
+                        roundNumber(
+                            currentDistance
+                        ),
+                }
+            end
         end
     end
 
-    result.children =
-        total
+    return closest
+end
+
+--==============================================================--
+-- MOVEMENT SNAPSHOT
+--==============================================================--
+
+local function readMovement(model)
+    local humanoid =
+        getHumanoid(model)
+
+    local root =
+        getRoot(model)
+
+    if not humanoid
+        or not root
+    then
+        return {
+            available = false,
+        }
+    end
+
+    local moveDirection =
+        safeCall(
+            function()
+                return humanoid.MoveDirection
+            end,
+            Vector3.zero
+        )
+
+    local velocity =
+        safeCall(
+            function()
+                return root.AssemblyLinearVelocity
+            end,
+            Vector3.zero
+        )
+
+    local state =
+        safeCall(
+            function()
+                return humanoid:GetState()
+            end,
+            nil
+        )
+
+    local moving =
+        moveDirection.Magnitude > 0.05
+        or velocity.Magnitude > 1
+
+    return {
+        available = true,
+
+        moving = moving,
+
+        moveDirection =
+            vectorToTable(
+                moveDirection
+            ),
+
+        velocity =
+            vectorToTable(
+                velocity
+            ),
+
+        velocityMagnitude =
+            roundNumber(
+                velocity.Magnitude
+            ),
+
+        humanoidState =
+            state
+            and tostring(state)
+            or nil,
+
+        walkSpeed =
+            safeCall(
+                function()
+                    return humanoid.WalkSpeed
+                end,
+                nil
+            ),
+    }
+end
+
+--==============================================================--
+-- BOT RECORD
+--==============================================================--
+
+local function buildBotRecord(model)
+
+    local humanoid =
+        getHumanoid(model)
+
+    local root =
+        getRoot(model)
+
+    local classification =
+        classifyBot(model)
+
+    local attributes =
+        getAttributes(model)
+
+    local team =
+        getAttribute(
+            model,
+            "Team"
+        )
+
+    local position = nil
+
+    if root then
+        position =
+            safeCall(
+                function()
+                    return root.Position
+                end,
+                nil
+            )
+    end
+
+    local patrol =
+        findNearestPatrolPoint(
+            position
+        )
+
+    local movement =
+        readMovement(model)
+
+    local record = {
+
+        name =
+            tostring(model.Name),
+
+        path =
+            getFullName(model),
+
+        className =
+            tostring(model.ClassName),
+
+        classification =
+            classification,
+
+        parent =
+            model.Parent
+            and getFullName(
+                model.Parent
+            )
+            or nil,
+
+        team =
+            team,
+
+        attributes =
+            attributes,
+
+        humanoid = {
+            exists =
+                humanoid ~= nil,
+
+            health =
+                humanoid
+                and safeCall(
+                    function()
+                        return humanoid.Health
+                    end,
+                    nil
+                )
+                or nil,
+
+            maxHealth =
+                humanoid
+                and safeCall(
+                    function()
+                        return humanoid.MaxHealth
+                    end,
+                    nil
+                )
+                or nil,
+
+            walkSpeed =
+                humanoid
+                and safeCall(
+                    function()
+                        return humanoid.WalkSpeed
+                    end,
+                    nil
+                )
+                or nil,
+
+            jumpPower =
+                humanoid
+                and safeCall(
+                    function()
+                        return humanoid.JumpPower
+                    end,
+                    nil
+                )
+                or nil,
+
+            rigType =
+                humanoid
+                and safeCall(
+                    function()
+                        return tostring(
+                            humanoid.RigType
+                        )
+                    end,
+                    nil
+                )
+                or nil,
+        },
+
+        root = {
+            exists =
+                root ~= nil,
+
+            position =
+                vectorToTable(
+                    position
+                ),
+        },
+
+        movement =
+            movement,
+
+        nearestPatrolPoint =
+            patrol,
+
+        observedAt =
+            os.time(),
+    }
+
+    return record
+end
+
+--==============================================================--
+-- REGISTER BOT
+--==============================================================--
+
+local function registerBot(model)
+
+    if not model
+        or not model:IsA("Model")
+    then
+        return
+    end
+
+    if #State.SpawnHistory
+        > CONFIG.MAX_BOTS
+    then
+        return
+    end
+
+    local record =
+        buildBotRecord(model)
+
+    local path =
+        record.path
+
+    State.Bots[path] = {
+        model = model,
+
+        record = record,
+
+        firstSeen =
+            os.time(),
+
+        lastSeen =
+            os.time(),
+
+        samples = {},
+
+        movementHistory = {},
+    }
+
+    State.SpawnHistory[
+        #State.SpawnHistory + 1
+    ] = {
+        name =
+            record.name,
+
+        path =
+            record.path,
+
+        classification =
+            record.classification,
+
+        team =
+            record.team,
+
+        observedAt =
+            os.time(),
+    }
+end
+
+--==============================================================--
+-- UPDATE BOT
+--==============================================================--
+
+local function updateBot(path, data)
+
+    if not data
+        or not data.model
+    then
+        return
+    end
+
+    local model =
+        data.model
+
+    if not model.Parent then
+        return
+    end
+
+    local record =
+        buildBotRecord(model)
+
+    data.record =
+        record
+
+    data.lastSeen =
+        os.time()
+
+    local movement =
+        record.movement
+
+    data.movementHistory[
+        #data.movementHistory + 1
+    ] = {
+        timestamp =
+            os.time(),
+
+        position =
+            record.root.position,
+
+        moving =
+            movement.moving,
+
+        direction =
+            movement.moveDirection,
+
+        velocity =
+            movement.velocity,
+
+        patrol =
+            record.nearestPatrolPoint,
+    }
+
+    if #data.movementHistory
+        > CONFIG.MAX_MOVEMENT_SAMPLES
+    then
+        table.remove(
+            data.movementHistory,
+            1
+        )
+    end
+end
+
+--==============================================================--
+-- SCAN EXISTING BOTS
+--==============================================================--
+
+local function scanBots()
+
+    State.Scanning = true
+
+    State.Bots = {}
+
+    State.SpawnHistory = {}
+
+    State.RemovalHistory = {}
+
+    State.TeamSummary = {
+        Army = 0,
+        Rebels = 0,
+        Unknown = 0,
+    }
+
+    State.ClassificationSummary = {
+        PlayableBot = 0,
+        Mannequin = 0,
+        Unknown = 0,
+    }
+
+    readPatrolPoints()
+
+    BotFolder =
+        Workspace:FindFirstChild(
+            CONFIG.BOT_FOLDER_NAME
+        )
+
+    if not BotFolder then
+        State.Scanning = false
+        return
+    end
+
+    local children =
+        BotFolder:GetChildren()
+
+    local total = 0
+
+    for _, object
+        in ipairs(children)
+    do
+
+        if total >= CONFIG.MAX_BOTS then
+            break
+        end
+
+        if object:IsA("Model") then
+
+            registerBot(object)
+
+            total += 1
+        end
+    end
+
+    for _, data
+        in pairs(State.Bots)
+    do
+
+        local team =
+            data.record.team
+
+        if team == "Army" then
+            State.TeamSummary.Army += 1
+
+        elseif team == "Rebels" then
+            State.TeamSummary.Rebels += 1
+
+        else
+            State.TeamSummary.Unknown += 1
+        end
+
+        local classification =
+            data.record.classification
+
+        if classification
+            == "PlayableBot"
+        then
+            State.ClassificationSummary.PlayableBot += 1
+
+        elseif classification
+            == "Mannequin"
+        then
+            State.ClassificationSummary.Mannequin += 1
+
+        else
+            State.ClassificationSummary.Unknown += 1
+        end
+    end
+
+    State.ScanCount += 1
+    State.LastScanAt = os.time()
+
+    State.Scanning = false
+end
+
+--==============================================================--
+-- BOT FOLDER EVENTS
+--==============================================================--
+
+local Connections = {}
+
+local function disconnectAll()
+
+    for _, connection
+        in ipairs(Connections)
+    do
+
+        pcall(function()
+            connection:Disconnect()
+        end)
+
+    end
+
+    Connections = {}
+end
+
+local function startMonitoring()
+
+    disconnectAll()
+
+    BotFolder =
+        Workspace:FindFirstChild(
+            CONFIG.BOT_FOLDER_NAME
+        )
+
+    if not BotFolder then
+        return
+    end
+
+    State.Monitoring = true
+
+    Connections[
+        #Connections + 1
+    ] =
+        BotFolder.ChildAdded:Connect(
+            function(child)
+
+                if not child:IsA("Model") then
+                    return
+                end
+
+                task.wait(0.1)
+
+                registerBot(child)
+
+            end
+        )
+
+    Connections[
+        #Connections + 1
+    ] =
+        BotFolder.ChildRemoved:Connect(
+            function(child)
+
+                if not child:IsA("Model") then
+                    return
+                end
+
+                local path =
+                    getFullName(child)
+
+                local oldData =
+                    State.Bots[path]
+
+                if oldData then
+
+                    State.RemovalHistory[
+                        #State.RemovalHistory + 1
+                    ] = {
+
+                        name =
+                            tostring(child.Name),
+
+                        path =
+                            path,
+
+                        team =
+                            oldData.record.team,
+
+                        classification =
+                            oldData.record.classification,
+
+                        removedAt =
+                            os.time(),
+                    }
+
+                    State.Bots[path] = nil
+                end
+            end
+        )
+
+    Connections[
+        #Connections + 1
+    ] =
+        RunService.Heartbeat:Connect(
+            function()
+
+                if not State.Monitoring then
+                    return
+                end
+
+                for path, data
+                    in pairs(State.Bots)
+                do
+
+                    if
+                        data.model
+                        and data.model.Parent
+                    then
+
+                        updateBot(
+                            path,
+                            data
+                        )
+                    end
+                end
+            end
+        )
+end
+
+--==============================================================--
+-- EXPORT DATA
+--==============================================================--
+
+local function buildExport()
+
+    local bots = {}
+
+    for path, data
+        in pairs(State.Bots)
+    do
+
+        local copy = {
+            record =
+                data.record,
+
+            firstSeen =
+                data.firstSeen,
+
+            lastSeen =
+                data.lastSeen,
+
+            movementHistory =
+                data.movementHistory,
+        }
+
+        bots[path] = copy
+    end
+
+    return {
+
+        scanner = {
+            name =
+                "CAFEINA BOT READING",
+
+            version =
+                CONFIG.VERSION,
+
+            generatedAt =
+                os.time(),
+
+            generatedDate =
+                os.date(
+                    "!%Y-%m-%dT%H:%M:%SZ"
+                ),
+        },
+
+        game = {
+            placeId =
+                game.PlaceId,
+
+            gameId =
+                game.GameId,
+
+            jobId =
+                game.JobId,
+
+            placeVersion =
+                game.PlaceVersion,
+        },
+
+        structure = {
+            botFolder =
+                BotFolder
+                and getFullName(
+                    BotFolder
+                )
+                or nil,
+
+            patrolFolder =
+                PatrolFolder
+                and getFullName(
+                    PatrolFolder
+                )
+                or nil,
+        },
+
+        summary = {
+            scanCount =
+                State.ScanCount,
+
+            botCount =
+                #State.SpawnHistory,
+
+            activeBots =
+                State.ClassificationSummary.PlayableBot,
+
+            mannequins =
+                State.ClassificationSummary.Mannequin,
+
+            unknown =
+                State.ClassificationSummary.Unknown,
+
+            army =
+                State.TeamSummary.Army,
+
+            rebels =
+                State.TeamSummary.Rebels,
+
+            unknownTeam =
+                State.TeamSummary.Unknown,
+        },
+
+        patrolPoints =
+            State.PatrolPoints,
+
+        spawnHistory =
+            State.SpawnHistory,
+
+        removalHistory =
+            State.RemovalHistory,
+
+        bots =
+            bots,
+    }
+end
+
+local function encodeExport()
+
+    local data =
+        buildExport()
+
+    local ok, result =
+        pcall(function()
+            return HttpService:JSONEncode(
+                data
+            )
+        end)
+
+    if not ok then
+        return nil,
+            tostring(result)
+    end
 
     return result
 end
 
 --==============================================================--
--- PATROL ASSOCIATION
+-- FILE EXPORT
 --==============================================================--
 
-local function findNearestPatrol(
-    position
-)
+local function exportFile()
 
-    local nearest = nil
+    local json, errorMessage =
+        encodeExport()
 
-    local nearestDistance =
-        math.huge
-
-    for group, points
-        in pairs(
-            State.PatrolPoints
-        )
-    do
-
-        if
-            group == "Army"
-            or group == "Rebels"
-        then
-
-            for _, point
-                in ipairs(points)
-            do
-
-                local d =
-                    distance(
-                        position,
-                        point.position
-                    )
-
-                if d <
-                    nearestDistance
-                then
-
-                    nearestDistance =
-                        d
-
-                    nearest = {
-
-                        group =
-                            group,
-
-                        distance =
-                            d,
-
-                        point =
-                            point,
-                    }
-
-                end
-            end
-        end
-    end
-
-    return nearest
-end
-
---==============================================================--
--- CANDIDATE DETECTION
---==============================================================--
-
-local function isInterestingModel(
-    model
-)
-
-    if not model:IsA("Model") then
-        return false
-    end
-
-    if isPlayerCharacter(
-        model
-    ) then
-        return false
-    end
-
-    local humanoid =
-        model:FindFirstChildOfClass(
-            "Humanoid"
-        )
-
-    if not humanoid then
-        return false
-    end
-
-    return true
-end
-
-local function collectBotCandidates()
-
-    local candidates = {}
-
-    local seen = {}
-
-    for _, serviceName
-        in ipairs(
-            CONFIG.SERVICES_TO_CHECK
-        )
-    do
-
-        if State.CancelRequested then
-            break
-        end
-
-        local service =
-            safeCall(function()
-                return game:GetService(
-                    serviceName
-                )
-            end)
-
-        if service then
-
-            local descendants =
-                safeCall(function()
-                    return service:GetDescendants()
-                end)
-
-            if type(descendants)
-                == "table"
-            then
-
-                for _, object
-                    in ipairs(
-                        descendants
-                    )
-                do
-
-                    if State.CancelRequested then
-                        break
-                    end
-
-                    if
-                        #candidates
-                        >=
-                        CONFIG.MAX_BOT_CANDIDATES
-                    then
-                        break
-                    end
-
-                    if
-                        isInterestingModel(
-                            object
-                        )
-                    then
-
-                        if not seen[object] then
-
-                            seen[object] =
-                                true
-
-                            candidates[
-                                #candidates + 1
-                            ] =
-                                object
-
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    return candidates
-end
-
---==============================================================--
--- MOVEMENT OBSERVATION
---==============================================================--
-
-local function observeMovement(
-    model
-)
-
-    local humanoid =
-        model:FindFirstChildOfClass(
-            "Humanoid"
-        )
-
-    local root =
-        model:FindFirstChild(
-            "HumanoidRootPart"
-        )
-
-    if not humanoid
-        or not root
-    then
-
-        return {
-
-            observed = false,
-
-            moved = false,
-
-            rotated = false,
-
-            distanceMoved = 0,
-
-            samples = 0,
-        }
-
-    end
-
-    local initialPosition =
-        root.Position
-
-    local initialLook =
-        root.CFrame.LookVector
-
-    local maxDistance =
-        0
-
-    local rotationChanged =
-        false
-
-    local samples =
-        0
-
-    local started =
-        os.clock()
-
-    while
-        os.clock() - started
-        <
-        CONFIG.MOVEMENT_SAMPLE_TIME
-    do
-
-        if State.CancelRequested then
-            break
-        end
-
-        if not model.Parent then
-            break
-        end
-
-        local currentPosition =
-            safeCall(function()
-                return root.Position
-            end)
-
-        local currentLook =
-            safeCall(function()
-                return root.CFrame.LookVector
-            end)
-
-        if currentPosition then
-
-            local movedDistance =
-                (
-                    currentPosition
-                    -
-                    initialPosition
-                ).Magnitude
-
-            if movedDistance >
-                maxDistance
-            then
-
-                maxDistance =
-                    movedDistance
-
-            end
-        end
-
-        if currentLook then
-
-            local dot =
-                initialLook:Dot(
-                    currentLook
-                )
-
-            if dot < 0.999 then
-                rotationChanged =
-                    true
-            end
-        end
-
-        samples += 1
-
-        task.wait(
-            CONFIG.MOVEMENT_SAMPLE_INTERVAL
-        )
-    end
-
-    return {
-
-        observed = true,
-
-        moved =
-            maxDistance > 1,
-
-        rotated =
-            rotationChanged,
-
-        distanceMoved =
-            maxDistance,
-
-        samples =
-            samples,
-    }
-end
-
---==============================================================--
--- BOT ANALYSIS
---==============================================================--
-
-local function analyzeBot(
-    model
-)
-
-    local humanoid =
-        model:FindFirstChildOfClass(
-            "Humanoid"
-        )
-
-    local root =
-        model:FindFirstChild(
-            "HumanoidRootPart"
-        )
-
-    local position =
-        getPosition(
-            model
-        )
-
-    local nearestPatrol =
-        findNearestPatrol(
-            position
-        )
-
-    local player =
-        getPlayerFromCharacter(
-            model
-        )
-
-    local attributes =
-        safeAttributes(
-            model
-        )
-
-    local tags =
-        safeTags(
-            model
-        )
-
-    local health =
-        safeCall(function()
-            return humanoid.Health
-        end)
-
-    local maxHealth =
-        safeCall(function()
-            return humanoid.MaxHealth
-        end)
-
-    local walkSpeed =
-        safeCall(function()
-            return humanoid.WalkSpeed
-        end)
-
-    local jumpPower =
-        safeCall(function()
-            return humanoid.JumpPower
-        end)
-
-    local rigType =
-        safeCall(function()
-            return tostring(
-                humanoid.RigType
-            )
-        end)
-
-    local teamAttribute =
-        safeAttribute(
-            model,
-            "Team"
-        )
-
-    local teamName =
-        nil
-
-    if
-        typeof(teamAttribute)
-        == "string"
-    then
-
-        teamName =
-            teamAttribute
-
-    end
-
-    local movement =
-        observeMovement(
-            model
-        )
-
-    local evidence = {
-
-        humanoid =
-            humanoid ~= nil,
-
-        rootPart =
-            root ~= nil,
-
-        playerAssociation =
-            player ~= nil,
-
-        movementObserved =
-            movement.observed,
-
-        positionChanged =
-            movement.moved,
-
-        rotationChanged =
-            movement.rotated,
-
-        patrolAssociation =
-            nearestPatrol ~= nil,
-
-        patrolDistance =
-            nearestPatrol
-            and nearestPatrol.distance
-            or nil,
-
-        patrolGroup =
-            nearestPatrol
-            and nearestPatrol.group
-            or nil,
-
-        teamAttribute =
-            teamName,
-
-        hasHealth =
-            health ~= nil,
-
-        hasMaxHealth =
-            maxHealth ~= nil,
-
-        positiveHealth =
-            tonumber(health or 0)
-            > 0,
-
-        walkSpeed =
-            walkSpeed,
-
-        jumpPower =
-            jumpPower,
-    }
-
-    --==========================================================--
-    -- CLASSIFICATION
-    --==========================================================--
-
-    local score =
-        0
-
-    local reasons = {}
-
-    if not player then
-
-        score += 2
-
-        reasons[
-            #reasons + 1
-        ] =
-            "não associado a Player"
-
-    else
-
-        score -= 5
-
-        reasons[
-            #reasons + 1
-        ] =
-            "associado a Player"
-
-    end
-
-    if humanoid then
-
-        score += 1
-
-    end
-
-    if root then
-
-        score += 1
-
-    end
-
-    if movement.moved then
-
-        score += 3
-
-        reasons[
-            #reasons + 1
-        ] =
-            "posição alterada durante observação"
-
-    end
-
-    if movement.rotated then
-
-        score += 1
-
-        reasons[
-            #reasons + 1
-        ] =
-            "rotação alterada durante observação"
-
-    end
-
-    if nearestPatrol
-        and nearestPatrol.distance
-        <=
-        CONFIG.PATROL_ASSOCIATION_DISTANCE
-    then
-
-        score += 3
-
-        reasons[
-            #reasons + 1
-        ] =
-            "próximo de ponto de patrulha"
-
-    end
-
-    if
-        typeof(teamName)
-        == "string"
-    then
-
-        score += 1
-
-        reasons[
-            #reasons + 1
-        ] =
-            "possui atributo Team"
-
-    end
-
-    local classification
-
-    if player then
-
-        classification =
-            "PLAYER_CHARACTER"
-
-    elseif score >= 7 then
-
-        classification =
-            "ACTIVE_BOT"
-
-    elseif score >= 3 then
-
-        classification =
-            "BOT_CANDIDATE"
-
-    else
-
-        classification =
-            "POSSIBLE_DUMMY"
-
-    end
-
-    --==========================================================--
-    -- TEAM RESOLUTION
-    --==========================================================--
-
-    local detectedTeam =
-        teamName
-
-    local teamEvidence = {}
-
-    if teamName then
-
-        teamEvidence[
-            #teamEvidence + 1
-        ] =
-            "Model.Attribute.Team"
-
-    end
-
-    if nearestPatrol then
-
-        if
-            not detectedTeam
-            or
-            nearestPatrol.distance
-            <
-            CONFIG.PATROL_ASSOCIATION_DISTANCE
-        then
-
-            detectedTeam =
-                nearestPatrol.group
-
-            teamEvidence[
-                #teamEvidence + 1
-            ] =
-                "nearest BotPatrolPoint"
-
-        end
-    end
-
-    return {
-
-        name =
-            safeName(model),
-
-        className =
-            safeClass(model),
-
-        path =
-            safeFullName(model),
-
-        classification =
-            classification,
-
-        confidenceScore =
-            score,
-
-        reasons =
-            reasons,
-
-        detectedTeam =
-            detectedTeam,
-
-        teamEvidence =
-            teamEvidence,
-
-        position =
-            position,
-
-        patrolAssociation =
-            nearestPatrol
-            and {
-
-                group =
-                    nearestPatrol.group,
-
-                distance =
-                    nearestPatrol.distance,
-
-                point =
-                    nearestPatrol.point
-                    and nearestPatrol.point.path
-                    or nil,
-
-            }
-            or nil,
-
-        humanoid = {
-
-            health =
-                health,
-
-            maxHealth =
-                maxHealth,
-
-            walkSpeed =
-                walkSpeed,
-
-            jumpPower =
-                jumpPower,
-
-            rigType =
-                rigType,
-        },
-
-        evidence =
-            evidence,
-
-        attributes =
-            attributes,
-
-        tags =
-            tags,
-    }
-end
-
---==============================================================--
--- SUMMARY
---==============================================================--
-
-local function buildSummary()
-
-    local summary = {
-
-        totalCandidates =
-            #State.Results.Bots,
-
-        activeBots = 0,
-
-        botCandidates = 0,
-
-        possibleDummies = 0,
-
-        players = 0,
-
-        army = 0,
-
-        rebels = 0,
-
-        unknownTeam = 0,
-
-        patrolPoints = {
-
-            Army =
-                #State.PatrolPoints.Army,
-
-            Rebels =
-                #State.PatrolPoints.Rebels,
-
-            Other =
-                #State.PatrolPoints.Other,
-        },
-    }
-
-    for _, bot
-        in ipairs(
-            State.Results.Bots
-        )
-    do
-
-        if
-            bot.classification
-            == "ACTIVE_BOT"
-        then
-
-            summary.activeBots += 1
-
-        elseif
-            bot.classification
-            == "BOT_CANDIDATE"
-        then
-
-            summary.botCandidates += 1
-
-        elseif
-            bot.classification
-            == "POSSIBLE_DUMMY"
-        then
-
-            summary.possibleDummies += 1
-
-        elseif
-            bot.classification
-            == "PLAYER_CHARACTER"
-        then
-
-            summary.players += 1
-
-        end
-
-        if
-            bot.detectedTeam
-            == "Army"
-        then
-
-            summary.army += 1
-
-        elseif
-            bot.detectedTeam
-            == "Rebels"
-        then
-
-            summary.rebels += 1
-
-        else
-
-            summary.unknownTeam += 1
-
-        end
-    end
-
-    return summary
-end
-
---==============================================================--
--- METADATA
---==============================================================--
-
-local function buildMetadata()
-
-    return {
-
-        scanner =
-            "CAFEINA BOT READER",
-
-        version =
-            CONFIG.VERSION,
-
-        generatedAtUnix =
-            os.time(),
-
-        placeId =
-            game.PlaceId,
-
-        gameId =
-            game.GameId,
-
-        jobId =
-            game.JobId,
-
-        placeVersion =
-            game.PlaceVersion,
-
-        localPlayer =
-            LocalPlayer.Name,
-
-        localUserId =
-            LocalPlayer.UserId,
-
-        patrolFolder =
-            CONFIG.PATROL_FOLDER,
-
-        movementSampleTime =
-            CONFIG.MOVEMENT_SAMPLE_TIME,
-
-        patrolAssociationDistance =
-            CONFIG.PATROL_ASSOCIATION_DISTANCE,
-    }
-end
-
---==============================================================--
--- COMPLETE SCAN
---==============================================================--
-
-local function runReader()
-
-    if State.Reading then
-        return
-    end
-
-    State.Reading =
-        true
-
-    State.CancelRequested =
-        false
-
-    State.ReadComplete =
-        false
-
-    State.StartedAt =
-        os.clock()
-
-    State.PatrolPoints = {
-
-        Army = {},
-
-        Rebels = {},
-
-        Other = {},
-    }
-
-    State.Results = {
-
-        Metadata = {},
-
-        PatrolSystem = {},
-
-        Bots = {},
-
-        Summary = {},
-    }
-
-    setStatus(
-        "Localizando BotPatrolPoints...",
-        COLORS.YELLOW
-    )
-
-    setProgress(
-        0.05
-    )
-
-    --==========================================================--
-    -- PATROL
-    --==========================================================--
-
-    local patrolResult =
-        scanPatrolPoints()
-
-    if State.CancelRequested then
-
-        State.Reading =
-            false
-
-        return
-
-    end
-
-    State.Results.PatrolSystem =
-        patrolResult
-
-    if patrolResult.found then
-
-        setStatus(
-            "BotPatrolPoints encontrado",
-            COLORS.GREEN
-        )
-
-    else
-
-        setStatus(
-            "BotPatrolPoints não encontrado",
-            COLORS.ORANGE
-        )
-
-    end
-
-    setProgress(
-        0.25
-    )
-
-    task.wait()
-
-    --==========================================================--
-    -- CANDIDATES
-    --==========================================================--
-
-    setStatus(
-        "Procurando candidatos a bot...",
-        COLORS.YELLOW
-    )
-
-    local candidates =
-        collectBotCandidates()
-
-    State.BotCandidates =
-        candidates
-
-    setProgress(
-        0.45
-    )
-
-    --==========================================================--
-    -- ANALYSIS
-    --==========================================================--
-
-    local total =
-        #candidates
-
-    for index, model
-        in ipairs(candidates)
-    do
-
-        if State.CancelRequested then
-            break
-        end
-
-        setStatus(
-            "Analisando bot "
-            .. tostring(index)
-            .. " / "
-            .. tostring(total),
-
-            COLORS.YELLOW
-        )
-
-        local ok, result =
-            pcall(
-                analyzeBot,
-                model
-            )
-
-        if ok
-            and type(result)
-            == "table"
-        then
-
-            State.Results.Bots[
-                #State.Results.Bots + 1
-            ] =
-                result
-
-        end
-
-        setProgress(
-            0.45
-            +
-            (
-                (index /
-                    math.max(
-                        total,
-                        1
-                    )
-                )
-                * 0.45
-            )
-        )
-
-        task.wait()
-
-    end
-
-    --==========================================================--
-    -- FINAL
-    --==========================================================--
-
-    State.Results.Metadata =
-        buildMetadata()
-
-    State.Results.Summary =
-        buildSummary()
-
-    State.ReadComplete =
-        not State.CancelRequested
-
-    State.Reading =
-        false
-
-    setProgress(
-        State.ReadComplete
-        and 1
-        or 0
-    )
-
-    if State.ReadComplete then
-
-        setStatus(
-            "Leitura concluída • "
-            .. tostring(
-                #State.Results.Bots
-            )
-            .. " candidatos",
-
-            COLORS.GREEN
-        )
-
-    else
-
-        setStatus(
-            "Leitura cancelada",
-            COLORS.ORANGE
-        )
-
-    end
-
-    openArea(
-        "Resumo"
-    )
-end
-
---==============================================================--
--- EXPORT
---==============================================================--
-
-local function generateExport()
-
-    local ok, encoded =
-        pcall(function()
-
-            return HttpService:
-                JSONEncode(
-                    State.Results
-                )
-
-        end)
-
-    if not ok then
-
+    if not json then
         return false,
-            tostring(encoded)
-
-    end
-
-    State.ExportText =
-        encoded
-
-    return true,
-        encoded
-end
-
-local function downloadReading()
-
-    if not State.ReadComplete then
-
-        setStatus(
-            "Faça a leitura primeiro",
-            COLORS.YELLOW
-        )
-
-        return
-
-    end
-
-    local ok, encoded =
-        generateExport()
-
-    if not ok then
-
-        setStatus(
-            "Erro ao gerar JSON",
-            COLORS.RED
-        )
-
-        return
-
+            errorMessage
     end
 
     local timestamp =
         os.date(
-            "!%Y%m%d_%H%M%S"
+            "%Y%m%d_%H%M%S"
         )
 
-    local fileName =
-        "Cafeina_BotRead_"
+    local filename =
+        "Cafeina_BotReading_"
         .. tostring(
             game.PlaceId
         )
@@ -1952,1929 +1184,997 @@ local function downloadReading()
         .. timestamp
         .. ".json"
 
-    --==========================================================--
-    -- WRITEFILE
-    --==========================================================--
+    local writeFile =
+        typeof(writefile)
+        == "function"
+        and writefile
+        or nil
 
-    if WriteFile then
+    if writeFile then
 
-        local success, err =
-            pcall(function()
-
-                if MakeFolder then
-
-                    pcall(
-                        MakeFolder,
-                        CONFIG.EXPORT_FOLDER
-                    )
-
-                end
-
-                WriteFile(
-                    CONFIG.EXPORT_FOLDER
-                    .. "/"
-                    .. fileName,
-
-                    encoded
-                )
-
-            end)
-
-        if success then
-
-            State.ExportPath =
-                CONFIG.EXPORT_FOLDER
-                .. "/"
-                .. fileName
-
-            if SetClipboard then
-
-                pcall(
-                    SetClipboard,
-                    encoded
-                )
-
-            end
-
-            setStatus(
-                "Arquivo salvo: "
-                .. fileName,
-
-                COLORS.GREEN
-            )
-
-            return
-        end
-
-        setStatus(
-            "Falha ao salvar arquivo",
-            COLORS.RED
-        )
-
-        warn(
-            "[CAFEINA BOT READER]",
-            err
-        )
-
-        return
-    end
-
-    --==========================================================--
-    -- FALLBACK CLIPBOARD
-    --==========================================================--
-
-    if SetClipboard then
-
-        local copied =
+        local ok, err =
             pcall(
-                SetClipboard,
-                encoded
+                function()
+                    writeFile(
+                        filename,
+                        json
+                    )
+                end
             )
 
-        if copied then
-
-            setStatus(
-                "JSON copiado para o clipboard",
-                COLORS.GREEN
-            )
-
-            return
+        if ok then
+            return true,
+                filename
         end
+
+        return false,
+            tostring(err)
     end
 
-    Viewer.Text =
-        encoded
-
-    setStatus(
-        "JSON gerado na área de leitura",
-        COLORS.YELLOW
-    )
+    return false,
+        "writefile indisponível"
 end
 
 --==============================================================--
--- GUI HELPERS
+-- CLIPBOARD FALLBACK
 --==============================================================--
 
-local function create(
-    className,
-    props
-)
+local function copyExport()
 
-    local object =
-        Instance.new(
-            className
-        )
+    local json, errorMessage =
+        encodeExport()
 
-    for key, value
-        in pairs(
-            props or {}
-        )
-    do
-
-        object[key] =
-            value
-
+    if not json then
+        return false,
+            errorMessage
     end
 
-    return object
-end
+    local clipboard =
+        typeof(setclipboard)
+        == "function"
+        and setclipboard
+        or nil
 
-local function corner(
-    parent,
-    radius
-)
+    if not clipboard then
+        clipboard =
+            typeof(toclipboard)
+            == "function"
+            and toclipboard
+            or nil
+    end
 
-    return create(
-        "UICorner",
-        {
+    if not clipboard then
+        return false,
+            "Clipboard indisponível"
+    end
 
-            CornerRadius =
-                UDim.new(
-                    0,
-                    radius or 10
-                ),
-
-            Parent =
-                parent,
-        }
-    )
-end
-
-local function stroke(
-    parent
-)
-
-    return create(
-        "UIStroke",
-        {
-
-            Color =
-                COLORS.STROKE,
-
-            Thickness =
-                1,
-
-            Parent =
-                parent,
-        }
-    )
-end
-
---==============================================================--
--- GUI PARENT
---==============================================================--
-
-local GuiParent =
-    nil
-
-if typeof(gethui)
-    == "function"
-then
-
-    local ok, result =
-        pcall(gethui)
+    local ok, err =
+        pcall(
+            clipboard,
+            json
+        )
 
     if ok then
-        GuiParent =
-            result
+        return true
     end
+
+    return false,
+        tostring(err)
 end
 
-local PlayerGui =
+--==============================================================--
+-- GUI
+--==============================================================--
+
+local oldGui =
+    LocalPlayer
+    :WaitForChild("PlayerGui")
+    :FindFirstChild(
+        CONFIG.GUI_NAME
+    )
+
+if oldGui then
+    oldGui:Destroy()
+end
+
+local Gui =
+    Instance.new("ScreenGui")
+
+Gui.Name =
+    CONFIG.GUI_NAME
+
+Gui.ResetOnSpawn =
+    false
+
+Gui.IgnoreGuiInset =
+    true
+
+Gui.Parent =
     LocalPlayer:WaitForChild(
         "PlayerGui"
     )
 
-local Gui =
-    create(
-        "ScreenGui",
-        {
-
-            Name =
-                CONFIG.MENU_NAME,
-
-            ResetOnSpawn =
-                false,
-
-            IgnoreGuiInset =
-                true,
-
-            ZIndexBehavior =
-                Enum.ZIndexBehavior.Sibling,
-        }
-    )
-
-local parented =
-    false
-
-if GuiParent then
-
-    parented =
-        pcall(function()
-
-            Gui.Parent =
-                GuiParent
-
-        end)
-end
-
-if not parented then
-
-    parented =
-        pcall(function()
-
-            Gui.Parent =
-                CoreGui
-
-        end)
-end
-
-if not parented then
-
-    Gui.Parent =
-        PlayerGui
-
-end
-
 --==============================================================--
--- REMOVE OLD INSTANCE
+-- COLORS
 --==============================================================--
 
-for _, object
-    in ipairs(
-        Gui.Parent:GetChildren()
-    )
-do
+local COLORS = {
 
-    if
-        object ~= Gui
-        and object.Name
-        == CONFIG.MENU_NAME
-    then
+    Background =
+        Color3.fromRGB(
+            12,
+            12,
+            15
+        ),
 
-        pcall(function()
-            object:Destroy()
-        end)
+    Panel =
+        Color3.fromRGB(
+            20,
+            20,
+            24
+        ),
 
-    end
-end
+    Panel2 =
+        Color3.fromRGB(
+            29,
+            29,
+            35
+        ),
+
+    Red =
+        Color3.fromRGB(
+            225,
+            38,
+            52
+        ),
+
+    RedDark =
+        Color3.fromRGB(
+            110,
+            20,
+            30
+        ),
+
+    Green =
+        Color3.fromRGB(
+            65,
+            210,
+            118
+        ),
+
+    Yellow =
+        Color3.fromRGB(
+            242,
+            184,
+            57
+        ),
+
+    Text =
+        Color3.fromRGB(
+            245,
+            245,
+            248
+        ),
+
+    Sub =
+        Color3.fromRGB(
+            160,
+            160,
+            172
+        ),
+}
 
 --==============================================================--
--- MAIN
+-- MAIN FRAME
 --==============================================================--
 
 local Main =
-    create(
-        "Frame",
-        {
+    Instance.new("Frame")
 
-            Size =
-                UDim2.fromScale(
-                    0.9,
-                    0.78
-                ),
-
-            AnchorPoint =
-                Vector2.new(
-                    0.5,
-                    0.5
-                ),
-
-            Position =
-                UDim2.fromScale(
-                    0.5,
-                    0.5
-                ),
-
-            BackgroundColor3 =
-                COLORS.BG,
-
-            BorderSizePixel =
-                0,
-
-            Parent =
-                Gui,
-        }
+Main.Size =
+    UDim2.fromOffset(
+        430,
+        430
     )
 
-corner(
-    Main,
-    14
-)
+Main.Position =
+    UDim2.fromScale(
+        0.5,
+        0.5
+    )
 
-stroke(
+Main.AnchorPoint =
+    Vector2.new(
+        0.5,
+        0.5
+    )
+
+Main.BackgroundColor3 =
+    COLORS.Background
+
+Main.BorderSizePixel =
+    0
+
+Main.Parent =
+    Gui
+
+local corner =
+    Instance.new("UICorner")
+
+corner.CornerRadius =
+    UDim.new(
+        0,
+        14
+    )
+
+corner.Parent =
     Main
-)
 
 --==============================================================--
 -- HEADER
 --==============================================================--
 
 local Header =
-    create(
-        "Frame",
-        {
+    Instance.new("Frame")
 
-            Size =
-                UDim2.new(
-                    1,
-                    0,
-                    0,
-                    56
-                ),
-
-            BackgroundColor3 =
-                COLORS.PANEL,
-
-            BorderSizePixel =
-                0,
-
-            Parent =
-                Main,
-        }
+Header.Size =
+    UDim2.new(
+        1,
+        0,
+        0,
+        55
     )
 
-corner(
-    Header,
-    14
-)
+Header.BackgroundColor3 =
+    COLORS.Panel
 
-create(
-    "TextLabel",
-    {
+Header.BorderSizePixel =
+    0
 
-        Position =
-            UDim2.fromOffset(
-                14,
-                7
-            ),
+Header.Parent =
+    Main
 
-        Size =
-            UDim2.new(
-                1,
-                -100,
-                0,
-                24
-            ),
+local HeaderCorner =
+    Instance.new("UICorner")
 
-        BackgroundTransparency =
-            1,
+HeaderCorner.CornerRadius =
+    UDim.new(
+        0,
+        14
+    )
 
-        Text =
-            "CAFEÍNA • LEITURA DE BOTS",
+HeaderCorner.Parent =
+    Header
 
-        TextColor3 =
-            COLORS.TEXT,
+local Title =
+    Instance.new("TextLabel")
 
-        Font =
-            Enum.Font.GothamBold,
+Title.BackgroundTransparency =
+    1
 
-        TextSize =
-            16,
+Title.Position =
+    UDim2.fromOffset(
+        14,
+        7
+    )
 
-        TextXAlignment =
-            Enum.TextXAlignment.Left,
+Title.Size =
+    UDim2.new(
+        1,
+        -100,
+        0,
+        23
+    )
 
-        Parent =
-            Header,
-    }
-)
+Title.Text =
+    "CAFEÍNA • LEITURA DE BOTS"
 
-create(
-    "TextLabel",
-    {
+Title.TextColor3 =
+    COLORS.Text
 
-        Position =
-            UDim2.fromOffset(
-                14,
-                30
-            ),
+Title.Font =
+    Enum.Font.GothamBold
 
-        Size =
-            UDim2.new(
-                1,
-                -100,
-                0,
-                16
-            ),
+Title.TextSize =
+    15
 
-        BackgroundTransparency =
-            1,
+Title.TextXAlignment =
+    Enum.TextXAlignment.Left
 
-        Text =
-            "BOT READER V1 • PATROL / NPC / DUMMY",
+Title.Parent =
+    Header
 
-        TextColor3 =
-            COLORS.SUB,
+local Subtitle =
+    Instance.new("TextLabel")
 
-        Font =
-            Enum.Font.Gotham,
+Subtitle.BackgroundTransparency =
+    1
 
-        TextSize =
-            10,
+Subtitle.Position =
+    UDim2.fromOffset(
+        14,
+        30
+    )
 
-        TextXAlignment =
-            Enum.TextXAlignment.Left,
+Subtitle.Size =
+    UDim2.new(
+        1,
+        -100,
+        0,
+        16
+    )
 
-        Parent =
-            Header,
-    }
-)
+Subtitle.Text =
+    "BOT READING • STANDALONE"
+
+Subtitle.TextColor3 =
+    COLORS.Sub
+
+Subtitle.Font =
+    Enum.Font.Gotham
+
+Subtitle.TextSize =
+    9
+
+Subtitle.TextXAlignment =
+    Enum.TextXAlignment.Left
+
+Subtitle.Parent =
+    Header
+
+--==============================================================--
+-- MINIMIZE
+--==============================================================--
 
 local Minimize =
-    create(
-        "TextButton",
-        {
+    Instance.new("TextButton")
 
-            Position =
-                UDim2.new(
-                    1,
-                    -76,
-                    0,
-                    11
-                ),
-
-            Size =
-                UDim2.fromOffset(
-                    30,
-                    30
-                ),
-
-            BackgroundColor3 =
-                COLORS.PANEL2,
-
-            Text =
-                "—",
-
-            TextColor3 =
-                COLORS.TEXT,
-
-            Font =
-                Enum.Font.GothamBold,
-
-            TextSize =
-                17,
-
-            BorderSizePixel =
-                0,
-
-            Parent =
-                Header,
-        }
+Minimize.Size =
+    UDim2.fromOffset(
+        30,
+        30
     )
 
-corner(
-    Minimize,
-    8
-)
+Minimize.Position =
+    UDim2.new(
+        1,
+        -75,
+        0,
+        11
+    )
+
+Minimize.BackgroundColor3 =
+    COLORS.Panel2
+
+Minimize.BorderSizePixel =
+    0
+
+Minimize.Text =
+    "—"
+
+Minimize.TextColor3 =
+    COLORS.Text
+
+Minimize.Font =
+    Enum.Font.GothamBold
+
+Minimize.TextSize =
+    17
+
+Minimize.Parent =
+    Header
+
+local MinCorner =
+    Instance.new("UICorner")
+
+MinCorner.CornerRadius =
+    UDim.new(
+        0,
+        8
+    )
+
+MinCorner.Parent =
+    Minimize
+
+--==============================================================--
+-- CLOSE
+--==============================================================--
 
 local Close =
-    create(
-        "TextButton",
-        {
+    Instance.new("TextButton")
 
-            Position =
-                UDim2.new(
-                    1,
-                    -40,
-                    0,
-                    11
-                ),
-
-            Size =
-                UDim2.fromOffset(
-                    30,
-                    30
-                ),
-
-            BackgroundColor3 =
-                COLORS.RED_DARK,
-
-            Text =
-                "×",
-
-            TextColor3 =
-                COLORS.TEXT,
-
-            Font =
-                Enum.Font.GothamBold,
-
-            TextSize =
-                19,
-
-            BorderSizePixel =
-                0,
-
-            Parent =
-                Header,
-        }
+Close.Size =
+    UDim2.fromOffset(
+        30,
+        30
     )
 
-corner(
-    Close,
-    8
-)
+Close.Position =
+    UDim2.new(
+        1,
+        -40,
+        0,
+        11
+    )
+
+Close.BackgroundColor3 =
+    COLORS.RedDark
+
+Close.BorderSizePixel =
+    0
+
+Close.Text =
+    "×"
+
+Close.TextColor3 =
+    COLORS.Text
+
+Close.Font =
+    Enum.Font.GothamBold
+
+Close.TextSize =
+    18
+
+Close.Parent =
+    Header
+
+local CloseCorner =
+    Instance.new("UICorner")
+
+CloseCorner.CornerRadius =
+    UDim.new(
+        0,
+        8
+    )
+
+CloseCorner.Parent =
+    Close
 
 --==============================================================--
 -- STATUS
 --==============================================================--
 
-local StatusCard =
-    create(
-        "Frame",
-        {
+local Status =
+    Instance.new("TextLabel")
 
-            Position =
-                UDim2.new(
-                    0,
-                    8,
-                    0,
-                    64
-                ),
+Status.BackgroundColor3 =
+    COLORS.Panel
 
-            Size =
-                UDim2.new(
-                    1,
-                    -16,
-                    0,
-                    58
-                ),
+Status.BorderSizePixel =
+    0
 
-            BackgroundColor3 =
-                COLORS.PANEL,
-
-            BorderSizePixel =
-                0,
-
-            Parent =
-                Main,
-        }
+Status.Position =
+    UDim2.fromOffset(
+        10,
+        65
     )
 
-corner(
-    StatusCard,
-    10
-)
-
-local StatusDot =
-    create(
-        "Frame",
-        {
-
-            Position =
-                UDim2.fromOffset(
-                    11,
-                    11
-                ),
-
-            Size =
-                UDim2.fromOffset(
-                    9,
-                    9
-                ),
-
-            BackgroundColor3 =
-                COLORS.GREEN,
-
-            BorderSizePixel =
-                0,
-
-            Parent =
-                StatusCard,
-        }
+Status.Size =
+    UDim2.new(
+        1,
+        -20,
+        0,
+        45
     )
 
-corner(
-    StatusDot,
-    99
-)
+Status.Text =
+    "Pronto para leitura"
 
-local StatusText =
-    create(
-        "TextLabel",
-        {
+Status.TextColor3 =
+    COLORS.Green
 
-            Position =
-                UDim2.fromOffset(
-                    28,
-                    5
-                ),
+Status.Font =
+    Enum.Font.GothamBold
 
-            Size =
-                UDim2.new(
-                    1,
-                    -38,
-                    0,
-                    22
-                ),
+Status.TextSize =
+    11
 
-            BackgroundTransparency =
-                1,
+Status.Parent =
+    Main
 
-            Text =
-                "Pronto",
+local StatusCorner =
+    Instance.new("UICorner")
 
-            TextColor3 =
-                COLORS.TEXT,
-
-            Font =
-                Enum.Font.GothamBold,
-
-            TextSize =
-                11,
-
-            TextXAlignment =
-                Enum.TextXAlignment.Left,
-
-            Parent =
-                StatusCard,
-        }
+StatusCorner.CornerRadius =
+    UDim.new(
+        0,
+        9
     )
 
-local DetailText =
-    create(
-        "TextLabel",
-        {
-
-            Position =
-                UDim2.fromOffset(
-                    11,
-                    27
-                ),
-
-            Size =
-                UDim2.new(
-                    1,
-                    -22,
-                    0,
-                    18
-                ),
-
-            BackgroundTransparency =
-                1,
-
-            Text =
-                "0 candidatos • 0 patrol points",
-
-            TextColor3 =
-                COLORS.SUB,
-
-            Font =
-                Enum.Font.Gotham,
-
-            TextSize =
-                9,
-
-            TextXAlignment =
-                Enum.TextXAlignment.Left,
-
-            Parent =
-                StatusCard,
-        }
-    )
-
-local ProgressBG =
-    create(
-        "Frame",
-        {
-
-            Position =
-                UDim2.new(
-                    0,
-                    11,
-                    1,
-                    -9
-                ),
-
-            Size =
-                UDim2.new(
-                    1,
-                    -22,
-                    0,
-                    5
-                ),
-
-            BackgroundColor3 =
-                COLORS.PANEL2,
-
-            BorderSizePixel =
-                0,
-
-            Parent =
-                StatusCard,
-        }
-    )
-
-corner(
-    ProgressBG,
-    99
-)
-
-local ProgressFill =
-    create(
-        "Frame",
-        {
-
-            Size =
-                UDim2.new(
-                    0,
-                    0,
-                    1,
-                    0
-                ),
-
-            BackgroundColor3 =
-                COLORS.RED,
-
-            BorderSizePixel =
-                0,
-
-            Parent =
-                ProgressBG,
-        }
-    )
-
-corner(
-    ProgressFill,
-    99
-)
+StatusCorner.Parent =
+    Status
 
 --==============================================================--
--- BODY
+-- SUMMARY
 --==============================================================--
 
-local Sidebar =
-    create(
-        "Frame",
-        {
+local Summary =
+    Instance.new("TextLabel")
 
-            Position =
-                UDim2.new(
-                    0,
-                    8,
-                    0,
-                    130
-                ),
+Summary.BackgroundColor3 =
+    COLORS.Panel
 
-            Size =
-                UDim2.new(
-                    0.29,
-                    -5,
-                    1,
-                    -138
-                ),
+Summary.BorderSizePixel =
+    0
 
-            BackgroundColor3 =
-                COLORS.PANEL,
-
-            BorderSizePixel =
-                0,
-
-            Parent =
-                Main,
-        }
+Summary.Position =
+    UDim2.fromOffset(
+        10,
+        120
     )
 
-corner(
-    Sidebar,
-    10
-)
-
-local Content =
-    create(
-        "Frame",
-        {
-
-            Position =
-                UDim2.new(
-                    0.29,
-                    7,
-                    0,
-                    130
-                ),
-
-            Size =
-                UDim2.new(
-                    0.71,
-                    -15,
-                    1,
-                    -138
-                ),
-
-            BackgroundColor3 =
-                COLORS.PANEL,
-
-            BorderSizePixel =
-                0,
-
-            Parent =
-                Main,
-        }
+Summary.Size =
+    UDim2.new(
+        1,
+        -20,
+        0,
+        115
     )
 
-corner(
-    Content,
-    10
-)
+Summary.Text =
+    "Nenhuma leitura realizada."
+
+Summary.TextColor3 =
+    COLORS.Text
+
+Summary.Font =
+    Enum.Font.Code
+
+Summary.TextSize =
+    11
+
+Summary.TextWrapped =
+    true
+
+Summary.TextXAlignment =
+    Enum.TextXAlignment.Left
+
+Summary.TextYAlignment =
+    Enum.TextYAlignment.Top
+
+Summary.Parent =
+    Main
+
+local SummaryCorner =
+    Instance.new("UICorner")
+
+SummaryCorner.CornerRadius =
+    UDim.new(
+        0,
+        9
+    )
+
+SummaryCorner.Parent =
+    Summary
 
 --==============================================================--
--- SIDEBAR
+-- BUTTON CREATOR
 --==============================================================--
 
-local ReadButton =
-    create(
-        "TextButton",
-        {
-
-            Position =
-                UDim2.fromOffset(
-                    7,
-                    7
-                ),
-
-            Size =
-                UDim2.new(
-                    1,
-                    -14,
-                    0,
-                    40
-                ),
-
-            BackgroundColor3 =
-                COLORS.RED,
-
-            BorderSizePixel =
-                0,
-
-            Text =
-                "LER BOTS",
-
-            TextColor3 =
-                COLORS.TEXT,
-
-            Font =
-                Enum.Font.GothamBold,
-
-            TextSize =
-                11,
-
-            Parent =
-                Sidebar,
-        }
-    )
-
-corner(
-    ReadButton,
-    8
-)
-
-local AreaList =
-    create(
-        "ScrollingFrame",
-        {
-
-            Position =
-                UDim2.fromOffset(
-                    7,
-                    54
-                ),
-
-            Size =
-                UDim2.new(
-                    1,
-                    -14,
-                    1,
-                    -108
-                ),
-
-            BackgroundTransparency =
-                1,
-
-            BorderSizePixel =
-                0,
-
-            ScrollBarThickness =
-                3,
-
-            CanvasSize =
-                UDim2.new(),
-
-            AutomaticCanvasSize =
-                Enum.AutomaticSize.Y,
-
-            Parent =
-                Sidebar,
-        }
-    )
-
-local AreaLayout =
-    create(
-        "UIListLayout",
-        {
-
-            Padding =
-                UDim.new(
-                    0,
-                    5
-                ),
-
-            Parent =
-                AreaList,
-        }
-    )
-
-local DownloadButton =
-    create(
-        "TextButton",
-        {
-
-            Position =
-                UDim2.new(
-                    0,
-                    7,
-                    1,
-                    -47
-                ),
-
-            Size =
-                UDim2.new(
-                    1,
-                    -14,
-                    0,
-                    40
-                ),
-
-            BackgroundColor3 =
-                COLORS.RED_DARK,
-
-            BorderSizePixel =
-                0,
-
-            Text =
-                "BAIXAR LEITURA",
-
-            TextColor3 =
-                COLORS.TEXT,
-
-            Font =
-                Enum.Font.GothamBold,
-
-            TextSize =
-                9,
-
-            Parent =
-                Sidebar,
-        }
-    )
-
-corner(
-    DownloadButton,
-    8
-)
-
---==============================================================--
--- CONTENT
---==============================================================--
-
-local AreaTitle =
-    create(
-        "TextLabel",
-        {
-
-            Position =
-                UDim2.fromOffset(
-                    10,
-                    6
-                ),
-
-            Size =
-                UDim2.new(
-                    1,
-                    -20,
-                    0,
-                    24
-                ),
-
-            BackgroundTransparency =
-                1,
-
-            Text =
-                "RESUMO",
-
-            TextColor3 =
-                COLORS.TEXT,
-
-            Font =
-                Enum.Font.GothamBold,
-
-            TextSize =
-                13,
-
-            TextXAlignment =
-                Enum.TextXAlignment.Left,
-
-            Parent =
-                Content,
-        }
-    )
-
-local Viewer =
-    create(
-        "TextBox",
-        {
-
-            Position =
-                UDim2.fromOffset(
-                    8,
-                    35
-                ),
-
-            Size =
-                UDim2.new(
-                    1,
-                    -16,
-                    1,
-                    -78
-                ),
-
-            BackgroundColor3 =
-                COLORS.BG,
-
-            BorderSizePixel =
-                0,
-
-            Text =
-                "Execute \"LER BOTS\" para iniciar a leitura.",
-
-            TextColor3 =
-                COLORS.TEXT,
-
-            TextSize =
-                10,
-
-            Font =
-                Enum.Font.Code,
-
-            TextWrapped =
-                false,
-
-            MultiLine =
-                true,
-
-            ClearTextOnFocus =
-                false,
-
-            TextEditable =
-                false,
-
-            TextXAlignment =
-                Enum.TextXAlignment.Left,
-
-            TextYAlignment =
-                Enum.TextYAlignment.Top,
-
-            Parent =
-                Content,
-        }
-    )
-
-corner(
-    Viewer,
-    8
-)
-
---==============================================================--
--- UI STATUS
---==============================================================--
-
-local function setStatus(
+local function createButton(
     text,
+    position,
+    size,
     color
 )
 
-    StatusText.Text =
-        tostring(
-            text or ""
-        )
-
-    if color then
-
-        StatusDot.BackgroundColor3 =
-            color
-
-    end
-end
-
-local function setProgress(
-    value
-)
-
-    value =
-        math.clamp(
-            tonumber(value)
-            or 0,
-            0,
-            1
-        )
-
-    TweenService:Create(
-
-        ProgressFill,
-
-        TweenInfo.new(
-            0.12
-        ),
-
-        {
-
-            Size =
-                UDim2.new(
-                    value,
-                    0,
-                    1,
-                    0
-                )
-        }
-
-    ):Play()
-end
-
-local function updateDetails()
-
-    local patrol =
-        State.Results
-        and State.Results.PatrolSystem
-
-    local army =
-        patrol
-        and patrol.groups
-        and patrol.groups.Army
-        or 0
-
-    local rebels =
-        patrol
-        and patrol.groups
-        and patrol.groups.Rebels
-        or 0
-
-    DetailText.Text =
-        tostring(
-            #State.Results.Bots
-        )
-        .. " candidatos • "
-        .. tostring(army)
-        .. " Army points • "
-        .. tostring(rebels)
-        .. " Rebels points"
-end
-
---==============================================================--
--- PREVIEW
---==============================================================--
-
-local function buildPreview(
-    area
-)
-
-    local output = {}
-
-    if area == "Resumo" then
-
-        local summary =
-            State.Results.Summary
-            or {}
-
-        local patrol =
-            State.Results.PatrolSystem
-            or {}
-
-        output[
-            #output + 1
-        ] =
-            "CAFEÍNA • BOT READER"
-
-        output[
-            #output + 1
-        ] = ""
-
-        output[
-            #output + 1
-        ] =
-            "BotPatrolPoints: "
-            .. tostring(
-                patrol.found
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Army points: "
-            .. tostring(
-                patrol.groups
-                and patrol.groups.Army
-                or 0
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Rebels points: "
-            .. tostring(
-                patrol.groups
-                and patrol.groups.Rebels
-                or 0
-            )
-
-        output[
-            #output + 1
-        ] = ""
-
-        output[
-            #output + 1
-        ] =
-            "Candidates: "
-            .. tostring(
-                summary.totalCandidates
-                or 0
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Active Bots: "
-            .. tostring(
-                summary.activeBots
-                or 0
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Bot Candidates: "
-            .. tostring(
-                summary.botCandidates
-                or 0
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Possible Dummies: "
-            .. tostring(
-                summary.possibleDummies
-                or 0
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Players: "
-            .. tostring(
-                summary.players
-                or 0
-            )
-
-        output[
-            #output + 1
-        ] = ""
-
-        output[
-            #output + 1
-        ] =
-            "Army association: "
-            .. tostring(
-                summary.army
-                or 0
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Rebels association: "
-            .. tostring(
-                summary.rebels
-                or 0
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Unknown team: "
-            .. tostring(
-                summary.unknownTeam
-                or 0
-            )
-
-    elseif area == "Patrol" then
-
-        local patrol =
-            State.Results.PatrolSystem
-
-        output[
-            #output + 1
-        ] =
-            "BOT PATROL POINTS"
-
-        output[
-            #output + 1
-        ] = ""
-
-        output[
-            #output + 1
-        ] =
-            "Path: "
-            .. tostring(
-                patrol.path
-                or "não encontrado"
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Army: "
-            .. tostring(
-                patrol.groups.Army
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Rebels: "
-            .. tostring(
-                patrol.groups.Rebels
-            )
-
-        output[
-            #output + 1
-        ] =
-            "Other: "
-            .. tostring(
-                patrol.groups.Other
-            )
-
-        output[
-            #output + 1
-        ] = ""
-
-        for index, point
-            in ipairs(
-                patrol.points or {}
-            )
-        do
-
-            output[
-                #output + 1
-            ] =
-                "["
-                .. tostring(
-                    point.group
-                )
-                .. "] "
-                .. tostring(
-                    point.path
-                )
-
-            output[
-                #output + 1
-            ] =
-                "Team="
-                .. tostring(
-                    point.teamAttribute
-                    or "nil"
-                )
-                .. " | consistency="
-                .. tostring(
-                    point.consistency
-                )
-
-            if point.position then
-
-                output[
-                    #output + 1
-                ] =
-                    string.format(
-                        "Position: %.2f, %.2f, %.2f",
-                        point.position.x,
-                        point.position.y,
-                        point.position.z
-                    )
-
-            end
-
-            output[
-                #output + 1
-            ] = ""
-
-            if
-                #output
-                >
-                CONFIG.MAX_VIEW_CHARS
-            then
-
-                break
-
-            end
-        end
-
-    elseif area == "Bots" then
-
-        output[
-            #output + 1
-        ] =
-            "BOT CANDIDATES"
-
-        output[
-            #output + 1
-        ] = ""
-
-        for index, bot
-            in ipairs(
-                State.Results.Bots
-            )
-        do
-
-            output[
-                #output + 1
-            ] =
-                "#"
-                .. tostring(index)
-                .. " "
-                .. tostring(
-                    bot.name
-                )
-
-            output[
-                #output + 1
-            ] =
-                "Classificação: "
-                .. tostring(
-                    bot.classification
-                )
-
-            output[
-                #output + 1
-            ] =
-                "Score: "
-                .. tostring(
-                    bot.confidenceScore
-                )
-
-            output[
-                #output + 1
-            ] =
-                "Team: "
-                .. tostring(
-                    bot.detectedTeam
-                    or "UNKNOWN"
-                )
-
-            output[
-                #output + 1
-            ] =
-                "Path: "
-                .. tostring(
-                    bot.path
-                )
-
-            if bot.patrolAssociation then
-
-                output[
-                    #output + 1
-                ] =
-                    "Patrol: "
-                    .. tostring(
-                        bot.patrolAssociation
-                            .group
-                    )
-                    .. " | "
-                    .. string.format(
-                        "%.2f studs",
-                        bot.patrolAssociation
-                            .distance
-                    )
-
-            else
-
-                output[
-                    #output + 1
-                ] =
-                    "Patrol: nenhuma associação"
-
-            end
-
-            output[
-                #output + 1
-            ] = ""
-
-            if
-                #table.concat(output, "\n")
-                >
-                CONFIG.MAX_VIEW_CHARS
-            then
-
-                break
-
-            end
-        end
-
-    elseif area == "Dummies" then
-
-        output[
-            #output + 1
-        ] =
-            "POSSÍVEIS MANEQUINS"
-
-        output[
-            #output + 1
-        ] = ""
-
-        for _, bot
-            in ipairs(
-                State.Results.Bots
-            )
-        do
-
-            if
-                bot.classification
-                == "POSSIBLE_DUMMY"
-            then
-
-                output[
-                    #output + 1
-                ] =
-                    bot.name
-
-                output[
-                    #output + 1
-                ] =
-                    bot.path
-
-                output[
-                    #output + 1
-                ] =
-                    "Movement: "
-                    .. tostring(
-                        bot.evidence
-                            .positionChanged
-                    )
-
-                output[
-                    #output + 1
-                ] =
-                    "Rotation: "
-                    .. tostring(
-                        bot.evidence
-                            .rotationChanged
-                    )
-
-                output[
-                    #output + 1
-                ] = ""
-
-            end
-        end
-
-    elseif area == "Army" then
-
-        output[
-            #output + 1
-        ] =
-            "ARMY BOTS"
-
-        output[
-            #output + 1
-        ] = ""
-
-        for _, bot
-            in ipairs(
-                State.Results.Bots
-            )
-        do
-
-            if
-                bot.detectedTeam
-                == "Army"
-            then
-
-                output[
-                    #output + 1
-                ] =
-                    bot.name
-                    .. " • "
-                    .. bot.classification
-
-                output[
-                    #output + 1
-                ] =
-                    bot.path
-
-                output[
-                    #output + 1
-                ] = ""
-
-            end
-        end
-
-    elseif area == "Rebels" then
-
-        output[
-            #output + 1
-        ] =
-            "REBELS BOTS"
-
-        output[
-            #output + 1
-        ] = ""
-
-        for _, bot
-            in ipairs(
-                State.Results.Bots
-            )
-        do
-
-            if
-                bot.detectedTeam
-                == "Rebels"
-            then
-
-                output[
-                    #output + 1
-                ] =
-                    bot.name
-                    .. " • "
-                    .. bot.classification
-
-                output[
-                    #output + 1
-                ] =
-                    bot.path
-
-                output[
-                    #output + 1
-                ] = ""
-
-            end
-        end
-    end
-
-    local text =
-        table.concat(
-            output,
-            "\n"
-        )
-
-    if #text >
-        CONFIG.MAX_VIEW_CHARS
-    then
-
-        text =
-            string.sub(
-                text,
-                1,
-                CONFIG.MAX_VIEW_CHARS
-            )
-            .. "\n\n[VISUALIZAÇÃO LIMITADA]"
-
-    end
-
-    return text
-end
-
---==============================================================--
--- AREA NAVIGATION
---==============================================================--
-
-local AreaButtons = {}
-
-local function openArea(
-    area
-)
-
-    AreaTitle.Text =
-        string.upper(
-            area
-        )
-
-    Viewer.Text =
-        buildPreview(
-            area
-        )
-
-    for name, button
-        in pairs(
-            AreaButtons
-        )
-    do
-
-        button.BackgroundColor3 =
-            name == area
-            and COLORS.RED_DARK
-            or COLORS.PANEL2
-
-    end
-
-    State.CurrentArea =
-        area
-
-    updateDetails()
-end
-
---==============================================================--
--- AREA BUTTONS
---==============================================================--
-
-local AREAS = {
-
-    "Resumo",
-
-    "Patrol",
-
-    "Bots",
-
-    "Dummies",
-
-    "Army",
-
-    "Rebels",
-}
-
-for _, area
-    in ipairs(AREAS)
-do
-
     local button =
-        create(
-            "TextButton",
-            {
+        Instance.new("TextButton")
 
-                Size =
-                    UDim2.new(
-                        1,
-                        0,
-                        0,
-                        34
-                    ),
+    button.Position =
+        position
 
-                BackgroundColor3 =
-                    COLORS.PANEL2,
+    button.Size =
+        size
 
-                BorderSizePixel =
-                    0,
+    button.BackgroundColor3 =
+        color
 
-                Text =
-                    string.upper(
-                        area
-                    ),
+    button.BorderSizePixel =
+        0
 
-                TextColor3 =
-                    COLORS.TEXT,
+    button.Text =
+        text
 
-                Font =
-                    Enum.Font.GothamMedium,
+    button.TextColor3 =
+        COLORS.Text
 
-                TextSize =
-                    9,
+    button.Font =
+        Enum.Font.GothamBold
 
-                Parent =
-                    AreaList,
-            }
+    button.TextSize =
+        10
+
+    button.Parent =
+        Main
+
+    local c =
+        Instance.new("UICorner")
+
+    c.CornerRadius =
+        UDim.new(
+            0,
+            8
         )
 
-    corner(
-        button,
-        7
-    )
-
-    button.Activated:Connect(
-        function()
-
-            openArea(
-                area
-            )
-
-        end
-    )
-
-    AreaButtons[area] =
+    c.Parent =
         button
+
+    return button
 end
 
 --==============================================================--
--- BUTTON EVENTS
+-- BUTTONS
 --==============================================================--
 
-ReadButton.Activated:Connect(
+local ScanButton =
+    createButton(
+        "LER BOTS",
+        UDim2.fromOffset(
+            10,
+            245
+        ),
+        UDim2.new(
+            0.48,
+            -5,
+            0,
+            40
+        ),
+        COLORS.Red
+    )
+
+local MonitorButton =
+    createButton(
+        "MONITORAR SPAWN",
+        UDim2.new(
+            0.52,
+            5,
+            0,
+            245
+        ),
+        UDim2.new(
+            0.48,
+            -15,
+            0,
+            40
+        ),
+        COLORS.Panel2
+    )
+
+local ExportButton =
+    createButton(
+        "BAIXAR ARQUIVO DE LEITURA",
+        UDim2.fromOffset(
+            10,
+            295
+        ),
+        UDim2.new(
+            1,
+            -20,
+            0,
+            42
+        ),
+        COLORS.RedDark
+    )
+
+local CopyButton =
+    createButton(
+        "COPIAR JSON",
+        UDim2.fromOffset(
+            10,
+            347
+        ),
+        UDim2.new(
+            1,
+            -20,
+            0,
+            35
+        ),
+        COLORS.Panel2
+    )
+
+--==============================================================--
+-- MINI BUTTON
+--==============================================================--
+
+local Mini =
+    Instance.new("TextButton")
+
+Mini.Size =
+    UDim2.fromOffset(
+        55,
+        55
+    )
+
+Mini.Position =
+    UDim2.fromScale(
+        0.5,
+        0.5
+    )
+
+Mini.AnchorPoint =
+    Vector2.new(
+        0.5,
+        0.5
+    )
+
+Mini.BackgroundColor3 =
+    COLORS.Red
+
+Mini.BorderSizePixel =
+    0
+
+Mini.Text =
+    "C"
+
+Mini.TextColor3 =
+    COLORS.Text
+
+Mini.Font =
+    Enum.Font.GothamBlack
+
+Mini.TextSize =
+    20
+
+Mini.Visible =
+    false
+
+Mini.Parent =
+    Gui
+
+local MiniCorner =
+    Instance.new("UICorner")
+
+MiniCorner.CornerRadius =
+    UDim.new(
+        1,
+        0
+    )
+
+MiniCorner.Parent =
+    Mini
+
+--==============================================================--
+-- UPDATE SUMMARY
+--==============================================================--
+
+local function updateSummary()
+
+    local total =
+        0
+
+    for _ in pairs(State.Bots) do
+        total += 1
+    end
+
+    local patrolCount =
+        #State.PatrolPoints
+
+    Summary.Text =
+        "BOTS ATIVOS: "
+        .. tostring(total)
+        .. "\n\n"
+
+        .. "ARMY: "
+        .. tostring(
+            State.TeamSummary.Army
+        )
+        .. "\n"
+
+        .. "REBELS: "
+        .. tostring(
+            State.TeamSummary.Rebels
+        )
+        .. "\n"
+
+        .. "TEAM INDEFINIDO: "
+        .. tostring(
+            State.TeamSummary.Unknown
+        )
+        .. "\n\n"
+
+        .. "JOGÁVEIS: "
+        .. tostring(
+            State.ClassificationSummary.PlayableBot
+        )
+        .. "\n"
+
+        .. "MANEQUINS: "
+        .. tostring(
+            State.ClassificationSummary.Mannequin
+        )
+        .. "\n"
+
+        .. "PATROL POINTS: "
+        .. tostring(patrolCount)
+end
+
+--==============================================================--
+-- SCAN BUTTON
+--==============================================================--
+
+ScanButton.Activated:Connect(
     function()
 
-        if State.Reading then
-
-            State.CancelRequested =
-                true
-
-            setStatus(
-                "Cancelando leitura...",
-                COLORS.YELLOW
-            )
-
+        if State.Scanning then
             return
         end
+
+        Status.Text =
+            "Lendo estrutura dos bots..."
+
+        Status.TextColor3 =
+            COLORS.Yellow
 
         task.spawn(
             function()
 
                 local ok, err =
                     pcall(
-                        runReader
+                        scanBots
                     )
 
                 if not ok then
 
-                    State.Reading =
-                        false
+                    Status.Text =
+                        "Erro: "
+                        .. tostring(err)
 
-                    setStatus(
-                        "Erro na leitura",
-                        COLORS.RED
-                    )
+                    Status.TextColor3 =
+                        COLORS.Red
 
-                    Viewer.Text =
-                        tostring(
-                            err
-                        )
+                    return
+                end
 
+                updateSummary()
+
+                Status.Text =
+                    "Leitura concluída"
+
+                Status.TextColor3 =
+                    COLORS.Green
+            end
+        )
+    end
+)
+
+--==============================================================--
+-- MONITOR BUTTON
+--==============================================================--
+
+MonitorButton.Activated:Connect(
+    function()
+
+        if State.Monitoring then
+
+            State.Monitoring =
+                false
+
+            disconnectAll()
+
+            MonitorButton.Text =
+                "MONITORAR SPAWN"
+
+            MonitorButton.BackgroundColor3 =
+                COLORS.Panel2
+
+            Status.Text =
+                "Monitoramento parado"
+
+            Status.TextColor3 =
+                COLORS.Yellow
+
+            return
+        end
+
+        if not BotFolder then
+            BotFolder =
+                Workspace:FindFirstChild(
+                    CONFIG.BOT_FOLDER_NAME
+                )
+        end
+
+        if not BotFolder then
+
+            Status.Text =
+                "Workspace.Soldiers não encontrado"
+
+            Status.TextColor3 =
+                COLORS.Red
+
+            return
+        end
+
+        startMonitoring()
+
+        MonitorButton.Text =
+            "MONITORAMENTO ATIVO"
+
+        MonitorButton.BackgroundColor3 =
+            COLORS.RedDark
+
+        Status.Text =
+            "Observando novos bots..."
+
+        Status.TextColor3 =
+            COLORS.Green
+    end
+)
+
+--==============================================================--
+-- EXPORT BUTTON
+--==============================================================--
+
+ExportButton.Activated:Connect(
+    function()
+
+        Status.Text =
+            "Gerando arquivo JSON..."
+
+        Status.TextColor3 =
+            COLORS.Yellow
+
+        task.spawn(
+            function()
+
+                local ok, result =
+                    exportFile()
+
+                if ok then
+
+                    Status.Text =
+                        "Arquivo criado: "
+                        .. tostring(result)
+
+                    Status.TextColor3 =
+                        COLORS.Green
+
+                else
+
+                    Status.Text =
+                        "Arquivo não criado • "
+                        .. tostring(result)
+
+                    Status.TextColor3 =
+                        COLORS.Yellow
                 end
             end
         )
     end
 )
 
-DownloadButton.Activated:Connect(
+--==============================================================--
+-- COPY BUTTON
+--==============================================================--
+
+CopyButton.Activated:Connect(
     function()
 
-        task.spawn(
-            downloadReading
-        )
+        local ok, result =
+            copyExport()
 
+        if ok then
+
+            Status.Text =
+                "JSON copiado para o clipboard"
+
+            Status.TextColor3 =
+                COLORS.Green
+
+        else
+
+            Status.Text =
+                tostring(result)
+
+            Status.TextColor3 =
+                COLORS.Yellow
+        end
     end
 )
 
 --==============================================================--
 -- MINIMIZE
 --==============================================================--
-
-local Mini =
-    create(
-        "TextButton",
-        {
-
-            Visible =
-                false,
-
-            Size =
-                UDim2.fromOffset(
-                    52,
-                    52
-                ),
-
-            AnchorPoint =
-                Vector2.new(
-                    0.5,
-                    0.5
-                ),
-
-            Position =
-                UDim2.fromScale(
-                    0.5,
-                    0.5
-                ),
-
-            BackgroundColor3 =
-                COLORS.RED,
-
-            BorderSizePixel =
-                0,
-
-            Text =
-                "C",
-
-            TextColor3 =
-                COLORS.TEXT,
-
-            Font =
-                Enum.Font.GothamBlack,
-
-            TextSize =
-                19,
-
-            Parent =
-                Gui,
-        }
-    )
-
-corner(
-    Mini,
-    99
-)
 
 Minimize.Activated:Connect(
     function()
@@ -3885,6 +2185,8 @@ Minimize.Activated:Connect(
         Mini.Visible =
             true
 
+        State.Minimized =
+            true
     end
 )
 
@@ -3897,6 +2199,8 @@ Mini.Activated:Connect(
         Main.Visible =
             true
 
+        State.Minimized =
+            false
     end
 )
 
@@ -3907,201 +2211,29 @@ Mini.Activated:Connect(
 Close.Activated:Connect(
     function()
 
-        State.CancelRequested =
-            true
+        State.Monitoring =
+            false
 
-        pcall(function()
-            Gui:Destroy()
-        end)
+        disconnectAll()
 
+        Gui:Destroy()
     end
 )
 
 --==============================================================--
--- DRAG
+-- INITIALIZATION
 --==============================================================--
 
-local function makeDraggable(
-    target,
-    handle
-)
+readPatrolPoints()
 
-    local dragging =
-        false
+updateSummary()
 
-    local dragStart =
-        nil
+Status.Text =
+    "Standalone carregado • pronto"
 
-    local startPosition =
-        nil
-
-    handle.InputBegan:Connect(
-        function(input)
-
-            if
-                input.UserInputType
-                ==
-                Enum.UserInputType.Touch
-
-                or
-
-                input.UserInputType
-                ==
-                Enum.UserInputType.MouseButton1
-            then
-
-                dragging =
-                    true
-
-                dragStart =
-                    input.Position
-
-                startPosition =
-                    target.Position
-
-            end
-        end
-    )
-
-    UserInputService.InputChanged:Connect(
-        function(input)
-
-            if not dragging then
-                return
-            end
-
-            if
-                input.UserInputType
-                ~=
-                Enum.UserInputType.Touch
-
-                and
-
-                input.UserInputType
-                ~=
-                Enum.UserInputType.MouseMovement
-            then
-
-                return
-
-            end
-
-            if
-                not dragStart
-                or
-                not startPosition
-            then
-
-                return
-
-            end
-
-            local delta =
-                input.Position
-                -
-                dragStart
-
-            target.Position =
-                UDim2.new(
-
-                    startPosition.X.Scale,
-
-                    startPosition.X.Offset
-                    + delta.X,
-
-                    startPosition.Y.Scale,
-
-                    startPosition.Y.Offset
-                    + delta.Y
-                )
-        end
-    )
-
-    UserInputService.InputEnded:Connect(
-        function(input)
-
-            if
-                input.UserInputType
-                ==
-                Enum.UserInputType.Touch
-
-                or
-
-                input.UserInputType
-                ==
-                Enum.UserInputType.MouseButton1
-            then
-
-                dragging =
-                    false
-
-            end
-        end
-    )
-end
-
-makeDraggable(
-    Main,
-    Header
-)
-
---==============================================================--
--- READY
---==============================================================--
-
-State.Results.Metadata =
-    buildMetadata()
-
-State.Results.PatrolSystem = {
-
-    found = false,
-
-    groups = {
-
-        Army = 0,
-
-        Rebels = 0,
-
-        Other = 0,
-    },
-
-    points = {},
-}
-
-State.Results.Summary = {
-
-    totalCandidates = 0,
-
-    activeBots = 0,
-
-    botCandidates = 0,
-
-    possibleDummies = 0,
-
-    players = 0,
-
-    army = 0,
-
-    rebels = 0,
-
-    unknownTeam = 0,
-}
-
-openArea(
-    "Resumo"
-)
-
-setProgress(
-    0
-)
-
-updateDetails()
-
-setStatus(
-    "Pronto para leitura de bots",
-    COLORS.GREEN
-)
+Status.TextColor3 =
+    COLORS.Green
 
 print(
-    "[CAFEINA BOT READER V1] carregado."
+    "[CAFEINA] Bot Reading Standalone carregado."
 )
