@@ -1,21 +1,32 @@
---==============================================================
--- CAFEÍNA • LEITURA / PESQUISA DE BOTS
--- VERSÃO INTEGRADA • SOMENTE LEITURA
---
--- Registra:
---   • Spawn / despawn
---   • Estrutura do bot
---   • Indicadores de equipe
---   • Alterações de equipe
---   • Attributes
---   • ValueObjects / ObjectValues relevantes
---   • Criação / remoção de objetos
---   • Highlight como verificação complementar
---   • Snapshots periódicos
---   • Estado do jogador no momento dos eventos
---
--- Não modifica bots, equipes, IA, alvos ou spawn.
---==============================================================
+--[[
+    CAFEÍNA • BOT READER V2
+    Coletor passivo para estudo de entidades/bots.
+
+    OBJETIVO:
+    - Observar Workspace.Soldiers
+    - Registrar nascimento/remoção de entidades
+    - Registrar Team e a fonte dessa informação
+    - Registrar Attributes
+    - Registrar ValueObjects relacionados a Team
+    - Registrar Highlight como evidência complementar
+    - Registrar criação/remoção de objetos relevantes
+    - Registrar mudanças de atributos
+    - Registrar snapshots periódicos
+    - Registrar entrada/saída de Players para contexto
+    - Exportar tudo para JSON
+
+    NÃO:
+    - Não altera bots
+    - Não ataca
+    - Não teleporta
+    - Não cria bots
+    - Não altera Team
+    - Não altera Highlight
+    - Não executa comandos sobre entidades
+
+    Observação:
+    writefile/setclipboard dependem do ambiente em que o script é executado.
+]]
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -24,9 +35,9 @@ local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
---==============================================================
--- PARENT
---==============================================================
+-- ============================================================
+-- PARENT DA INTERFACE
+-- ============================================================
 
 local function getParent()
     if typeof(gethui) == "function" then
@@ -41,29 +52,24 @@ end
 
 local Parent = getParent()
 
--- Remove somente esta interface.
 for _, v in ipairs(Parent:GetChildren()) do
-    if v.Name == "CafeinaBotResearch_Standalone" then
+    if v.Name == "CafeinaBotReader_V2" then
         pcall(function()
             v:Destroy()
         end)
     end
 end
 
---==============================================================
--- GUI
---==============================================================
-
 local Gui = Instance.new("ScreenGui")
-Gui.Name = "CafeinaBotResearch_Standalone"
+Gui.Name = "CafeinaBotReader_V2"
 Gui.ResetOnSpawn = false
 Gui.IgnoreGuiInset = true
 Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 Gui.Parent = Parent
 
---==============================================================
+-- ============================================================
 -- CORES
---==============================================================
+-- ============================================================
 
 local COLORS = {
     bg = Color3.fromRGB(12,12,15),
@@ -78,17 +84,13 @@ local COLORS = {
 
     green = Color3.fromRGB(65,210,118),
     red = Color3.fromRGB(235,38,52),
-    yellow = Color3.fromRGB(242,184,57)
+    yellow = Color3.fromRGB(242,184,57),
 }
-
---==============================================================
--- HELPERS GUI
---==============================================================
 
 local function new(class, props)
     local x = Instance.new(class)
 
-    for k,v in pairs(props or {}) do
+    for k, v in pairs(props or {}) do
         x[k] = v
     end
 
@@ -107,2047 +109,1679 @@ local function label(parent, text, size, pos, textSize)
         Parent = parent,
         BackgroundTransparency = 1,
         Text = text,
-
         Size = size,
         Position = pos,
-
         TextColor3 = COLORS.text,
         Font = Enum.Font.Gotham,
         TextSize = textSize or 10,
-
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Center
+        TextXAlignment = Enum.TextXAlignment.Left
     })
 end
 
---==============================================================
--- ESTADO DO PESQUISADOR
---==============================================================
+-- ============================================================
+-- CONFIGURAÇÃO DO COLETOR
+-- ============================================================
+
+local CONFIG = {
+    SnapshotInterval = 2,
+    MaxEvents = 25000,
+    MaxSnapshotsPerBot = 1000,
+
+    -- Pasta principal observada.
+    CandidateFolderName = "Soldiers",
+
+    -- Caso Soldiers não exista, o scanner pode procurar
+    -- Models com Humanoid no Workspace.
+    AllowWorkspaceFallback = true,
+}
+
+-- ============================================================
+-- ESTADO
+-- ============================================================
 
 local State = {
     Running = false,
+    Scanned = false,
 
-    StartedClock = nil,
-    StartedUnix = nil,
+    StartedAtUnix = nil,
+    EndedAtUnix = nil,
 
-    EndedClock = nil,
-    EndedUnix = nil,
+    StartedAtClock = nil,
+    EndedAtClock = nil,
 
-    NextBotId = 0,
+    Records = {},
+    ByInstance = {},
 
-    Bots = {},
-    ObjectToBot = {},
+    Events = {},
+    Players = {},
 
-    ImportantEvents = {},
-    VisualChecks = {},
-    Snapshots = {},
+    Summary = {
+        spawned = 0,
+        removed = 0,
+        army = 0,
+        rebels = 0,
+        unknown = 0,
+    },
 
     Connections = {},
-
-    SnapshotThread = nil
 }
 
-local CONFIG = {
-    SnapshotInterval = 5,
+-- ============================================================
+-- UTILITÁRIOS
+-- ============================================================
 
-    InterestingNames = {
-        "team",
-        "teamname",
-        "teamcolor",
-
-        "target",
-        "currenttarget",
-        "targetplayer",
-
-        "enemy",
-        "ally",
-
-        "patrol",
-        "destination",
-        "goal",
-
-        "spawn"
-    }
-}
-
---==============================================================
--- UTILIDADES
---==============================================================
-
-local function clock()
-    return os.clock()
-end
-
-local function unix()
+local function nowUnix()
     return os.time()
 end
 
-local function safeName(obj)
-    local ok, value = pcall(function()
-        return obj.Name
-    end)
-
-    return ok and tostring(value) or "?"
+local function nowClock()
+    return os.clock()
 end
 
-local function safeFullName(obj)
-    local ok, value = pcall(function()
-        return obj:GetFullName()
-    end)
+local function elapsed()
+    if not State.StartedAtClock then
+        return 0
+    end
 
-    return ok and tostring(value) or safeName(obj)
+    return nowClock() - State.StartedAtClock
 end
 
-local function safeClass(obj)
-    local ok, value = pcall(function()
-        return obj.ClassName
+local function safeName(x)
+    local ok, result = pcall(function()
+        return x.Name
     end)
 
-    return ok and tostring(value) or "?"
+    return ok and tostring(result) or "?"
 end
 
-local function safeAttribute(obj, key)
-    local ok, value = pcall(function()
-        return obj:GetAttribute(key)
+local function safeFullName(x)
+    local ok, result = pcall(function()
+        return x:GetFullName()
     end)
 
     if ok then
-        return value
+        return tostring(result)
+    end
+
+    return safeName(x)
+end
+
+local function safeClass(x)
+    local ok, result = pcall(function()
+        return x.ClassName
+    end)
+
+    return ok and tostring(result) or "?"
+end
+
+local function isA(x, class)
+    local ok, result = pcall(function()
+        return x:IsA(class)
+    end)
+
+    return ok and result
+end
+
+local function getAttribute(x, key)
+    local ok, result = pcall(function()
+        return x:GetAttribute(key)
+    end)
+
+    if ok then
+        return result
     end
 
     return nil
 end
 
-local function serializeValue(value)
-    local t = typeof(value)
-
-    if t == "Vector3" then
-        return {
-            x = value.X,
-            y = value.Y,
-            z = value.Z
-        }
-    end
-
-    if t == "Color3" then
-        return {
-            r = value.R,
-            g = value.G,
-            b = value.B
-        }
-    end
-
-    if t == "CFrame" then
-        local p = value.Position
-
-        return {
-            x = p.X,
-            y = p.Y,
-            z = p.Z
-        }
-    end
-
-    if t == "Instance" then
-        return {
-            type = "Instance",
-            name = safeName(value),
-            path = safeFullName(value),
-            className = safeClass(value)
-        }
-    end
-
-    if t == "string"
-        or t == "number"
-        or t == "boolean"
-        or t == "nil" then
-
-        return value
-    end
-
-    return tostring(value)
-end
-
-local function jsonEncode(data)
-    local ok, result = pcall(function()
-        return HttpService:JSONEncode(data)
-    end)
-
-    return ok and result or nil
-end
-
---==============================================================
--- PLAYER STATE
---==============================================================
-
-local function getPlayerState()
-    local result = {
-        name = LocalPlayer and LocalPlayer.Name or nil,
-        userId = LocalPlayer and LocalPlayer.UserId or nil,
-
-        team = nil,
-        teamColor = nil
-    }
-
-    if not LocalPlayer then
-        return result
-    end
-
-    pcall(function()
-        if LocalPlayer.Team then
-            result.team = LocalPlayer.Team.Name
-        end
-
-        if LocalPlayer.TeamColor then
-            result.teamColor = tostring(LocalPlayer.TeamColor)
-        end
-    end)
-
-    return result
-end
-
---==============================================================
--- EVENTOS
---==============================================================
-
-local function important(typeName, data)
-    State.ImportantEvents[#State.ImportantEvents + 1] = {
-        type = typeName,
-
-        time = clock(),
-        unix = unix(),
-
-        data = data or {}
-    }
-end
-
-local function visual(typeName, data)
-    State.VisualChecks[#State.VisualChecks + 1] = {
-        type = typeName,
-
-        time = clock(),
-        unix = unix(),
-
-        data = data or {}
-    }
-end
-
---==============================================================
--- ATRIBUTOS
---==============================================================
-
-local function readAttributes(model)
+local function safeAttributes(x)
     local result = {}
 
     pcall(function()
-        for key, value in pairs(model:GetAttributes()) do
-            result[tostring(key)] = serializeValue(value)
+        for key, value in pairs(x:GetAttributes()) do
+            result[tostring(key)] = tostring(value)
         end
     end)
 
     return result
 end
 
---==============================================================
--- TEAM
---==============================================================
-
-local function inspectTeam(model)
-
-    local result = {
-        attribute = nil,
-        values = {},
-        teamColor = nil
-    }
-
-    -- Attribute "Team"
-    local teamAttribute = safeAttribute(model, "Team")
-
-    if teamAttribute ~= nil then
-        result.attribute = serializeValue(teamAttribute)
-    end
-
-    -- Objetos relacionados a Team
-    for _, obj in ipairs(model:GetDescendants()) do
-
-        local name = safeName(obj):lower()
-
-        if name == "team"
-            or name == "teamname"
-            or name == "teamcolor" then
-
-            if obj:IsA("ValueBase") then
-
-                local ok, value = pcall(function()
-                    return obj.Value
-                end)
-
-                if ok then
-                    local record = {
-                        name = safeName(obj),
-                        path = safeFullName(obj),
-                        className = safeClass(obj),
-
-                        value = serializeValue(value)
-                    }
-
-                    if obj:IsA("ObjectValue") and obj.Value then
-                        record.referencedObject = {
-                            name = safeName(obj.Value),
-                            path = safeFullName(obj.Value),
-                            className = safeClass(obj.Value)
-                        }
-                    end
-
-                    result.values[#result.values + 1] = record
-                end
-            end
-        end
-    end
-
-    return result
-end
-
---==============================================================
--- HUMANOID
---==============================================================
-
-local function inspectHumanoid(model)
-
-    local humanoid = model:FindFirstChildOfClass("Humanoid")
-
-    if not humanoid then
-        return nil
-    end
-
-    local result = {}
-
-    pcall(function()
-        result.health = humanoid.Health
-        result.maxHealth = humanoid.MaxHealth
-
-        result.walkSpeed = humanoid.WalkSpeed
-        result.jumpPower = humanoid.JumpPower
-
-        result.rigType = tostring(humanoid.RigType)
-        result.state = tostring(humanoid:GetState())
-
-        result.moveDirection = serializeValue(
-            humanoid.MoveDirection
-        )
-    end)
-
-    return result
-end
-
---==============================================================
--- HIGHLIGHT
---==============================================================
-
-local function inspectHighlight(model)
-
-    local result = {
-        exists = false,
-
-        enabled = nil,
-
-        fillColor = nil,
-        outlineColor = nil,
-
-        depthMode = nil,
-
-        adornee = nil
-    }
-
-    for _, obj in ipairs(model:GetDescendants()) do
-
-        if obj:IsA("Highlight") then
-
-            result.exists = true
-
-            pcall(function()
-
-                result.enabled = obj.Enabled
-
-                result.fillColor =
-                    serializeValue(obj.FillColor)
-
-                result.outlineColor =
-                    serializeValue(obj.OutlineColor)
-
-                result.depthMode =
-                    tostring(obj.DepthMode)
-
-                if obj.Adornee then
-                    result.adornee = {
-                        name = safeName(obj.Adornee),
-                        path = safeFullName(obj.Adornee),
-                        className = safeClass(obj.Adornee)
-                    }
-                end
-            end)
-
-            break
-        end
-    end
-
-    return result
-end
-
---==============================================================
--- OBJETOS INTERESSANTES
---==============================================================
-
-local function inspectInterestingObjects(model)
-
-    local result = {}
-
-    for _, obj in ipairs(model:GetDescendants()) do
-
-        local name = safeName(obj):lower()
-
-        for _, interesting in ipairs(CONFIG.InterestingNames) do
-
-            if name == interesting then
-
-                local record = {
-                    name = safeName(obj),
-                    path = safeFullName(obj),
-                    className = safeClass(obj)
-                }
-
-                if obj:IsA("ValueBase") then
-
-                    pcall(function()
-                        record.value =
-                            serializeValue(obj.Value)
-                    end)
-
-                end
-
-                if obj:IsA("ObjectValue") then
-
-                    pcall(function()
-
-                        if obj.Value then
-                            record.referencedObject = {
-                                name = safeName(obj.Value),
-                                path = safeFullName(obj.Value),
-                                className = safeClass(obj.Value)
-                            }
-                        end
-
-                    end)
-                end
-
-                result[#result + 1] = record
-
-                break
-            end
-        end
-    end
-
-    return result
-end
-
---==============================================================
--- ROOT
---==============================================================
-
-local function getRoot(model)
-
-    return model:FindFirstChild("HumanoidRootPart")
+local function safePosition(model)
+    local root =
+        model:FindFirstChild("HumanoidRootPart")
         or model.PrimaryPart
         or model:FindFirstChildWhichIsA("BasePart")
-end
 
---==============================================================
--- SNAPSHOT DE BOT
---==============================================================
-
-local function buildBotSnapshot(bot)
-
-    local model = bot.model
-
-    if not model or not model.Parent then
+    if not root then
         return nil
     end
 
-    local result = {
-        time = clock(),
-        unix = unix(),
-
-        path = safeFullName(model),
-
-        playerState = getPlayerState(),
-
-        team = inspectTeam(model),
-
-        attributes = readAttributes(model),
-
-        humanoid = inspectHumanoid(model),
-
-        highlight = inspectHighlight(model),
-
-        interestingObjects =
-            inspectInterestingObjects(model)
-    }
-
-    local root = getRoot(model)
-
-    if root then
-
-        pcall(function()
-
-            result.position =
-                serializeValue(root.Position)
-
-        end)
-    end
-
-    return result
-end
-
---==============================================================
--- IDENTIFICAÇÃO DE PLAYER
---==============================================================
-
-local function isPlayerCharacter(model)
-
-    for _, player in ipairs(Players:GetPlayers()) do
-
-        if player.Character == model then
-            return true
-        end
-
-    end
-
-    return false
-end
-
---==============================================================
--- CANDIDATO A BOT
---==============================================================
-
-local function isBotCandidate(obj)
-
-    if not obj:IsA("Model") then
-        return false
-    end
-
-    if isPlayerCharacter(obj) then
-        return false
-    end
-
-    if not obj:FindFirstChildOfClass("Humanoid") then
-        return false
-    end
-
-    return true
-end
-
---==============================================================
--- REGISTRAR BOT
---==============================================================
-
-local function registerBot(model)
-
-    if State.ObjectToBot[model] then
-        return State.ObjectToBot[model]
-    end
-
-    State.NextBotId += 1
-
-    local botId = State.NextBotId
-
-    local initialTeam = inspectTeam(model)
-
-    local bot = {
-
-        id = botId,
-
-        model = model,
-
-        name = safeName(model),
-
-        spawnPath = safeFullName(model),
-        className = safeClass(model),
-
-        firstSeen = clock(),
-        firstSeenUnix = unix(),
-
-        initialTeam = initialTeam,
-
-        initialAttributes =
-            readAttributes(model),
-
-        teamHistory = {},
-
-        attributeEvents = {},
-        objectEvents = {},
-
-        snapshots = {},
-
-        highlightInitial =
-            inspectHighlight(model),
-
-        knownObjects = {},
-
-        lastAttributes =
-            readAttributes(model),
-
-        lastTeamSignature =
-            jsonEncode(initialTeam),
-
-        lastHighlight =
-            inspectHighlight(model),
-
-        removed = false,
-
-        removedAt = nil,
-        removedAtUnix = nil
-    }
-
-    State.Bots[botId] = bot
-    State.ObjectToBot[model] = bot
-
-    bot.teamHistory[#bot.teamHistory + 1] = {
-        time = clock(),
-        unix = unix(),
-
-        team = initialTeam
-    }
-
-    -- Evento principal de spawn
-    important("BOT_SPAWN", {
-
-        botId = botId,
-
-        name = safeName(model),
-
-        path = safeFullName(model),
-
-        className = safeClass(model),
-
-        initialTeam = initialTeam,
-
-        playerState = getPlayerState()
-    })
-
-    -- Highlight é somente verificação complementar.
-    visual("HIGHLIGHT_INITIAL", {
-
-        botId = botId,
-
-        highlight =
-            bot.highlightInitial,
-
-        playerState =
-            getPlayerState()
-    })
-
-    -- Captura inicial.
-    local snapshot =
-        buildBotSnapshot(bot)
-
-    if snapshot then
-        bot.snapshots[#bot.snapshots + 1] =
-            snapshot
-    end
-
-    -- Registra objetos já existentes.
-    for _, obj in ipairs(model:GetDescendants()) do
-
-        local path = safeFullName(obj)
-
-        bot.knownObjects[path] = {
-            name = safeName(obj),
-            path = path,
-            className = safeClass(obj)
-        }
-    end
-
-    return bot
-end
-
---==============================================================
--- TEAM MONITOR
---==============================================================
-
-local function monitorTeam(bot)
-
-    local model = bot.model
-
-    if not model or not model.Parent then
-        return
-    end
-
-    local current = inspectTeam(model)
-
-    local signature =
-        jsonEncode(current)
-
-    if signature ~= bot.lastTeamSignature then
-
-        local previous =
-            bot.teamHistory[#bot.teamHistory]
-
-        bot.teamHistory[#bot.teamHistory + 1] = {
-
-            time = clock(),
-            unix = unix(),
-
-            team = current
-        }
-
-        important("TEAM_CHANGED", {
-
-            botId = bot.id,
-
-            previous =
-                previous and previous.team or nil,
-
-            current = current,
-
-            playerState =
-                getPlayerState()
-        })
-
-        bot.lastTeamSignature = signature
-    end
-end
-
---==============================================================
--- ATTRIBUTE MONITOR
---==============================================================
-
-local function monitorAttributes(bot)
-
-    local model = bot.model
-
-    if not model or not model.Parent then
-        return
-    end
-
-    local current =
-        readAttributes(model)
-
-    local previous =
-        bot.lastAttributes or {}
-
-    for key, value in pairs(current) do
-
-        if previous[key] ~= value then
-
-            bot.attributeEvents[#bot.attributeEvents + 1] = {
-
-                time = clock(),
-                unix = unix(),
-
-                attribute = key,
-
-                previous = previous[key],
-                current = value
-            }
-
-            important("ATTRIBUTE_CHANGED", {
-
-                botId = bot.id,
-
-                attribute = key,
-
-                previous = previous[key],
-                current = value,
-
-                playerState =
-                    getPlayerState()
-            })
-        end
-    end
-
-    for key, oldValue in pairs(previous) do
-
-        if current[key] == nil then
-
-            bot.attributeEvents[#bot.attributeEvents + 1] = {
-
-                time = clock(),
-                unix = unix(),
-
-                attribute = key,
-
-                previous = oldValue,
-                current = nil
-            }
-
-            important("ATTRIBUTE_REMOVED", {
-
-                botId = bot.id,
-
-                attribute = key,
-
-                previous = oldValue
-            })
-        end
-    end
-
-    bot.lastAttributes = current
-end
-
---==============================================================
--- OBJECT MONITOR
---==============================================================
-
-local function monitorObjects(bot)
-
-    local model = bot.model
-
-    if not model or not model.Parent then
-        return
-    end
-
-    local current = {}
-
-    for _, obj in ipairs(model:GetDescendants()) do
-
-        local path =
-            safeFullName(obj)
-
-        current[path] = {
-
-            name = safeName(obj),
-            path = path,
-            className = safeClass(obj)
-        }
-    end
-
-    local previous =
-        bot.knownObjects or {}
-
-    for path, objectData in pairs(current) do
-
-        if not previous[path] then
-
-            bot.objectEvents[#bot.objectEvents + 1] = {
-
-                time = clock(),
-                unix = unix(),
-
-                action = "CREATED",
-
-                object = objectData
-            }
-
-            important("OBJECT_CREATED", {
-
-                botId = bot.id,
-
-                object = objectData
-            })
-        end
-    end
-
-    for path, objectData in pairs(previous) do
-
-        if not current[path] then
-
-            bot.objectEvents[#bot.objectEvents + 1] = {
-
-                time = clock(),
-                unix = unix(),
-
-                action = "REMOVED",
-
-                object = objectData
-            }
-
-            important("OBJECT_REMOVED", {
-
-                botId = bot.id,
-
-                object = objectData
-            })
-        end
-    end
-
-    bot.knownObjects = current
-end
-
---==============================================================
--- HIGHLIGHT MONITOR
---==============================================================
-
-local function monitorHighlight(bot)
-
-    local model = bot.model
-
-    if not model or not model.Parent then
-        return
-    end
-
-    local current =
-        inspectHighlight(model)
-
-    local previous =
-        bot.lastHighlight
-
-    local oldSignature =
-        jsonEncode(previous)
-
-    local newSignature =
-        jsonEncode(current)
-
-    if oldSignature ~= newSignature then
-
-        visual("HIGHLIGHT_CHANGED", {
-
-            botId = bot.id,
-
-            previous = previous,
-            current = current,
-
-            playerState =
-                getPlayerState()
-        })
-
-        bot.lastHighlight = current
-    end
-end
-
---==============================================================
--- BOT REMOVIDO
---==============================================================
-
-local function removeBot(bot)
-
-    if bot.removed then
-        return
-    end
-
-    bot.removed = true
-
-    bot.removedAt = clock()
-    bot.removedAtUnix = unix()
-
-    important("BOT_REMOVED", {
-
-        botId = bot.id,
-
-        name = bot.name,
-
-        path = bot.spawnPath,
-
-        lifetime =
-            bot.removedAt - bot.firstSeen,
-
-        playerState =
-            getPlayerState()
-    })
-end
-
---==============================================================
--- MONITOR GERAL
---==============================================================
-
-local function monitorBots()
-
-    for _, bot in pairs(State.Bots) do
-
-        if bot.removed then
-            continue
-        end
-
-        if not bot.model
-            or not bot.model.Parent then
-
-            removeBot(bot)
-
-            continue
-        end
-
-        monitorTeam(bot)
-
-        monitorAttributes(bot)
-
-        monitorObjects(bot)
-
-        monitorHighlight(bot)
-    end
-end
-
---==============================================================
--- SNAPSHOT GLOBAL
---==============================================================
-
-local function createSnapshot()
-
-    local snapshot = {
-
-        time = clock(),
-        unix = unix(),
-
-        playerState =
-            getPlayerState(),
-
-        bots = {
-
-            total = 0,
-
-            army = 0,
-            rebels = 0,
-
-            unknown = 0
-        }
-    }
-
-    for _, bot in pairs(State.Bots) do
-
-        if not bot.removed then
-
-            snapshot.bots.total += 1
-
-            local team =
-                inspectTeam(bot.model)
-
-            local value =
-                team.attribute
-
-            if value == "Army" then
-
-                snapshot.bots.army += 1
-
-            elseif value == "Rebels" then
-
-                snapshot.bots.rebels += 1
-
-            else
-
-                snapshot.bots.unknown += 1
-            end
-        end
-    end
-
-    State.Snapshots[#State.Snapshots + 1] =
-        snapshot
-end
-
---==============================================================
--- SCAN INICIAL
---==============================================================
-
-local function scanExisting()
-
-    for _, obj in ipairs(
-        workspace:GetDescendants()
-    ) do
-
-        if isBotCandidate(obj) then
-            registerBot(obj)
-        end
-    end
-end
-
---==============================================================
--- DADOS PARA EXPORTAÇÃO
---==============================================================
-
-local function buildExport()
-
-    local bots = {}
-
-    for id, bot in pairs(State.Bots) do
-
-        bots[tostring(id)] = {
-
-            id = bot.id,
-
-            name = bot.name,
-
-            spawn = {
-
-                time = bot.firstSeen,
-
-                unix = bot.firstSeenUnix,
-
-                path = bot.spawnPath,
-
-                className =
-                    bot.className
-            },
-
-            initialTeam =
-                bot.initialTeam,
-
-            teamHistory =
-                bot.teamHistory,
-
-            initialAttributes =
-                bot.initialAttributes,
-
-            attributeEvents =
-                bot.attributeEvents,
-
-            objectEvents =
-                bot.objectEvents,
-
-            highlightInitial =
-                bot.highlightInitial,
-
-            snapshots =
-                bot.snapshots,
-
-            removed =
-                bot.removed,
-
-            removedAt =
-                bot.removedAt,
-
-            removedAtUnix =
-                bot.removedAtUnix
-        }
-    end
-
-    return {
-
-        format =
-            "Cafeina Bot Research",
-
-        version =
-            "Integrated-2.0",
-
-        description =
-            "Somente leitura. Dados observados no ambiente do cliente.",
-
-        session = {
-
-            startedAt =
-                State.StartedClock,
-
-            startedAtUnix =
-                State.StartedUnix,
-
-            endedAt =
-                State.EndedClock,
-
-            endedAtUnix =
-                State.EndedUnix,
-
-            placeId =
-                game.PlaceId,
-
-            gameId =
-                game.GameId,
-
-            jobId =
-                game.JobId
-        },
-
-        player = {
-
-            current =
-                getPlayerState()
-        },
-
-        importantEvents =
-            State.ImportantEvents,
-
-        visualChecks =
-            State.VisualChecks,
-
-        snapshots =
-            State.Snapshots,
-
-        bots =
-            bots
-    }
-end
-
---==============================================================
--- EXPORT
---==============================================================
-
-local function exportJSON()
-
-    local data =
-        buildExport()
-
-    local ok, json =
-        pcall(function()
-
-            return HttpService:JSONEncode(data)
-
-        end)
+    local ok, pos = pcall(function()
+        return root.Position
+    end)
 
     if not ok then
         return nil
     end
 
-    return json
+    return {
+        x = pos.X,
+        y = pos.Y,
+        z = pos.Z,
+    }
 end
 
---==============================================================
--- INTERFACE PRINCIPAL
---==============================================================
-
-local Main = new("Frame", {
-
-    Parent = Gui,
-
-    Size =
-        UDim2.fromOffset(520,430),
-
-    Position =
-        UDim2.new(
-            .5,-260,
-            .5,-215
-        ),
-
-    BackgroundColor3 =
-        COLORS.bg,
-
-    BorderSizePixel = 0
-})
-
-round(Main,14)
-
---==============================================================
--- HEADER
---==============================================================
-
-local Header = new("Frame", {
-
-    Parent = Main,
-
-    Size =
-        UDim2.new(1,0,0,55),
-
-    BackgroundColor3 =
-        COLORS.panel,
-
-    BorderSizePixel = 0
-})
-
-round(Header,14)
-
-label(
-    Header,
-    "CAFEÍNA • LEITURA DE BOTS",
-    UDim2.new(1,-95,0,24),
-    UDim2.fromOffset(14,7),
-    15
-)
-
-local sub =
-    label(
-        Header,
-        "PESQUISA DE COMPORTAMENTO • SOMENTE LEITURA",
-        UDim2.new(1,-95,0,16),
-        UDim2.fromOffset(14,31),
-        9
-    )
-
-sub.TextColor3 =
-    COLORS.sub
-
---==============================================================
--- MINIMIZAR
---==============================================================
-
-local Min = new("TextButton", {
-
-    Parent = Header,
-
-    Size =
-        UDim2.fromOffset(30,30),
-
-    Position =
-        UDim2.new(1,-76,0,11),
-
-    Text = "—",
-
-    BackgroundColor3 =
-        COLORS.panel2,
-
-    TextColor3 =
-        COLORS.text,
-
-    Font =
-        Enum.Font.GothamBold,
-
-    TextSize = 17,
-
-    BorderSizePixel = 0
-})
-
-round(Min,8)
-
---==============================================================
--- FECHAR
---==============================================================
-
-local Close = new("TextButton", {
-
-    Parent = Header,
-
-    Size =
-        UDim2.fromOffset(30,30),
-
-    Position =
-        UDim2.new(1,-40,0,11),
-
-    Text = "×",
-
-    BackgroundColor3 =
-        COLORS.red,
-
-    TextColor3 =
-        COLORS.text,
-
-    Font =
-        Enum.Font.GothamBold,
-
-    TextSize = 18,
-
-    BorderSizePixel = 0
-})
-
-round(Close,8)
-
---==============================================================
--- STATUS
---==============================================================
-
-local Status =
-    label(
-        Main,
-        "Pronto para iniciar a pesquisa.",
-        UDim2.new(1,-28,0,28),
-        UDim2.fromOffset(14,66),
-        11
-    )
-
-Status.TextColor3 =
-    COLORS.sub
-
---==============================================================
--- BOTÃO INICIAR/PARAR
---==============================================================
-
-local Scan = new("TextButton", {
-
-    Parent = Main,
-
-    Size =
-        UDim2.new(.5,-20,0,42),
-
-    Position =
-        UDim2.fromOffset(14,98),
-
-    Text =
-        "INICIAR LEITURA DE BOTS",
-
-    BackgroundColor3 =
-        COLORS.blue2,
-
-    TextColor3 =
-        COLORS.text,
-
-    Font =
-        Enum.Font.GothamBold,
-
-    TextSize = 10,
-
-    BorderSizePixel = 0
-})
-
-round(Scan,8)
-
---==============================================================
--- EXPORTAR
---==============================================================
-
-local Export = new("TextButton", {
-
-    Parent = Main,
-
-    Size =
-        UDim2.new(.5,-20,0,42),
-
-    Position =
-        UDim2.new(.5,6,0,98),
-
-    Text =
-        "BAIXAR ARQUIVO DE LEITURA",
-
-    BackgroundColor3 =
-        COLORS.blue,
-
-    TextColor3 =
-        COLORS.text,
-
-    Font =
-        Enum.Font.GothamBold,
-
-    TextSize = 10,
-
-    BorderSizePixel = 0
-})
-
-round(Export,8)
-
---==============================================================
--- RESUMO
---==============================================================
-
-local Summary =
-    label(
-        Main,
-        "Nenhuma leitura realizada.",
-        UDim2.new(1,-28,0,52),
-        UDim2.fromOffset(14,150),
-        10
-    )
-
-Summary.TextWrapped = true
-Summary.TextColor3 =
-    COLORS.text
-
---==============================================================
--- VIEWER
---==============================================================
-
-local Viewer = new("TextBox", {
-
-    Parent = Main,
-
-    Size =
-        UDim2.new(1,-28,1,-222),
-
-    Position =
-        UDim2.fromOffset(14,204),
-
-    BackgroundColor3 =
-        COLORS.panel,
-
-    BorderSizePixel = 0,
-
-    Text = "",
-
-    TextColor3 =
-        COLORS.text,
-
-    Font =
-        Enum.Font.Code,
-
-    TextSize = 9,
-
-    MultiLine = true,
-
-    ClearTextOnFocus = false,
-
-    TextEditable = false,
-
-    TextXAlignment =
-        Enum.TextXAlignment.Left,
-
-    TextYAlignment =
-        Enum.TextYAlignment.Top
-})
-
-round(Viewer,8)
-
---==============================================================
--- BOTÃO FLUTUANTE
---==============================================================
-
-local Mini = new("TextButton", {
-
-    Parent = Gui,
-
-    Size =
-        UDim2.fromOffset(54,54),
-
-    Position =
-        UDim2.new(.5,-27,.5,-27),
-
-    BackgroundColor3 =
-        COLORS.blue,
-
-    Text = "C",
-
-    TextColor3 =
-        COLORS.text,
-
-    Font =
-        Enum.Font.GothamBlack,
-
-    TextSize = 19,
-
-    BorderSizePixel = 0,
-
-    Visible = false
-})
-
-round(Mini,99)
-
---==============================================================
--- PREVIEW
---==============================================================
-
-local function updatePreview()
-
-    local lines = {
-
-        "CAFEÍNA • BOT RESEARCH",
-
-        "",
-
-        "STATUS: "
-            ..(
-                State.Running
-                and "COLETANDO"
-                or "PARADO"
-            ),
-
-        "",
-
-        "EVENTOS IMPORTANTES: "
-            ..#State.ImportantEvents,
-
-        "VERIFICAÇÕES VISUAIS: "
-            ..#State.VisualChecks,
-
-        "SNAPSHOTS: "
-            ..#State.Snapshots,
-
-        "BOTS REGISTRADOS: "
-            ..State.NextBotId,
-
-        "",
-
-        "BOTS ATIVOS:"
+local function getHumanoid(model)
+    return model:FindFirstChildOfClass("Humanoid")
+end
+
+local function isPlayerCharacter(model)
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Character == model then
+            return true
+        end
+    end
+
+    return false
+end
+
+-- ============================================================
+-- TEAM
+-- ============================================================
+
+local function inspectTeam(model)
+    local result = {
+        value = nil,
+        source = nil,
+        objectName = nil,
+        objectPath = nil,
+        objectClass = nil,
     }
 
-    local total = 0
-    local army = 0
-    local rebels = 0
-    local unknown = 0
+    -- 1. Attribute Team
+    local attributeTeam = getAttribute(model, "Team")
 
-    for _, bot in pairs(State.Bots) do
+    if attributeTeam ~= nil then
+        result.value = tostring(attributeTeam)
+        result.source = "Attribute"
+        return result
+    end
 
-        if not bot.removed then
+    -- 2. StringValue / ObjectValue / outros objetos chamados Team
+    local teamObject = model:FindFirstChild("Team", true)
 
-            total += 1
+    if teamObject then
+        result.objectName = safeName(teamObject)
+        result.objectPath = safeFullName(teamObject)
+        result.objectClass = safeClass(teamObject)
 
-            local team =
-                inspectTeam(bot.model)
+        if isA(teamObject, "StringValue") then
+            local ok, value = pcall(function()
+                return teamObject.Value
+            end)
 
-            if team.attribute == "Army" then
+            if ok then
+                result.value = tostring(value)
+                result.source = "StringValue"
+                return result
+            end
+        end
 
-                army += 1
+        if isA(teamObject, "ObjectValue") then
+            local ok, value = pcall(function()
+                return teamObject.Value
+            end)
 
-            elseif team.attribute == "Rebels" then
+            if ok and value then
+                result.value = safeName(value)
+                result.source = "ObjectValue"
+                result.objectPath = safeFullName(value)
+                result.objectClass = safeClass(value)
+                return result
+            end
+        end
 
-                rebels += 1
+        local ok, value = pcall(function()
+            return teamObject.Value
+        end)
 
-            else
+        if ok and value ~= nil then
+            result.value = tostring(value)
+            result.source = "ValueObject"
+            return result
+        end
+    end
 
-                unknown += 1
+    -- 3. Child chamado Team sem Value
+    if teamObject then
+        result.source = "Object"
+        return result
+    end
+
+    return result
+end
+
+local function normalizeTeam(team)
+    if not team then
+        return "Unknown"
+    end
+
+    local lower = tostring(team):lower()
+
+    if lower == "army" then
+        return "Army"
+    end
+
+    if lower == "rebels" then
+        return "Rebels"
+    end
+
+    return tostring(team)
+end
+
+-- ============================================================
+-- HIGHLIGHT
+-- ============================================================
+
+local function inspectHighlight(model)
+    local highlight = model:FindFirstChildWhichIsA("Highlight", true)
+
+    if not highlight then
+        return {
+            exists = false
+        }
+    end
+
+    local result = {
+        exists = true,
+        name = safeName(highlight),
+        path = safeFullName(highlight),
+        enabled = nil,
+        depthMode = nil,
+        fillTransparency = nil,
+        outlineTransparency = nil,
+        fillColor = nil,
+        outlineColor = nil,
+    }
+
+    pcall(function()
+        result.enabled = highlight.Enabled
+        result.depthMode = tostring(highlight.DepthMode)
+        result.fillTransparency = highlight.FillTransparency
+        result.outlineTransparency = highlight.OutlineTransparency
+        result.fillColor = tostring(highlight.FillColor)
+        result.outlineColor = tostring(highlight.OutlineColor)
+    end)
+
+    return result
+end
+
+-- ============================================================
+-- OBJETOS INTERNOS
+-- ============================================================
+
+local function collectObjectTree(model)
+    local result = {}
+
+    for _, descendant in ipairs(model:GetDescendants()) do
+        result[#result + 1] = {
+            name = safeName(descendant),
+            className = safeClass(descendant),
+            path = safeFullName(descendant),
+        }
+    end
+
+    return result
+end
+
+local function buildObjectSet(model)
+    local set = {}
+
+    for _, descendant in ipairs(model:GetDescendants()) do
+        set[descendant] = true
+    end
+
+    return set
+end
+
+-- ============================================================
+-- SNAPSHOT
+-- ============================================================
+
+local function buildSnapshot(record)
+    local model = record.instance
+
+    if not model or not model.Parent then
+        return nil
+    end
+
+    local humanoid = getHumanoid(model)
+    local team = inspectTeam(model)
+    local highlight = inspectHighlight(model)
+
+    local snapshot = {
+        elapsed = elapsed(),
+        unix = nowUnix(),
+
+        name = safeName(model),
+        path = safeFullName(model),
+
+        team = team.value,
+        teamSource = team.source,
+
+        teamObjectName = team.objectName,
+        teamObjectPath = team.objectPath,
+        teamObjectClass = team.objectClass,
+
+        attributes = safeAttributes(model),
+
+        highlight = highlight,
+
+        humanoid = nil,
+
+        position = safePosition(model),
+    }
+
+    if humanoid then
+        snapshot.humanoid = {
+            health = humanoid.Health,
+            maxHealth = humanoid.MaxHealth,
+            walkSpeed = humanoid.WalkSpeed,
+            jumpPower = humanoid.JumpPower,
+            rigType = tostring(humanoid.RigType),
+            moveDirection = {
+                x = humanoid.MoveDirection.X,
+                y = humanoid.MoveDirection.Y,
+                z = humanoid.MoveDirection.Z,
+            }
+        }
+    end
+
+    return snapshot
+end
+
+-- ============================================================
+-- EVENTOS
+-- ============================================================
+
+local function addEvent(eventType, record, data)
+    if #State.Events >= CONFIG.MaxEvents then
+        return
+    end
+
+    local event = {
+        type = eventType,
+
+        elapsed = elapsed(),
+        unix = nowUnix(),
+
+        botId = record and record.id or nil,
+
+        botName = record and record.name or nil,
+
+        botPath = nil,
+        data = data or {},
+    }
+
+    if record and record.instance then
+        pcall(function()
+            event.botPath = record.instance:GetFullName()
+        end)
+    end
+
+    State.Events[#State.Events + 1] = event
+end
+
+-- ============================================================
+-- REGISTRO DE BOT
+-- ============================================================
+
+local NextBotId = 0
+
+local function createBotId()
+    NextBotId += 1
+
+    return "BOT_" .. tostring(NextBotId)
+end
+
+local function registerBot(model, reason)
+    if not model then
+        return nil
+    end
+
+    if not isA(model, "Model") then
+        return nil
+    end
+
+    if isPlayerCharacter(model) then
+        return nil
+    end
+
+    if State.ByInstance[model] then
+        return State.ByInstance[model]
+    end
+
+    local humanoid = getHumanoid(model)
+
+    if not humanoid then
+        return nil
+    end
+
+    local team = inspectTeam(model)
+    local attributes = safeAttributes(model)
+    local highlight = inspectHighlight(model)
+
+    local record = {
+        id = createBotId(),
+
+        instance = model,
+
+        name = safeName(model),
+        pathAtSpawn = safeFullName(model),
+        className = safeClass(model),
+
+        spawnedAtUnix = nowUnix(),
+        spawnedAtElapsed = elapsed(),
+
+        spawnReason = reason or "UNKNOWN",
+
+        initialTeam = team.value,
+        initialTeamSource = team.source,
+
+        initialAttributes = attributes,
+        initialHighlight = highlight,
+
+        snapshots = {},
+
+        lastTeam = team.value,
+        lastTeamSource = team.source,
+
+        lastAttributes = attributes,
+        lastHighlight = highlight,
+
+        knownObjects = buildObjectSet(model),
+
+        connections = {},
+
+        removed = false,
+        removedAtUnix = nil,
+        removedAtElapsed = nil,
+    }
+
+    State.Records[#State.Records + 1] = record
+    State.ByInstance[model] = record
+
+    State.Summary.spawned += 1
+
+    if normalizeTeam(team.value) == "Army" then
+        State.Summary.army += 1
+    elseif normalizeTeam(team.value) == "Rebels" then
+        State.Summary.rebels += 1
+    else
+        State.Summary.unknown += 1
+    end
+
+    addEvent("BOT_SPAWN", record, {
+        reason = reason or "UNKNOWN",
+        team = team.value,
+        teamSource = team.source,
+        attributes = attributes,
+        highlight = highlight,
+    })
+
+    local firstSnapshot = buildSnapshot(record)
+
+    if firstSnapshot then
+        record.snapshots[#record.snapshots + 1] = firstSnapshot
+    end
+
+    -- ========================================================
+    -- ATTRIBUTE CHANGES
+    -- ========================================================
+
+    record.connections.attributeChanged =
+        model.AttributeChanged:Connect(function(attributeName)
+            if not State.Running then
+                return
+            end
+
+            local currentAttributes = safeAttributes(model)
+
+            addEvent("ATTRIBUTE_CHANGED", record, {
+                attribute = tostring(attributeName),
+                oldValue = record.lastAttributes[attributeName],
+                newValue = currentAttributes[attributeName],
+                attributes = currentAttributes,
+            })
+
+            record.lastAttributes = currentAttributes
+        end)
+
+    -- ========================================================
+    -- OBJECTS CRIADOS
+    -- ========================================================
+
+    record.connections.childAdded =
+        model.DescendantAdded:Connect(function(obj)
+            if not State.Running then
+                return
+            end
+
+            if record.knownObjects[obj] then
+                return
+            end
+
+            record.knownObjects[obj] = true
+
+            local isHighlight = isA(obj, "Highlight")
+
+            addEvent(
+                isHighlight and "HIGHLIGHT_CREATED" or "OBJECT_CREATED",
+                record,
+                {
+                    name = safeName(obj),
+                    className = safeClass(obj),
+                    path = safeFullName(obj),
+                }
+            )
+        end)
+
+    -- ========================================================
+    -- OBJETOS REMOVIDOS
+    -- ========================================================
+
+    record.connections.childRemoved =
+        model.DescendantRemoving:Connect(function(obj)
+            if not State.Running then
+                return
+            end
+
+            if not record.knownObjects[obj] then
+                return
+            end
+
+            record.knownObjects[obj] = nil
+
+            addEvent("OBJECT_REMOVED", record, {
+                name = safeName(obj),
+                className = safeClass(obj),
+                path = safeFullName(obj),
+            })
+        end)
+
+    -- ========================================================
+    -- HUMANOID
+    -- ========================================================
+
+    if humanoid then
+        record.connections.died =
+            humanoid.Died:Connect(function()
+                addEvent("HUMANOID_DIED", record, {
+                    health = humanoid.Health
+                })
+            end)
+    end
+
+    return record
+end
+
+-- ============================================================
+-- MONITORAMENTO DE BOT
+-- ============================================================
+
+local function monitorBot(record)
+    if record.removed then
+        return
+    end
+
+    local model = record.instance
+
+    if not model or not model.Parent then
+        return
+    end
+
+    local team = inspectTeam(model)
+    local highlight = inspectHighlight(model)
+    local attributes = safeAttributes(model)
+
+    -- ========================================================
+    -- TEAM
+    -- ========================================================
+
+    if tostring(team.value) ~= tostring(record.lastTeam)
+        or tostring(team.source) ~= tostring(record.lastTeamSource) then
+
+        addEvent("TEAM_CHANGED", record, {
+            oldTeam = record.lastTeam,
+            newTeam = team.value,
+
+            oldSource = record.lastTeamSource,
+            newSource = team.source,
+
+            objectName = team.objectName,
+            objectPath = team.objectPath,
+            objectClass = team.objectClass,
+        })
+
+        record.lastTeam = team.value
+        record.lastTeamSource = team.source
+    end
+
+    -- ========================================================
+    -- ATTRIBUTES
+    -- ========================================================
+
+    local changedAttributes = {}
+
+    for key, value in pairs(attributes) do
+        if record.lastAttributes[key] ~= value then
+            changedAttributes[key] = {
+                old = record.lastAttributes[key],
+                new = value,
+            }
+        end
+    end
+
+    for key, oldValue in pairs(record.lastAttributes) do
+        if attributes[key] == nil then
+            changedAttributes[key] = {
+                old = oldValue,
+                new = nil,
+            }
+        end
+    end
+
+    if next(changedAttributes) then
+        addEvent("ATTRIBUTES_CHANGED", record, {
+            changes = changedAttributes
+        })
+
+        record.lastAttributes = attributes
+    end
+
+    -- ========================================================
+    -- HIGHLIGHT
+    -- ========================================================
+
+    local oldHighlightJson =
+        HttpService:JSONEncode(record.lastHighlight)
+
+    local newHighlightJson =
+        HttpService:JSONEncode(highlight)
+
+    if oldHighlightJson ~= newHighlightJson then
+
+        local eventType =
+            (not record.lastHighlight.exists and highlight.exists)
+            and "HIGHLIGHT_CREATED"
+            or "HIGHLIGHT_CHANGED"
+
+        addEvent(eventType, record, {
+            previous = record.lastHighlight,
+            current = highlight,
+        })
+
+        record.lastHighlight = highlight
+    end
+
+    -- ========================================================
+    -- SNAPSHOT PERIÓDICO
+    -- ========================================================
+
+    if #record.snapshots < CONFIG.MaxSnapshotsPerBot then
+        local snapshot = buildSnapshot(record)
+
+        if snapshot then
+            record.snapshots[#record.snapshots + 1] = snapshot
+        end
+    end
+end
+
+-- ============================================================
+-- REMOÇÃO
+-- ============================================================
+
+local function unregisterBot(record, reason)
+    if not record or record.removed then
+        return
+    end
+
+    record.removed = true
+    record.removedAtUnix = nowUnix()
+    record.removedAtElapsed = elapsed()
+    record.removeReason = reason or "UNKNOWN"
+
+    State.Summary.removed += 1
+
+    addEvent("BOT_REMOVED", record, {
+        reason = reason or "UNKNOWN",
+        lastTeam = record.lastTeam,
+        lastTeamSource = record.lastTeamSource,
+        lastAttributes = record.lastAttributes,
+        lastHighlight = record.lastHighlight,
+    })
+
+    for _, connection in pairs(record.connections) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+
+    record.connections = {}
+end
+
+-- ============================================================
+-- DESCOBERTA DE SOLDIERS
+-- ============================================================
+
+local function getSoldiersFolder()
+    return workspace:FindFirstChild(CONFIG.CandidateFolderName)
+end
+
+local function scanExistingSoldiers()
+    local folder = getSoldiersFolder()
+
+    if folder then
+        for _, child in ipairs(folder:GetChildren()) do
+            registerBot(child, "EXISTING_SOLDIER")
+        end
+
+        return true
+    end
+
+    if CONFIG.AllowWorkspaceFallback then
+        for _, inst in ipairs(workspace:GetDescendants()) do
+            if isA(inst, "Model") and getHumanoid(inst) then
+                registerBot(inst, "WORKSPACE_FALLBACK")
             end
         end
     end
 
-    lines[#lines + 1] =
-        "  Total: "..total
-
-    lines[#lines + 1] =
-        "  Army: "..army
-
-    lines[#lines + 1] =
-        "  Rebels: "..rebels
-
-    lines[#lines + 1] =
-        "  Desconhecido: "..unknown
-
-    lines[#lines + 1] = ""
-
-    lines[#lines + 1] =
-        "LINHA DO TEMPO RECENTE:"
-
-    local count =
-        #State.ImportantEvents
-
-    local start =
-        math.max(1,count-12)
-
-    for i = start,count do
-
-        local event =
-            State.ImportantEvents[i]
-
-        local botId =
-            event.data
-            and event.data.botId
-
-        lines[#lines + 1] =
-            string.format(
-                "[%.2f] %s%s",
-                event.time,
-                event.type,
-
-                botId
-                and (" • Bot #"..botId)
-                or ""
-            )
-    end
-
-    Viewer.Text =
-        table.concat(
-            lines,
-            "\n"
-        )
+    return false
 end
 
---==============================================================
--- STATUS
---==============================================================
+-- ============================================================
+-- MONITOR DA PASTA SOLDIERS
+-- ============================================================
 
-local function updateStatus()
+local function attachSoldiersMonitor()
+    local folder = getSoldiersFolder()
 
-    if State.Running then
-
-        Status.Text =
-            "Pesquisa ativa • observando spawn, equipe, objetos e Highlight."
-
-        Status.TextColor3 =
-            COLORS.green
-
-    else
-
-        Status.Text =
-            "Pesquisa parada."
-
-        Status.TextColor3 =
-            COLORS.sub
-    end
-end
-
---==============================================================
--- INICIAR
---==============================================================
-
-local function startResearch()
-
-    if State.Running then
+    if not folder then
         return
     end
 
-    State.Running = true
-
-    State.StartedClock =
-        clock()
-
-    State.StartedUnix =
-        unix()
-
-    important(
-        "RESEARCH_STARTED",
-        {
-            playerState =
-                getPlayerState()
-        }
-    )
-
-    -- Registra bots existentes.
-    scanExisting()
-
-    -- Detecta novos modelos.
-    State.Connections.DescendantAdded =
-        workspace.DescendantAdded:Connect(
-            function(obj)
-
-                if not State.Running then
-                    return
-                end
-
-                if isBotCandidate(obj) then
-                    registerBot(obj)
-                end
+    State.Connections.soldierAdded =
+        folder.ChildAdded:Connect(function(child)
+            if not State.Running then
+                return
             end
-        )
 
-    -- Detecta remoção.
-    State.Connections.DescendantRemoving =
-        workspace.DescendantRemoving:Connect(
-            function(obj)
+            task.defer(function()
+                registerBot(child, "SOLDIERS_CHILD_ADDED")
+            end)
+        end)
 
-                local bot =
-                    State.ObjectToBot[obj]
+    State.Connections.soldierRemoving =
+        folder.ChildRemoved:Connect(function(child)
+            local record = State.ByInstance[child]
 
-                if bot then
-                    removeBot(bot)
-                end
+            if record then
+                unregisterBot(record, "SOLDIER_REMOVED")
             end
-        )
-
-    -- Loop de observação.
-    State.SnapshotThread =
-        task.spawn(
-            function()
-
-                while State.Running do
-
-                    task.wait(
-                        CONFIG.SnapshotInterval
-                    )
-
-                    if not State.Running then
-                        break
-                    end
-
-                    monitorBots()
-
-                    createSnapshot()
-
-                    for _, bot in pairs(State.Bots) do
-
-                        if not bot.removed then
-
-                            local snapshot =
-                                buildBotSnapshot(bot)
-
-                            if snapshot then
-
-                                bot.snapshots[
-                                    #bot.snapshots + 1
-                                ] = snapshot
-                            end
-                        end
-                    end
-
-                    updatePreview()
-                end
-            end
-        )
-
-    createSnapshot()
-
-    updateStatus()
-    updatePreview()
+        end)
 end
 
---==============================================================
--- PARAR
---==============================================================
+-- ============================================================
+-- FALLBACK PARA NOVOS MODELS
+-- ============================================================
 
-local function stopResearch()
-
-    if not State.Running then
+local function attachWorkspaceFallback()
+    if not CONFIG.AllowWorkspaceFallback then
         return
     end
 
-    State.Running = false
+    State.Connections.workspaceAdded =
+        workspace.DescendantAdded:Connect(function(obj)
+            if not State.Running then
+                return
+            end
 
-    State.EndedClock =
-        clock()
+            if not isA(obj, "Model") then
+                return
+            end
 
-    State.EndedUnix =
-        unix()
+            -- Só aceitar diretamente modelos com Humanoid.
+            if getHumanoid(obj) then
+                task.defer(function()
+                    if not State.ByInstance[obj] then
+                        registerBot(obj, "WORKSPACE_MODEL_ADDED")
+                    end
+                end)
+            end
+        end)
+end
 
-    monitorBots()
+-- ============================================================
+-- PLAYER CONTEXT
+-- ============================================================
 
-    createSnapshot()
+local function registerPlayer(player, eventType)
+    local teamName = nil
 
-    important(
-        "RESEARCH_STOPPED",
-        {
-            playerState =
-                getPlayerState()
-        }
-    )
+    pcall(function()
+        if player.Team then
+            teamName = player.Team.Name
+        end
+    end)
 
-    for _, connection in pairs(
-        State.Connections
-    ) do
+    State.Players[player.UserId] = {
+        userId = player.UserId,
+        name = player.Name,
+        displayName = player.DisplayName,
+        team = teamName,
+        firstSeenUnix = State.Players[player.UserId]
+            and State.Players[player.UserId].firstSeenUnix
+            or nowUnix(),
+    }
 
+    addEvent(eventType, nil, {
+        userId = player.UserId,
+        name = player.Name,
+        displayName = player.DisplayName,
+        team = teamName,
+    })
+end
+
+local function attachPlayerMonitor()
+    for _, player in ipairs(Players:GetPlayers()) do
+        registerPlayer(player, "PLAYER_PRESENT_AT_START")
+    end
+
+    State.Connections.playerAdded =
+        Players.PlayerAdded:Connect(function(player)
+            if not State.Running then
+                return
+            end
+
+            registerPlayer(player, "PLAYER_JOINED")
+        end)
+
+    State.Connections.playerRemoving =
+        Players.PlayerRemoving:Connect(function(player)
+            if not State.Running then
+                return
+            end
+
+            local old = State.Players[player.UserId]
+
+            addEvent("PLAYER_LEFT", nil, {
+                userId = player.UserId,
+                name = player.Name,
+                team = old and old.team or nil,
+            })
+
+            State.Players[player.UserId] = nil
+        end)
+end
+
+-- ============================================================
+-- PATROL POINTS
+-- ============================================================
+
+local function scanPatrolPoints()
+    local result = {}
+
+    local folder = workspace:FindFirstChild("BotPatrolPoints")
+
+    if not folder then
+        return result
+    end
+
+    for _, teamFolder in ipairs(folder:GetChildren()) do
+        local points = {}
+
+        for _, obj in ipairs(teamFolder:GetDescendants()) do
+            if isA(obj, "BasePart") then
+                points[#points + 1] = {
+                    name = safeName(obj),
+                    path = safeFullName(obj),
+                    className = safeClass(obj),
+
+                    teamAttribute = getAttribute(obj, "Team"),
+
+                    position = {
+                        x = obj.Position.X,
+                        y = obj.Position.Y,
+                        z = obj.Position.Z,
+                    },
+
+                    anchored = obj.Anchored,
+                    transparency = obj.Transparency,
+                }
+            end
+        end
+
+        result[safeName(teamFolder)] = points
+    end
+
+    return result
+end
+
+-- ============================================================
+-- START / STOP
+-- ============================================================
+
+local function disconnectAll()
+    for _, connection in pairs(State.Connections) do
         pcall(function()
             connection:Disconnect()
         end)
     end
 
     State.Connections = {}
-
-    updateStatus()
-    updatePreview()
 end
 
---==============================================================
--- BOTÃO LEITURA
---==============================================================
+local function StartScanner()
+    if State.Running then
+        return
+    end
 
-Scan.Activated:Connect(
+    State.Running = true
+    State.Scanned = false
 
-    function()
+    State.StartedAtUnix = nowUnix()
+    State.StartedAtClock = nowClock()
 
-        if State.Running then
+    State.EndedAtUnix = nil
+    State.EndedAtClock = nil
 
-            Scan.Text =
-                "PARAR LEITURA DE BOTS"
+    State.Records = {}
+    State.ByInstance = {}
+    State.Events = {}
+    State.Players = {}
 
-            stopResearch()
+    State.Summary = {
+        spawned = 0,
+        removed = 0,
+        army = 0,
+        rebels = 0,
+        unknown = 0,
+    }
 
-            Scan.Text =
-                "INICIAR LEITURA DE BOTS"
+    addEvent("SCAN_STARTED", nil, {
+        soldiersFolderExists = getSoldiersFolder() ~= nil,
+    })
 
-        else
+    attachPlayerMonitor()
 
-            Scan.Text =
-                "PARAR LEITURA DE BOTS"
+    scanExistingSoldiers()
 
-            startResearch()
+    attachSoldiersMonitor()
+    attachWorkspaceFallback()
+
+    State.Connections.monitor =
+        task.spawn(function()
+            while State.Running do
+
+                for _, record in ipairs(State.Records) do
+                    if not record.removed then
+                        pcall(function()
+                            monitorBot(record)
+                        end)
+                    end
+                end
+
+                task.wait(CONFIG.SnapshotInterval)
+            end
+        end)
+
+    State.Scanned = true
+end
+
+local function StopScanner()
+    if not State.Running then
+        return
+    end
+
+    State.Running = false
+
+    State.EndedAtUnix = nowUnix()
+    State.EndedAtClock = nowClock()
+
+    addEvent("SCAN_STOPPED", nil, {
+        elapsed = elapsed(),
+    })
+
+    for _, record in ipairs(State.Records) do
+        if not record.removed then
+            unregisterBot(record, "SCAN_STOPPED")
         end
     end
+
+    disconnectAll()
+end
+
+-- ============================================================
+-- EXPORTAÇÃO
+-- ============================================================
+
+local function serializeRecord(record)
+    local result = {
+        id = record.id,
+
+        name = record.name,
+        pathAtSpawn = record.pathAtSpawn,
+        className = record.className,
+
+        spawnedAtUnix = record.spawnedAtUnix,
+        spawnedAtElapsed = record.spawnedAtElapsed,
+
+        spawnReason = record.spawnReason,
+
+        initialTeam = record.initialTeam,
+        initialTeamSource = record.initialTeamSource,
+
+        initialAttributes = record.initialAttributes,
+        initialHighlight = record.initialHighlight,
+
+        removed = record.removed,
+        removedAtUnix = record.removedAtUnix,
+        removedAtElapsed = record.removedAtElapsed,
+        removeReason = record.removeReason,
+
+        lastTeam = record.lastTeam,
+        lastTeamSource = record.lastTeamSource,
+
+        lastAttributes = record.lastAttributes,
+        lastHighlight = record.lastHighlight,
+
+        snapshots = record.snapshots,
+    }
+
+    return result
+end
+
+local function buildExport()
+    local bots = {}
+
+    for _, record in ipairs(State.Records) do
+        bots[#bots + 1] = serializeRecord(record)
+    end
+
+    local army = 0
+    local rebels = 0
+    local unknown = 0
+
+    for _, record in ipairs(State.Records) do
+        local team = normalizeTeam(record.lastTeam)
+
+        if team == "Army" then
+            army += 1
+        elseif team == "Rebels" then
+            rebels += 1
+        else
+            unknown += 1
+        end
+    end
+
+    return {
+        format = "Cafeina Bot Reader V2",
+        version = 2,
+
+        scan = {
+            startedAtUnix = State.StartedAtUnix,
+            endedAtUnix = State.EndedAtUnix,
+
+            startedAtClock = State.StartedAtClock,
+            endedAtClock = State.EndedAtClock,
+
+            duration =
+                State.EndedAtClock
+                and State.StartedAtClock
+                and (State.EndedAtClock - State.StartedAtClock)
+                or elapsed(),
+        },
+
+        game = {
+            placeId = game.PlaceId,
+            gameId = game.GameId,
+            jobId = game.JobId,
+        },
+
+        collector = {
+            candidateFolder = CONFIG.CandidateFolderName,
+            snapshotInterval = CONFIG.SnapshotInterval,
+
+            note =
+                "Coleta passiva. Team e sua fonte são dados prioritários; " ..
+                "Highlight é evidência complementar.",
+        },
+
+        summary = {
+            totalRecords = #bots,
+
+            spawned = State.Summary.spawned,
+            removed = State.Summary.removed,
+
+            currentArmy = army,
+            currentRebels = rebels,
+            currentUnknown = unknown,
+
+            totalEvents = #State.Events,
+        },
+
+        players = State.Players,
+
+        patrolPoints = scanPatrolPoints(),
+
+        events = State.Events,
+
+        bots = bots,
+    }
+end
+
+local function getJson()
+    local ok, result = pcall(function()
+        return HttpService:JSONEncode(buildExport())
+    end)
+
+    if ok then
+        return result
+    end
+
+    return nil, result
+end
+
+local function exportData()
+    if not State.Scanned then
+        return false, "Faça uma coleta primeiro."
+    end
+
+    if State.Running then
+        StopScanner()
+    end
+
+    local data, err = getJson()
+
+    if not data then
+        return false, "Falha no JSON: " .. tostring(err)
+    end
+
+    local filename =
+        "Cafeina_BotReader_V2_"
+        .. tostring(game.PlaceId)
+        .. "_"
+        .. tostring(State.StartedAtUnix or nowUnix())
+        .. ".json"
+
+    local wrote = false
+
+    if typeof(writefile) == "function" then
+        local ok = pcall(function()
+            writefile(filename, data)
+        end)
+
+        wrote = ok
+    end
+
+    if wrote then
+        return true, "Arquivo salvo: " .. filename
+    end
+
+    if typeof(setclipboard) == "function" then
+        local ok = pcall(function()
+            setclipboard(data)
+        end)
+
+        if ok then
+            return true,
+                "writefile indisponível. JSON copiado para a área de transferência."
+        end
+    end
+
+    return false,
+        "Ambiente não possui writefile nem setclipboard."
+end
+
+-- ============================================================
+-- INTERFACE
+-- ============================================================
+
+local Main = new("Frame", {
+    Parent = Gui,
+
+    Size = UDim2.fromOffset(620, 520),
+
+    Position = UDim2.new(.5, -310, .5, -260),
+
+    BackgroundColor3 = COLORS.bg,
+    BorderSizePixel = 0,
+})
+
+round(Main, 16)
+
+local Header = new("Frame", {
+    Parent = Main,
+
+    Size = UDim2.new(1, 0, 0, 72),
+
+    BackgroundColor3 = COLORS.panel,
+    BorderSizePixel = 0,
+})
+
+round(Header, 16)
+
+label(
+    Header,
+    "CAFÉÍNA • BOT READER V2",
+    UDim2.new(1, -150, 0, 30),
+    UDim2.fromOffset(22, 12),
+    18
 )
 
---==============================================================
--- EXPORTAR ARQUIVO
---==============================================================
+local HeaderSub = label(
+    Header,
+    "COLETOR PASSIVO • CICLO DE VIDA DOS BOTS",
+    UDim2.new(1, -150, 0, 20),
+    UDim2.fromOffset(22, 42),
+    9
+)
 
-Export.Activated:Connect(
+HeaderSub.TextColor3 = COLORS.sub
 
-    function()
+local Min = new("TextButton", {
+    Parent = Header,
 
-        if #State.ImportantEvents == 0 then
+    Size = UDim2.fromOffset(42, 42),
+    Position = UDim2.new(1, -100, 0, 15),
 
-            Status.Text =
-                "Nenhuma pesquisa disponível para exportação."
+    Text = "—",
 
-            Status.TextColor3 =
-                COLORS.yellow
+    BackgroundColor3 = COLORS.panel2,
+    TextColor3 = COLORS.text,
 
-            return
+    Font = Enum.Font.GothamBold,
+    TextSize = 20,
+
+    BorderSizePixel = 0,
+})
+
+round(Min, 10)
+
+local Close = new("TextButton", {
+    Parent = Header,
+
+    Size = UDim2.fromOffset(42, 42),
+    Position = UDim2.new(1, -50, 0, 15),
+
+    Text = "×",
+
+    BackgroundColor3 = COLORS.red,
+    TextColor3 = COLORS.text,
+
+    Font = Enum.Font.GothamBold,
+    TextSize = 23,
+
+    BorderSizePixel = 0,
+})
+
+round(Close, 10)
+
+-- ============================================================
+-- STATUS
+-- ============================================================
+
+local Status = label(
+    Main,
+    "Pronto para iniciar a coleta.",
+    UDim2.new(1, -44, 0, 25),
+    UDim2.fromOffset(22, 88),
+    11
+)
+
+Status.TextColor3 = COLORS.sub
+
+-- ============================================================
+-- BOTÕES
+-- ============================================================
+
+local StartButton = new("TextButton", {
+    Parent = Main,
+
+    Size = UDim2.new(.5, -28, 0, 52),
+    Position = UDim2.fromOffset(22, 122),
+
+    Text = "INICIAR COLETA",
+
+    BackgroundColor3 = COLORS.blue2,
+    TextColor3 = COLORS.text,
+
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+
+    BorderSizePixel = 0,
+})
+
+round(StartButton, 10)
+
+local ExportButton = new("TextButton", {
+    Parent = Main,
+
+    Size = UDim2.new(.5, -28, 0, 52),
+    Position = UDim2.new(.5, 6, 0, 122),
+
+    Text = "FINALIZAR E EXPORTAR",
+
+    BackgroundColor3 = COLORS.blue,
+    TextColor3 = COLORS.text,
+
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+
+    BorderSizePixel = 0,
+})
+
+round(ExportButton, 10)
+
+-- ============================================================
+-- RESUMO
+-- ============================================================
+
+local Summary = new("TextLabel", {
+    Parent = Main,
+
+    Size = UDim2.new(1, -44, 0, 66),
+    Position = UDim2.fromOffset(22, 188),
+
+    BackgroundColor3 = COLORS.panel,
+
+    Text = "Nenhuma coleta realizada.",
+
+    TextColor3 = COLORS.text,
+
+    Font = Enum.Font.Gotham,
+    TextSize = 11,
+
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Center,
+
+    BorderSizePixel = 0,
+})
+
+round(Summary, 10)
+
+-- ============================================================
+-- VIEWER
+-- ============================================================
+
+local Viewer = new("TextBox", {
+    Parent = Main,
+
+    Size = UDim2.new(1, -44, 1, -274),
+    Position = UDim2.fromOffset(22, 270),
+
+    BackgroundColor3 = COLORS.panel,
+
+    Text = "",
+
+    TextColor3 = COLORS.text,
+
+    Font = Enum.Font.Code,
+    TextSize = 9,
+
+    MultiLine = true,
+    ClearTextOnFocus = false,
+    TextEditable = false,
+
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+
+    BorderSizePixel = 0,
+})
+
+round(Viewer, 10)
+
+-- ============================================================
+-- PREVIEW
+-- ============================================================
+
+local function updatePreview()
+    local lines = {}
+
+    lines[#lines + 1] = "CAFÉÍNA • BOT READER V2"
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "STATUS"
+    lines[#lines + 1] = "  Coleta: " .. (State.Running and "ATIVA" or "FINALIZADA")
+    lines[#lines + 1] = "  Eventos: " .. tostring(#State.Events)
+    lines[#lines + 1] = ""
+
+    lines[#lines + 1] = "ENTIDADES"
+    lines[#lines + 1] = "  Spawn registrados: " .. tostring(State.Summary.spawned)
+    lines[#lines + 1] = "  Removidos: " .. tostring(State.Summary.removed)
+
+    lines[#lines + 1] = ""
+
+    lines[#lines + 1] = "EQUIPE OBSERVADA"
+
+    local army = 0
+    local rebels = 0
+    local unknown = 0
+
+    for _, record in ipairs(State.Records) do
+        local team = normalizeTeam(record.lastTeam)
+
+        if team == "Army" then
+            army += 1
+        elseif team == "Rebels" then
+            rebels += 1
+        else
+            unknown += 1
         end
+    end
 
-        -- Para garantir que o último estado seja incluído.
-        if State.Running then
-            monitorBots()
-            createSnapshot()
-        end
+    lines[#lines + 1] = "  Army: " .. tostring(army)
+    lines[#lines + 1] = "  Rebels: " .. tostring(rebels)
+    lines[#lines + 1] = "  Unknown: " .. tostring(unknown)
 
-        local json =
-            exportJSON()
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "ÚLTIMOS EVENTOS"
 
-        if not json then
+    local startIndex = math.max(1, #State.Events - 14)
 
-            Status.Text =
-                "Erro ao gerar JSON."
+    for i = startIndex, #State.Events do
+        local event = State.Events[i]
 
-            Status.TextColor3 =
-                COLORS.red
+        lines[#lines + 1] =
+            string.format(
+                "[%8.3f] %-24s %s",
+                tonumber(event.elapsed) or 0,
+                tostring(event.type),
+                tostring(event.botId or "")
+            )
+    end
 
-            return
-        end
+    Viewer.Text = table.concat(lines, "\n")
 
-        local filename =
-            "Cafeina_BotResearch_"
-            ..tostring(game.PlaceId)
-            .."_"
-            ..tostring(os.time())
-            ..".json"
+    Summary.Text =
+        "Bots registrados: "
+        .. tostring(#State.Records)
+        .. "   •   Army: "
+        .. tostring(army)
+        .. "   •   Rebels: "
+        .. tostring(rebels)
+        .. "   •   Eventos: "
+        .. tostring(#State.Events)
+end
 
-        local wrote = false
+-- ============================================================
+-- AÇÕES
+-- ============================================================
 
-        -- Preferência: arquivo.
-        if typeof(writefile) == "function" then
+StartButton.Activated:Connect(function()
+    if State.Running then
+        Status.Text = "A coleta já está em execução."
+        return
+    end
 
-            local ok =
-                pcall(
-                    function()
-                        writefile(
-                            filename,
-                            json
-                        )
-                    end
-                )
+    Status.Text = "Iniciando coleta..."
 
-            wrote = ok
-        end
+    local ok, err = pcall(StartScanner)
 
-        if wrote then
+    if ok then
+        Status.Text = "Coleta ativa. Monitorando Soldiers, Team, Attributes e Highlight."
+        Status.TextColor3 = COLORS.green
 
-            Status.Text =
-                "Arquivo salvo: "..filename
+        StartButton.Text = "COLETA EM EXECUÇÃO"
 
-            Status.TextColor3 =
-                COLORS.green
-
-        elseif typeof(setclipboard) == "function" then
-
-            local ok =
-                pcall(
-                    function()
-                        setclipboard(json)
-                    end
-                )
-
-            if ok then
-
-                Status.Text =
-                    "writefile indisponível • JSON copiado para a área de transferência."
-
-                Status.TextColor3 =
-                    COLORS.yellow
-
-            else
-
-                Status.Text =
-                    "Não foi possível salvar nem copiar o JSON."
-
-                Status.TextColor3 =
-                    COLORS.red
+        task.spawn(function()
+            while State.Running do
+                updatePreview()
+                task.wait(1)
             end
 
-        else
-
-            Status.Text =
-                "Ambiente sem writefile e sem clipboard."
-
-            Status.TextColor3 =
-                COLORS.red
-        end
+            updatePreview()
+        end)
+    else
+        Status.Text = "Erro ao iniciar: " .. tostring(err)
+        Status.TextColor3 = COLORS.red
     end
-)
+end)
 
---==============================================================
+ExportButton.Activated:Connect(function()
+    if not State.Scanned then
+        Status.Text = "Nenhuma coleta foi realizada."
+        Status.TextColor3 = COLORS.yellow
+        return
+    end
+
+    Status.Text = "Finalizando coleta e preparando JSON..."
+
+    local ok, message = pcall(function()
+        return exportData()
+    end)
+
+    if not ok then
+        Status.Text = "Erro na exportação: " .. tostring(message)
+        Status.TextColor3 = COLORS.red
+        return
+    end
+
+    local success, text = message, select(2, exportData)
+
+    if success then
+        Status.Text = text
+        Status.TextColor3 = COLORS.green
+    else
+        Status.Text = text
+        Status.TextColor3 = COLORS.yellow
+    end
+
+    StartButton.Text = "INICIAR NOVA COLETA"
+
+    updatePreview()
+end)
+
+-- ============================================================
 -- MINIMIZAR
---==============================================================
+-- ============================================================
 
-Min.Activated:Connect(
+local Mini = new("TextButton", {
+    Parent = Gui,
 
-    function()
+    Size = UDim2.fromOffset(60, 60),
 
-        Main.Visible = false
+    Position = UDim2.new(.5, -30, .5, -30),
 
-        Mini.Visible = true
-    end
-)
+    BackgroundColor3 = COLORS.blue,
 
---==============================================================
--- RESTAURAR
---==============================================================
+    Text = "C",
 
--- O botão flutuante precisa distinguir clique de arrasto.
-local dragging = false
-local dragStart = nil
-local startPos = nil
-local moved = false
+    TextColor3 = COLORS.text,
 
-Mini.InputBegan:Connect(
+    Font = Enum.Font.GothamBlack,
+    TextSize = 22,
 
-    function(input)
+    BorderSizePixel = 0,
 
-        if input.UserInputType
-            == Enum.UserInputType.MouseButton1
-            or input.UserInputType
-            == Enum.UserInputType.Touch then
+    Visible = false,
+})
+
+round(Mini, 100)
+
+Min.Activated:Connect(function()
+    Main.Visible = false
+    Mini.Visible = true
+end)
+
+Mini.Activated:Connect(function()
+    Main.Visible = true
+    Mini.Visible = false
+end)
+
+Close.Activated:Connect(function()
+    State.Running = false
+
+    pcall(function()
+        StopScanner()
+    end)
+
+    pcall(function()
+        Gui:Destroy()
+    end)
+end)
+
+-- ============================================================
+-- ARRASTAR BOTÃO FLUTUANTE
+-- ============================================================
+
+do
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+
+    Mini.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
 
             dragging = true
-            moved = false
-
-            dragStart =
-                input.Position
-
-            startPos =
-                Mini.Position
+            dragStart = input.Position
+            startPos = Mini.Position
         end
-    end
-)
+    end)
 
-UserInputService.InputChanged:Connect(
-
-    function(input)
-
+    UserInputService.InputChanged:Connect(function(input)
         if not dragging then
             return
         end
 
-        if input.UserInputType
-            ~= Enum.UserInputType.MouseMovement
-            and input.UserInputType
-            ~= Enum.UserInputType.Touch then
-
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement
+            and input.UserInputType ~= Enum.UserInputType.Touch then
             return
         end
 
-        local delta =
-            input.Position - dragStart
+        local delta = input.Position - dragStart
 
-        if math.abs(delta.X) > 5
-            or math.abs(delta.Y) > 5 then
+        Mini.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
 
-            moved = true
-        end
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end)
 
-        Mini.Position =
-            UDim2.new(
-
-                startPos.X.Scale,
-                startPos.X.Offset + delta.X,
-
-                startPos.Y.Scale,
-                startPos.Y.Offset + delta.Y
-            )
-    end
-)
-
-UserInputService.InputEnded:Connect(
-
-    function(input)
-
-        if input.UserInputType
-            == Enum.UserInputType.MouseButton1
-            or input.UserInputType
-            == Enum.UserInputType.Touch then
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
 
             dragging = false
         end
-    end
-)
+    end)
+end
 
-Mini.Activated:Connect(
+-- ============================================================
+-- FINAL
+-- ============================================================
 
-    function()
-
-        if moved then
-            moved = false
-            return
-        end
-
-        Main.Visible = true
-        Mini.Visible = false
-    end
-)
-
---==============================================================
--- FECHAR
---==============================================================
-
-Close.Activated:Connect(
-
-    function()
-
-        if State.Running then
-            stopResearch()
-        end
-
-        pcall(function()
-            Gui:Destroy()
-        end)
-    end
-)
-
---==============================================================
--- INICIALIZAÇÃO
---==============================================================
-
-updateStatus()
 updatePreview()
