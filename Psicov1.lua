@@ -1,15 +1,15 @@
 -- ============================================================
--- PSICOSENATICO • ESP RESEARCH V1
+-- PSICOSENATICO • ESP RESEARCH V1.1
 -- ESP EXPERIMENTAL + DIAGNÓSTICO COMPACTO
+-- REVISÃO VISUAL: ALIADO VERDE / INIMIGO VERMELHO
 --
 -- Objetivo:
 -- • Testar classificação Army/Rebels em Workspace.Soldiers
--- • Aplicar um Highlight próprio do ESP sem depender do Highlight nativo
+-- • Aplicar Highlight próprio: aliado sempre verde / inimigo sempre vermelho
+-- • Neutralizar visualmente Highlights nativos enquanto o ESP estiver ativo
+--   e restaurá-los ao desligar/fechar, evitando conflito de cores
 -- • Registrar decisões/erros do ESP por evento (sem snapshots pesados)
 -- • Exportar JSON compacto para análise posterior
--- • Enviar os mesmos eventos automaticamente ao site em lotes
--- • Revisão V1: Highlight próprio somente em ENEMY; aliados usam Highlight nativo do jogo
--- • Revisão V1: diagnóstico separa estado atual de histórico (EverFound/EverCreated)
 -- • Interface responsiva baseada no BOT RESEARCH V4
 -- ============================================================
 
@@ -21,385 +21,13 @@ local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
 -- ============================================================
--- DIAGNÓSTICO REMOTO • SITE
--- Envio em lotes; falhas de rede não interrompem o ESP.
--- ============================================================
-
-local RemoteDiagnostic = {}
-
-RemoteDiagnostic.SCRIPT_NAME = "Psicosenatico_ESPResearch_V1.lua"
-RemoteDiagnostic.VERSION = "1.0"
-RemoteDiagnostic.ENDPOINT =
-    "https://cafe-na-ia.onrender.com/api/runtime-diagnostics"
-
-RemoteDiagnostic.FLUSH_INTERVAL = 5
-RemoteDiagnostic.HEARTBEAT_INTERVAL = 20
-RemoteDiagnostic.MAX_PENDING_BEFORE_FLUSH = 25
-
-RemoteDiagnostic.RUN_ID = nil
-RemoteDiagnostic.PendingChanges = 0
-RemoteDiagnostic.LastHTTPStatus = nil
-RemoteDiagnostic.LastHTTPError = nil
-RemoteDiagnostic.SendCount = 0
-RemoteDiagnostic.FailedSendCount = 0
-
-RemoteDiagnostic.Report = {
-    script = RemoteDiagnostic.SCRIPT_NAME,
-    version = RemoteDiagnostic.VERSION,
-    runId = nil,
-    status = "idle",
-    phase = "idle",
-    startedAt = nil,
-    finishedAt = nil,
-    message = "",
-    steps = {},
-    errors = {},
-    counters = {},
-    environment = {}
-}
-
-local function remoteGetRequestFunction()
-    if typeof(request) == "function" then return request end
-    if typeof(http_request) == "function" then return http_request end
-    if syn and typeof(syn.request) == "function" then return syn.request end
-    if http and typeof(http.request) == "function" then return http.request end
-    return nil
-end
-
-local RemoteRequest = remoteGetRequestFunction()
-
-local function remoteExecutorName()
-    local env = _G
-
-    if typeof(getgenv) == "function" then
-        local ok, result = pcall(getgenv)
-        if ok and type(result) == "table" then
-            env = result
-        end
-    end
-
-    for _, functionName in ipairs({"identifyexecutor", "getexecutorname"}) do
-        local fn = env and env[functionName]
-
-        if typeof(fn) == "function" then
-            local ok, result = pcall(fn)
-            if ok and result then
-                return tostring(result)
-            end
-        end
-    end
-
-    return "unknown"
-end
-
-local function remoteCopyTable(original, seen)
-    if type(original) ~= "table" then
-        return original
-    end
-
-    seen = seen or {}
-    if seen[original] then
-        return "<cycle>"
-    end
-
-    seen[original] = true
-    local copy = {}
-
-    for key, value in pairs(original) do
-        local valueType = typeof(value)
-
-        if type(value) == "table" then
-            copy[key] = remoteCopyTable(value, seen)
-        elseif valueType == "Instance" then
-            local ok, path = pcall(function()
-                return value:GetFullName()
-            end)
-            copy[key] = ok and path or tostring(value)
-        elseif valueType == "Vector3" then
-            copy[key] = {x = value.X, y = value.Y, z = value.Z}
-        elseif valueType == "Color3" then
-            copy[key] = {r = value.R, g = value.G, b = value.B}
-        elseif valueType == "EnumItem" then
-            copy[key] = tostring(value)
-        elseif valueType == "string"
-            or valueType == "number"
-            or valueType == "boolean"
-            or value == nil
-        then
-            copy[key] = value
-        else
-            copy[key] = tostring(value)
-        end
-    end
-
-    seen[original] = nil
-    return copy
-end
-
-local remoteSending = false
-local remoteFlushRunning = false
-local remoteHeartbeatRunning = false
-
-function RemoteDiagnostic.send(force)
-    if not RemoteRequest then
-        RemoteDiagnostic.LastHTTPError =
-            "request/http_request indisponível"
-        return false
-    end
-
-    if remoteSending then
-        return false
-    end
-
-    if not force and RemoteDiagnostic.PendingChanges <= 0 then
-        return true
-    end
-
-    local payload = {
-        script = RemoteDiagnostic.SCRIPT_NAME,
-        runId = RemoteDiagnostic.RUN_ID,
-        report = remoteCopyTable(RemoteDiagnostic.Report)
-    }
-
-    remoteSending = true
-
-    task.spawn(function()
-        local okEncode, body = pcall(function()
-            return HttpService:JSONEncode(payload)
-        end)
-
-        if not okEncode then
-            RemoteDiagnostic.LastHTTPError =
-                "JSONEncode: " .. tostring(body)
-            RemoteDiagnostic.FailedSendCount =
-                RemoteDiagnostic.FailedSendCount + 1
-            remoteSending = false
-            return
-        end
-
-        local okRequest, response = pcall(function()
-            return RemoteRequest({
-                Url = RemoteDiagnostic.ENDPOINT,
-                Method = "POST",
-                Headers = {
-                    ["Content-Type"] = "application/json"
-                },
-                Body = body
-            })
-        end)
-
-        if not okRequest then
-            RemoteDiagnostic.LastHTTPError = tostring(response)
-            RemoteDiagnostic.FailedSendCount =
-                RemoteDiagnostic.FailedSendCount + 1
-            remoteSending = false
-            return
-        end
-
-        local statusCode = nil
-
-        if type(response) == "table" then
-            statusCode =
-                response.StatusCode
-                or response.Status
-                or response.status
-        end
-
-        RemoteDiagnostic.LastHTTPStatus = statusCode
-        RemoteDiagnostic.SendCount =
-            RemoteDiagnostic.SendCount + 1
-
-        local numericStatus = tonumber(statusCode)
-        local success =
-            numericStatus == nil
-            or (numericStatus >= 200 and numericStatus < 300)
-
-        if success then
-            RemoteDiagnostic.PendingChanges = 0
-            RemoteDiagnostic.LastHTTPError = nil
-        else
-            RemoteDiagnostic.FailedSendCount =
-                RemoteDiagnostic.FailedSendCount + 1
-            RemoteDiagnostic.LastHTTPError =
-                "HTTP " .. tostring(statusCode)
-        end
-
-        remoteSending = false
-    end)
-
-    return true
-end
-
-function RemoteDiagnostic.start(message)
-    local ok, guid = pcall(function()
-        return HttpService:GenerateGUID(false)
-    end)
-
-    RemoteDiagnostic.RUN_ID =
-        ok and guid
-        or ("run_" .. tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999)))
-
-    RemoteDiagnostic.PendingChanges = 1
-
-    RemoteDiagnostic.Report = {
-        script = RemoteDiagnostic.SCRIPT_NAME,
-        version = RemoteDiagnostic.VERSION,
-        runId = RemoteDiagnostic.RUN_ID,
-        status = "running",
-        phase = "startup",
-        startedAt = os.time(),
-        finishedAt = nil,
-        message = message or "ESP Research V1 iniciado",
-        steps = {},
-        errors = {},
-        counters = {},
-        environment = {
-            placeId = game.PlaceId,
-            gameId = game.GameId,
-            jobId = game.JobId,
-            executor = remoteExecutorName()
-        }
-    }
-
-    RemoteDiagnostic.send(true)
-
-    remoteFlushRunning = true
-    task.spawn(function()
-        while remoteFlushRunning do
-            task.wait(RemoteDiagnostic.FLUSH_INTERVAL)
-
-            if RemoteDiagnostic.Report.status ~= "running" then
-                break
-            end
-
-            if RemoteDiagnostic.PendingChanges > 0 then
-                RemoteDiagnostic.send()
-            end
-        end
-
-        remoteFlushRunning = false
-    end)
-
-    remoteHeartbeatRunning = true
-    task.spawn(function()
-        while remoteHeartbeatRunning do
-            task.wait(RemoteDiagnostic.HEARTBEAT_INTERVAL)
-
-            if RemoteDiagnostic.Report.status ~= "running" then
-                break
-            end
-
-            RemoteDiagnostic.send(true)
-        end
-
-        remoteHeartbeatRunning = false
-    end)
-
-    return RemoteDiagnostic.RUN_ID
-end
-
-function RemoteDiagnostic.step(phase, message, extra)
-    if RemoteDiagnostic.Report.status ~= "running" then
-        return
-    end
-
-    RemoteDiagnostic.Report.phase = tostring(phase or "unknown")
-    RemoteDiagnostic.Report.message = tostring(message or "")
-
-    local step = {
-        name = RemoteDiagnostic.Report.phase,
-        message = RemoteDiagnostic.Report.message,
-        time = os.time()
-    }
-
-    if type(extra) == "table" then
-        local safeExtra = remoteCopyTable(extra)
-        for key, value in pairs(safeExtra) do
-            step[key] = value
-        end
-    end
-
-    table.insert(RemoteDiagnostic.Report.steps, step)
-    RemoteDiagnostic.PendingChanges =
-        RemoteDiagnostic.PendingChanges + 1
-
-    if RemoteDiagnostic.PendingChanges
-        >= RemoteDiagnostic.MAX_PENDING_BEFORE_FLUSH
-    then
-        RemoteDiagnostic.send()
-    end
-end
-
-function RemoteDiagnostic.counter(name, value)
-    if RemoteDiagnostic.Report.status ~= "running" then
-        return
-    end
-
-    RemoteDiagnostic.Report.counters[tostring(name)] =
-        remoteCopyTable(value)
-
-    RemoteDiagnostic.PendingChanges =
-        RemoteDiagnostic.PendingChanges + 1
-end
-
-function RemoteDiagnostic.error(phase, err, traceback)
-    table.insert(RemoteDiagnostic.Report.errors, {
-        phase = tostring(phase or "unknown"),
-        message = tostring(err or "Erro desconhecido"),
-        traceback = traceback,
-        time = os.time()
-    })
-
-    RemoteDiagnostic.Report.phase =
-        tostring(phase or "unknown")
-
-    RemoteDiagnostic.Report.message =
-        tostring(err or "Erro desconhecido")
-
-    RemoteDiagnostic.PendingChanges =
-        RemoteDiagnostic.PendingChanges + 1
-
-    -- Erro de um bot não encerra a sessão inteira.
-    RemoteDiagnostic.send(true)
-end
-
-function RemoteDiagnostic.success(message)
-    RemoteDiagnostic.Report.status = "success"
-    RemoteDiagnostic.Report.phase = "finished"
-    RemoteDiagnostic.Report.message =
-        message or "Diagnóstico ESP V1 finalizado"
-    RemoteDiagnostic.Report.finishedAt = os.time()
-
-    RemoteDiagnostic.PendingChanges =
-        RemoteDiagnostic.PendingChanges + 1
-
-    RemoteDiagnostic.send(true)
-    remoteFlushRunning = false
-    remoteHeartbeatRunning = false
-end
-
-function RemoteDiagnostic.interrupted(message)
-    RemoteDiagnostic.Report.status = "interrupted"
-    RemoteDiagnostic.Report.phase = "interrupted"
-    RemoteDiagnostic.Report.message =
-        message or "Diagnóstico interrompido"
-    RemoteDiagnostic.Report.finishedAt = os.time()
-
-    RemoteDiagnostic.PendingChanges =
-        RemoteDiagnostic.PendingChanges + 1
-
-    RemoteDiagnostic.send(true)
-    remoteFlushRunning = false
-    remoteHeartbeatRunning = false
-end
-
-
--- ============================================================
 -- CONFIGURAÇÃO
 -- ============================================================
 
 local GUI_NAME = "PsicosenaticoESPResearch_V1"
-local ESP_HIGHLIGHT_NAME = "PsicoESPResearchV1_Highlight"
+local ESP_ALLY_HIGHLIGHT_NAME = "PsicoESP_Ally"
+local ESP_ENEMY_HIGHLIGHT_NAME = "PsicoESP_Enemy"
+local ESP_UNKNOWN_HIGHLIGHT_NAME = "PsicoESP_Unknown"
 local ROOT_WAIT_TIMEOUT = 3
 
 -- Cores do ESP (verde = aliado / vermelho = inimigo)
@@ -498,7 +126,8 @@ local State = {
     RuntimeCounter = 0,
     Observed = {},       -- [Model] = record
     Records = {},        -- runtime records atuais/históricos
-    ActiveESP = {},      -- [Model] = Highlight
+    ActiveESP = {},      -- [Model] = Highlight próprio ativo
+    NativeHighlightStates = {}, -- [Highlight nativo] = estado Enabled original
 
     DiagnosticRecords = {}, -- [runtimeId] = resumo compacto
     Events = {},
@@ -607,6 +236,82 @@ local function classifyTeams(botTeam, playerTeam)
     return "ENEMY", "BOT_TEAM_DIFFERS_FROM_PLAYER_TEAM"
 end
 
+local function isPsicoESPHighlight(obj)
+    if not obj or not obj:IsA("Highlight") then
+        return false
+    end
+
+    return obj.Name == ESP_ALLY_HIGHLIGHT_NAME
+        or obj.Name == ESP_ENEMY_HIGHLIGHT_NAME
+        or obj.Name == ESP_UNKNOWN_HIGHLIGHT_NAME
+end
+
+local function espNameForClassification(classification)
+    if classification == "ALLY" then
+        return ESP_ALLY_HIGHLIGHT_NAME
+    elseif classification == "ENEMY" then
+        return ESP_ENEMY_HIGHLIGHT_NAME
+    end
+    return ESP_UNKNOWN_HIGHLIGHT_NAME
+end
+
+local function suppressNativeHighlight(obj)
+    if not obj or not obj:IsA("Highlight") or isPsicoESPHighlight(obj) then
+        return
+    end
+
+    if State.NativeHighlightStates[obj] == nil then
+        State.NativeHighlightStates[obj] = obj.Enabled
+    end
+
+    pcall(function()
+        obj.Enabled = false
+    end)
+end
+
+local function suppressNativeHighlights(model)
+    if not State.ESPEnabled or not model then
+        return
+    end
+
+    for _, obj in ipairs(model:GetDescendants()) do
+        if obj:IsA("Highlight") and not isPsicoESPHighlight(obj) then
+            suppressNativeHighlight(obj)
+        end
+    end
+end
+
+local function restoreNativeHighlights(model)
+    local pending = {}
+
+    for obj, originalEnabled in pairs(State.NativeHighlightStates) do
+        local belongs = false
+
+        if not model then
+            belongs = true
+        elseif obj and obj.Parent then
+            local ok, result = pcall(function()
+                return obj:IsDescendantOf(model)
+            end)
+            belongs = ok and result
+        end
+
+        if belongs then
+            pending[#pending + 1] = { obj = obj, enabled = originalEnabled }
+        end
+    end
+
+    for _, item in ipairs(pending) do
+        local obj = item.obj
+        if obj and obj.Parent then
+            pcall(function()
+                obj.Enabled = item.enabled
+            end)
+        end
+        State.NativeHighlightStates[obj] = nil
+    end
+end
+
 local function compactNativeHighlight(model)
     local result = {
         exists = false,
@@ -617,7 +322,7 @@ local function compactNativeHighlight(model)
     if not model then return result end
 
     for _, obj in ipairs(model:GetDescendants()) do
-        if obj:IsA("Highlight") and obj.Name ~= ESP_HIGHLIGHT_NAME then
+        if obj:IsA("Highlight") and not isPsicoESPHighlight(obj) then
             result.exists = true
             result.count = result.count + 1
 
@@ -710,23 +415,14 @@ local function ensureDiagnosticRecord(record)
         classification = classification,
         classificationReason = classificationReason,
 
-        -- Estado atual + histórico. "Ever" não volta para false após remoção.
         humanoidFound = humanoid ~= nil,
-        humanoidCurrentlyPresent = humanoid ~= nil,
-        humanoidEverFound = humanoid ~= nil,
-
         rootFound = root ~= nil,
-        rootCurrentlyPresent = root ~= nil,
-        rootEverFound = root ~= nil,
         rootWaitSeconds = record.rootWaitSeconds,
 
         health = humanoid and humanoid.Health or nil,
         maxHealth = humanoid and humanoid.MaxHealth or nil,
 
         espCreated = State.ActiveESP[record.model] ~= nil,
-        espCurrentlyActive = State.ActiveESP[record.model] ~= nil,
-        espEverCreated = State.ActiveESP[record.model] ~= nil,
-
         nativeHighlight = compactNativeHighlight(record.model)
     }
 
@@ -759,37 +455,15 @@ local function updateDiagnosticRecord(record)
     diag.classification = classification
     diag.classificationReason = classificationReason
 
-    local humanoidPresent = humanoid ~= nil
-    local rootPresent = root ~= nil
-    local espActive =
-        record.model and State.ActiveESP[record.model] ~= nil or false
-
-    -- Campos antigos permanecem por compatibilidade, representando estado atual.
-    diag.humanoidFound = humanoidPresent
-    diag.rootFound = rootPresent
-    diag.espCreated = espActive
-
-    -- Campos novos removem a ambiguidade entre "já existiu" e "existe agora".
-    diag.humanoidCurrentlyPresent = humanoidPresent
-    diag.humanoidEverFound =
-        diag.humanoidEverFound or humanoidPresent
-
-    diag.rootCurrentlyPresent = rootPresent
-    diag.rootEverFound =
-        diag.rootEverFound or rootPresent
-
-    diag.espCurrentlyActive = espActive
-    diag.espEverCreated =
-        diag.espEverCreated or espActive
-
+    diag.humanoidFound = humanoid ~= nil
+    diag.rootFound = root ~= nil
     diag.rootWaitSeconds = record.rootWaitSeconds
 
     diag.health = humanoid and humanoid.Health or diag.health
     diag.maxHealth = humanoid and humanoid.MaxHealth or diag.maxHealth
 
-    diag.nativeHighlight =
-        record.model and compactNativeHighlight(record.model)
-        or diag.nativeHighlight
+    diag.espCreated = record.model and State.ActiveESP[record.model] ~= nil or false
+    diag.nativeHighlight = record.model and compactNativeHighlight(record.model) or diag.nativeHighlight
 
     if record.removed then
         diag.removedAtUnix = record.removedAtUnix
@@ -799,28 +473,6 @@ end
 
 local function addDiagnosticEvent(eventType, record, data, message)
     appendLiveLog(eventType, message)
-
-    if State.DiagnosticEnabled then
-        local remoteExtra = {
-            botId = record and record.id or nil,
-            botName = record and record.name or nil,
-            data = data or {}
-        }
-
-        if eventType == "ERROR" then
-            RemoteDiagnostic.error(
-                data and data.stage or "ESP_RESEARCH",
-                message or "Erro",
-                data and data.traceback or nil
-            )
-        else
-            RemoteDiagnostic.step(
-                eventType,
-                message or "",
-                remoteExtra
-            )
-        end
-    end
 
     if eventType == "ERROR" then
         State.ErrorCount = State.ErrorCount + 1
@@ -878,6 +530,9 @@ local function destroyESP(model, record, reason)
             )
         end
     end
+
+    -- Ao remover o ESP próprio, restaura o Highlight nativo desse modelo.
+    restoreNativeHighlights(model)
 
     if record then
         updateDiagnosticRecord(record)
@@ -940,32 +595,33 @@ local function applyOrUpdateESP(record, reason)
         return
     end
 
-    -- O jogo já fornece Highlight nativo para aliados.
-    -- O Highlight próprio do PSICOSENATICO existe SOMENTE para inimigos.
-    if classification ~= "ENEMY" then
-        destroyESP(
-            model,
-            record,
-            classification == "ALLY"
-                and "ALLY_USES_NATIVE_HIGHLIGHT"
-                or "UNKNOWN_NOT_RENDERED"
-        )
-
-        updateDiagnosticRecord(record)
-        return
-    end
-
-    local color = ESP_ENEMY_COLOR
+    local color = colorForClassification(classification)
+    local desiredName = espNameForClassification(classification)
     local esp = State.ActiveESP[model]
+
+    -- Evita conflito visual com o Highlight nativo do jogo.
+    -- O estado original é salvo e restaurado quando o ESP é desligado/removido.
+    suppressNativeHighlights(model)
+
+    -- Se a relação mudou (ALLY <-> ENEMY), recria com o nome correto.
+    if esp and esp.Parent and esp.Name ~= desiredName then
+        pcall(function()
+            esp:Destroy()
+        end)
+        State.ActiveESP[model] = nil
+        esp = nil
+    end
 
     if not esp or not esp.Parent then
         local ok, created = pcall(function()
             local h = Instance.new("Highlight")
-            h.Name = ESP_HIGHLIGHT_NAME
+            h.Name = desiredName
             h.Adornee = model
             h.Enabled = true
             h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            h.FillTransparency = 0.78
+
+            -- Mais opaco que o Highlight nativo para garantir leitura visual clara.
+            h.FillTransparency = 0.42
             h.OutlineTransparency = 0
             h.FillColor = color
             h.OutlineColor = color
@@ -981,9 +637,18 @@ local function applyOrUpdateESP(record, reason)
                 record,
                 {
                     classification = classification,
+                    highlightName = desiredName,
+                    visualColor = classification == "ALLY" and "GREEN"
+                        or classification == "ENEMY" and "RED"
+                        or "YELLOW",
+                    nativeHighlightSuppressed = true,
                     trigger = reason
                 },
-                string.format("ESP criado para %s", record.name)
+                string.format(
+                    "ESP %s criado para %s",
+                    classification,
+                    record.name
+                )
             )
         else
             addDiagnosticEvent(
@@ -998,6 +663,7 @@ local function applyOrUpdateESP(record, reason)
         end
     else
         pcall(function()
+            esp.Name = desiredName
             esp.FillColor = color
             esp.OutlineColor = color
             esp.Adornee = model
@@ -1009,6 +675,11 @@ local function applyOrUpdateESP(record, reason)
             record,
             {
                 classification = classification,
+                highlightName = desiredName,
+                visualColor = classification == "ALLY" and "GREEN"
+                    or classification == "ENEMY" and "RED"
+                    or "YELLOW",
+                nativeHighlightSuppressed = true,
                 trigger = reason
             },
             string.format("ESP atualizado para %s", record.name)
@@ -1162,7 +833,10 @@ local function connectRecord(record)
     addModelConnection(model, teamChanged)
 
     local descendantAdded = model.DescendantAdded:Connect(function(obj)
-        if obj:IsA("Highlight") and obj.Name ~= ESP_HIGHLIGHT_NAME then
+        if obj:IsA("Highlight") and not isPsicoESPHighlight(obj) then
+            if State.ESPEnabled then
+                suppressNativeHighlight(obj)
+            end
             task.defer(function()
                 onNativeHighlightChanged(record, "DESCENDANT_ADDED")
             end)
@@ -1178,7 +852,7 @@ local function connectRecord(record)
     addModelConnection(model, descendantAdded)
 
     local descendantRemoving = model.DescendantRemoving:Connect(function(obj)
-        if obj:IsA("Highlight") and obj.Name ~= ESP_HIGHLIGHT_NAME then
+        if obj:IsA("Highlight") and not isPsicoESPHighlight(obj) then
             task.defer(function()
                 onNativeHighlightChanged(record, "DESCENDANT_REMOVING")
             end)
@@ -1446,11 +1120,7 @@ local function startDiagnostic()
     State.DiagnosticEndUnix = nil
     State.DiagnosticStartClock = clock()
 
-    RemoteDiagnostic.start(
-        "PSICOSENATICO ESP Research V1 • diagnóstico iniciado"
-    )
-
-    appendLiveLog("DIAGNOSTIC_STARTED", "Diagnóstico V1 iniciado.")
+    appendLiveLog("DIAGNOSTIC_STARTED", "Diagnóstico V1.1 iniciado.")
 
     ensureMonitoring()
 
@@ -1482,43 +1152,7 @@ local function stopDiagnostic()
         "DIAGNOSTIC_STOPPED",
         nil,
         {},
-        "Diagnóstico V1 parado."
-    )
-
-    local observedNow = 0
-    for _ in pairs(State.Observed) do
-        observedNow = observedNow + 1
-    end
-
-    local ally, enemy, unknown = 0, 0, 0
-
-    for _, currentRecord in pairs(State.Observed) do
-        if currentRecord.classification == "ALLY" then
-            ally = ally + 1
-        elseif currentRecord.classification == "ENEMY" then
-            enemy = enemy + 1
-        else
-            unknown = unknown + 1
-        end
-    end
-
-    local activeESPNow = 0
-    for model, esp in pairs(State.ActiveESP) do
-        if model and model.Parent and esp and esp.Parent then
-            activeESPNow = activeESPNow + 1
-        end
-    end
-
-    RemoteDiagnostic.counter("botsObserved", observedNow)
-    RemoteDiagnostic.counter("ally", ally)
-    RemoteDiagnostic.counter("enemy", enemy)
-    RemoteDiagnostic.counter("unknown", unknown)
-    RemoteDiagnostic.counter("activeESP", activeESPNow)
-    RemoteDiagnostic.counter("localEvents", #State.Events)
-    RemoteDiagnostic.counter("localErrors", State.ErrorCount)
-
-    RemoteDiagnostic.success(
-        "Diagnóstico ESP Research V1 finalizado"
+        "Diagnóstico V1.1 parado."
     )
 
     State.DiagnosticEnabled = false
@@ -1581,7 +1215,7 @@ local function buildExport()
 
     return {
         format = "Psicosenatico ESP Research",
-        version = "V1",
+        version = "V1.1",
         collectionMode = "EVENT_DRIVEN_COMPACT",
         generatedAtUnix = unix(),
 
@@ -1705,7 +1339,7 @@ local Title = label(
 
 local Version = label(
     Header,
-    "V1",
+    "V1.1",
     UDim2.fromOffset(42, 17),
     UDim2.fromOffset(18, 34),
     9
@@ -1856,7 +1490,7 @@ local Mini = new("TextButton", {
     Size = UDim2.fromOffset(58, 58),
     Position = UDim2.fromScale(0.07, 0.25),
 
-    Text = "V1",
+    Text = "V1.1",
     BackgroundColor3 = COLORS.blue,
     TextColor3 = COLORS.text,
 
@@ -1956,23 +1590,10 @@ local function updatePreview()
         formatMB(State.EstimatedBytes)
     )
 
-    local siteText = "SITE: "
-    if not RemoteRequest then
-        siteText = siteText .. "SEM REQUEST"
-    elseif RemoteDiagnostic.LastHTTPError then
-        siteText = siteText .. "ERRO"
-    elseif RemoteDiagnostic.LastHTTPStatus then
-        siteText = siteText .. tostring(RemoteDiagnostic.LastHTTPStatus)
-    else
-        siteText = siteText .. "AGUARDANDO"
-    end
-
-    Summary.Text = Summary.Text .. "   •   " .. siteText
-
     local lines = {}
 
     lines[#lines + 1] = "══════════════════════════════════════════"
-    lines[#lines + 1] = "PSICOSENATICO • ESP RESEARCH V1"
+    lines[#lines + 1] = "PSICOSENATICO • ESP RESEARCH V1.1"
     lines[#lines + 1] = "══════════════════════════════════════════"
     lines[#lines + 1] = ""
 
@@ -2022,7 +1643,7 @@ ESPButton.Activated:Connect(function()
         ESPButton.Text = "DESATIVAR ESP"
         ESPButton.BackgroundColor3 = COLORS.blue2
 
-        Status.Text = "ESP ativo • classificação por Team em Workspace.Soldiers."
+        Status.Text = "ESP ativo • ALIADOS VERDES / INIMIGOS VERMELHOS • classificação por Team."
         Status.TextColor3 = COLORS.green
 
         appendLiveLog("ESP_ENABLED", "ESP experimental ativado.")
@@ -2041,6 +1662,7 @@ ESPButton.Activated:Connect(function()
 
         appendLiveLog("ESP_DISABLED", "ESP experimental desativado.")
         removeAllESP("USER_DISABLED")
+        restoreNativeHighlights(nil)
     end
 
     updatePreview()
@@ -2074,19 +1696,19 @@ ExportButton.Activated:Connect(function()
         return
     end
 
-    Status.Text = "Preparando diagnóstico ESP Research V1..."
+    Status.Text = "Preparando diagnóstico ESP Research V1.1..."
     Status.TextColor3 = COLORS.sub
 
     local data, err = jsonExport()
 
     if not data then
-        Status.Text = "Falha ao gerar JSON V1: " .. tostring(err)
+        Status.Text = "Falha ao gerar JSON V1.1: " .. tostring(err)
         Status.TextColor3 = COLORS.red
         return
     end
 
     local filename =
-        "Psicosenatico_ESPResearch_V1_"
+        "Psicosenatico_ESPResearch_V1_1_"
         .. tostring(game.PlaceId)
         .. "_"
         .. tostring(os.time())
@@ -2121,9 +1743,9 @@ ExportButton.Activated:Connect(function()
         State.EstimatedBytes = #data
 
         if method == "writefile" then
-            Status.Text = "✓ DIAGNÓSTICO V1 EXPORTADO COM SUCESSO: " .. filename
+            Status.Text = "✓ DIAGNÓSTICO V1.1 EXPORTADO COM SUCESSO: " .. filename
         else
-            Status.Text = "✓ JSON V1 COPIADO PARA A ÁREA DE TRANSFERÊNCIA."
+            Status.Text = "✓ JSON V1.1 COPIADO PARA A ÁREA DE TRANSFERÊNCIA."
         end
 
         Status.TextColor3 = COLORS.green
@@ -2146,14 +1768,9 @@ Mini.Activated:Connect(function()
 end)
 
 local function cleanup()
-    if State.DiagnosticEnabled then
-        RemoteDiagnostic.interrupted(
-            "GUI fechada durante o diagnóstico"
-        )
-    end
-
     State.ESPEnabled = false
     removeAllESP("GUI_CLOSED")
+    restoreNativeHighlights(nil)
 
     for model in pairs(State.ModelConnections) do
         disconnectModelConnections(model)
