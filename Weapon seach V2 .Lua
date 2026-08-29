@@ -770,8 +770,7 @@ local function updatePreview()
         local x=State.Live[i]
         lines[#lines+1]=string.format("[%.2f] %-22s %s",x.time or 0,tostring(x.type),tostring(x.message))
     end
-    Text.Text=table.concat(lines,"
-")
+    Text.Text=table.concat(lines, "\n")
 end
 
 Start.Activated:Connect(function()
