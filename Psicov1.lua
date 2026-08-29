@@ -10,6 +10,7 @@
 --   e restaurá-los ao desligar/fechar, evitando conflito de cores
 -- • Registrar decisões/erros do ESP por evento (sem snapshots pesados)
 -- • Exportar JSON compacto para análise posterior
+-- • Enviar diagnóstico remoto em lotes para Psicov1.lua via endpoint
 -- • Interface responsiva baseada no BOT RESEARCH V4
 -- ============================================================
 
@@ -19,6 +20,343 @@ local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+
+
+-- ============================================================
+-- DIAGNOSTIC REPORTER REMOTO
+-- Destino lógico do backend: Psicov1.lua
+-- Envio em lotes para não sobrecarregar o ESP/diagnóstico local.
+-- Falhas de rede nunca interrompem o script principal.
+-- ============================================================
+
+local RemoteDiagnostic = {}
+
+RemoteDiagnostic.SCRIPT_NAME = "Psicov1.lua"
+RemoteDiagnostic.VERSION = "1.1"
+RemoteDiagnostic.ENDPOINT = "https://cafe-na-ia.onrender.com/api/runtime-diagnostics"
+RemoteDiagnostic.FLUSH_INTERVAL = 5
+RemoteDiagnostic.HEARTBEAT_INTERVAL = 20
+RemoteDiagnostic.MAX_PENDING = 25
+
+RemoteDiagnostic.RUN_ID = nil
+RemoteDiagnostic.Pending = 0
+RemoteDiagnostic.Sending = false
+RemoteDiagnostic.HeartbeatRunning = false
+RemoteDiagnostic.LastHTTPStatus = nil
+RemoteDiagnostic.LastSendOK = nil
+RemoteDiagnostic.SendCount = 0
+RemoteDiagnostic.FailureCount = 0
+
+local function getRequestFunction()
+    if typeof(request) == "function" then
+        return request
+    end
+
+    if typeof(http_request) == "function" then
+        return http_request
+    end
+
+    if syn and typeof(syn.request) == "function" then
+        return syn.request
+    end
+
+    if http and typeof(http.request) == "function" then
+        return http.request
+    end
+
+    return nil
+end
+
+local RemoteRequest = getRequestFunction()
+
+local function remoteNow()
+    return os.time()
+end
+
+local function remoteCopyTable(original)
+    local copy = {}
+
+    for key, value in pairs(original or {}) do
+        if type(value) == "table" then
+            copy[key] = remoteCopyTable(value)
+        else
+            copy[key] = value
+        end
+    end
+
+    return copy
+end
+
+local function remoteGenerateRunId()
+    local ok, result = pcall(function()
+        return HttpService:GenerateGUID(false)
+    end)
+
+    if ok and result then
+        return result
+    end
+
+    return "run_"
+        .. tostring(remoteNow())
+        .. "_"
+        .. tostring(math.random(100000, 999999))
+end
+
+local function remoteGetExecutorName()
+    local env = _G
+
+    if typeof(getgenv) == "function" then
+        local ok, result = pcall(getgenv)
+        if ok and type(result) == "table" then
+            env = result
+        end
+    end
+
+    for _, functionName in ipairs({ "identifyexecutor", "getexecutorname" }) do
+        local fn = env and env[functionName]
+
+        if typeof(fn) == "function" then
+            local ok, result = pcall(fn)
+            if ok and result then
+                return tostring(result)
+            end
+        end
+    end
+
+    return "unknown"
+end
+
+local function newRemoteReport()
+    return {
+        script = RemoteDiagnostic.SCRIPT_NAME,
+        version = RemoteDiagnostic.VERSION,
+        runId = nil,
+        status = "idle",
+        phase = "idle",
+        startedAt = nil,
+        finishedAt = nil,
+        message = "",
+        steps = {},
+        errors = {},
+        counters = {},
+        environment = {}
+    }
+end
+
+RemoteDiagnostic.Report = newRemoteReport()
+
+local function remoteResponseStatus(response)
+    if type(response) ~= "table" then
+        return nil
+    end
+
+    return tonumber(
+        response.StatusCode
+        or response.Status
+        or response.status_code
+        or response.status
+    )
+end
+
+function RemoteDiagnostic.send(force)
+    if not RemoteRequest or not RemoteDiagnostic.RUN_ID then
+        return false
+    end
+
+    if RemoteDiagnostic.Sending then
+        return false
+    end
+
+    if not force and RemoteDiagnostic.Pending <= 0 then
+        return true
+    end
+
+    RemoteDiagnostic.Sending = true
+
+    local pendingAtSend = RemoteDiagnostic.Pending
+    local payload = {
+        script = RemoteDiagnostic.SCRIPT_NAME,
+        runId = RemoteDiagnostic.RUN_ID,
+        report = remoteCopyTable(RemoteDiagnostic.Report)
+    }
+
+    task.spawn(function()
+        local ok, response = pcall(function()
+            local body = HttpService:JSONEncode(payload)
+
+            return RemoteRequest({
+                Url = RemoteDiagnostic.ENDPOINT,
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json"
+                },
+                Body = body
+            })
+        end)
+
+        local statusCode = ok and remoteResponseStatus(response) or nil
+        local accepted = ok and (statusCode == nil or (statusCode >= 200 and statusCode < 300))
+
+        RemoteDiagnostic.LastHTTPStatus = statusCode
+        RemoteDiagnostic.LastSendOK = accepted
+        RemoteDiagnostic.SendCount = RemoteDiagnostic.SendCount + 1
+
+        if accepted then
+            RemoteDiagnostic.Pending = math.max(0, RemoteDiagnostic.Pending - pendingAtSend)
+        else
+            RemoteDiagnostic.FailureCount = RemoteDiagnostic.FailureCount + 1
+        end
+
+        RemoteDiagnostic.Sending = false
+
+        -- Se chegaram novos eventos durante o POST, agenda novo envio sem bloquear.
+        if RemoteDiagnostic.Pending > 0
+        and RemoteDiagnostic.Report.status ~= "running" then
+            task.defer(function()
+                RemoteDiagnostic.send(true)
+            end)
+        end
+    end)
+
+    return true
+end
+
+local function remoteMarkDirty()
+    RemoteDiagnostic.Pending = RemoteDiagnostic.Pending + 1
+
+    if RemoteDiagnostic.Pending >= RemoteDiagnostic.MAX_PENDING then
+        RemoteDiagnostic.send(false)
+    end
+end
+
+function RemoteDiagnostic.start(message)
+    RemoteDiagnostic.RUN_ID = remoteGenerateRunId()
+    RemoteDiagnostic.Pending = 0
+    RemoteDiagnostic.LastHTTPStatus = nil
+    RemoteDiagnostic.LastSendOK = nil
+    RemoteDiagnostic.SendCount = 0
+    RemoteDiagnostic.FailureCount = 0
+    RemoteDiagnostic.Report = newRemoteReport()
+
+    local report = RemoteDiagnostic.Report
+    report.runId = RemoteDiagnostic.RUN_ID
+    report.status = "running"
+    report.phase = "startup"
+    report.startedAt = remoteNow()
+    report.message = message or "Diagnóstico iniciado"
+    report.environment = {
+        placeId = game.PlaceId,
+        gameId = game.GameId,
+        jobId = game.JobId,
+        executor = remoteGetExecutorName()
+    }
+
+    RemoteDiagnostic.Pending = 1
+    RemoteDiagnostic.send(true)
+
+    if not RemoteDiagnostic.HeartbeatRunning then
+        RemoteDiagnostic.HeartbeatRunning = true
+
+        task.spawn(function()
+            while RemoteDiagnostic.HeartbeatRunning do
+                task.wait(RemoteDiagnostic.FLUSH_INTERVAL)
+
+                if RemoteDiagnostic.Report.status == "running" then
+                    RemoteDiagnostic.send(false)
+                end
+            end
+        end)
+
+        task.spawn(function()
+            while RemoteDiagnostic.HeartbeatRunning do
+                task.wait(RemoteDiagnostic.HEARTBEAT_INTERVAL)
+
+                if RemoteDiagnostic.Report.status ~= "running" then
+                    break
+                end
+
+                RemoteDiagnostic.Report.phase = "heartbeat"
+                RemoteDiagnostic.Report.message = "Diagnóstico ativo"
+                remoteMarkDirty()
+                RemoteDiagnostic.send(true)
+            end
+        end)
+    end
+
+    return RemoteDiagnostic.RUN_ID
+end
+
+function RemoteDiagnostic.event(name, message, extra)
+    if not RemoteDiagnostic.RUN_ID
+    or RemoteDiagnostic.Report.status ~= "running" then
+        return
+    end
+
+    local step = {
+        name = tostring(name or "unknown"),
+        message = tostring(message or ""),
+        time = remoteNow()
+    }
+
+    if type(extra) == "table" then
+        for key, value in pairs(extra) do
+            step[key] = value
+        end
+    end
+
+    RemoteDiagnostic.Report.phase = step.name
+    RemoteDiagnostic.Report.message = step.message
+    RemoteDiagnostic.Report.steps[#RemoteDiagnostic.Report.steps + 1] = step
+
+    if step.name == "ERROR" then
+        RemoteDiagnostic.Report.errors[#RemoteDiagnostic.Report.errors + 1] = remoteCopyTable(step)
+    end
+
+    remoteMarkDirty()
+end
+
+function RemoteDiagnostic.counter(name, value)
+    if not RemoteDiagnostic.RUN_ID
+    or RemoteDiagnostic.Report.status ~= "running" then
+        return
+    end
+
+    RemoteDiagnostic.Report.counters[tostring(name)] = value
+    remoteMarkDirty()
+end
+
+function RemoteDiagnostic.finish(status, message)
+    if not RemoteDiagnostic.RUN_ID then
+        return
+    end
+
+    RemoteDiagnostic.Report.status = status or "success"
+    RemoteDiagnostic.Report.phase = status == "interrupted" and "interrupted" or "finished"
+    RemoteDiagnostic.Report.message = message or "Diagnóstico finalizado"
+    RemoteDiagnostic.Report.finishedAt = remoteNow()
+    RemoteDiagnostic.Pending = RemoteDiagnostic.Pending + 1
+    RemoteDiagnostic.HeartbeatRunning = false
+    RemoteDiagnostic.send(true)
+end
+
+function RemoteDiagnostic.forceFlush()
+    return RemoteDiagnostic.send(true)
+end
+
+function RemoteDiagnostic.getStatus()
+    return {
+        script = RemoteDiagnostic.SCRIPT_NAME,
+        version = RemoteDiagnostic.VERSION,
+        endpoint = RemoteDiagnostic.ENDPOINT,
+        runId = RemoteDiagnostic.RUN_ID,
+        requestAvailable = RemoteRequest ~= nil,
+        pending = RemoteDiagnostic.Pending,
+        sends = RemoteDiagnostic.SendCount,
+        failures = RemoteDiagnostic.FailureCount,
+        lastHTTPStatus = RemoteDiagnostic.LastHTTPStatus,
+        lastSendOK = RemoteDiagnostic.LastSendOK
+    }
+end
 
 -- ============================================================
 -- CONFIGURAÇÃO
@@ -492,6 +830,17 @@ local function addDiagnosticEvent(eventType, record, data, message)
 
     State.Events[#State.Events + 1] = event
     State.EstimatedBytes = State.EstimatedBytes + safeJsonLength(event) + 2
+
+    -- Espelha o evento para o endpoint em lote. O diagnóstico local continua
+    -- sendo a fonte principal e não depende da disponibilidade da rede.
+    RemoteDiagnostic.event(
+        eventType,
+        message,
+        {
+            botId = record and record.id or nil,
+            data = data or {}
+        }
+    )
 
     if record then
         ensureDiagnosticRecord(record)
@@ -1122,6 +1471,11 @@ local function startDiagnostic()
 
     appendLiveLog("DIAGNOSTIC_STARTED", "Diagnóstico V1.1 iniciado.")
 
+    -- Inicia uma nova execução remota identificada como Psicov1.lua.
+    -- Se o executor não oferecer request/http_request, o diagnóstico local
+    -- continua normalmente e o estado remoto ficará como indisponível.
+    RemoteDiagnostic.start("PSICOSENATICO ESP Research V1.1 iniciado")
+
     ensureMonitoring()
 
     -- Registra o estado atual de tudo que já existe.
@@ -1157,6 +1511,15 @@ local function stopDiagnostic()
 
     State.DiagnosticEnabled = false
     State.DiagnosticEndUnix = unix()
+
+    RemoteDiagnostic.counter("events", #State.Events)
+    RemoteDiagnostic.counter("errors", State.ErrorCount)
+    RemoteDiagnostic.counter("observedNow", (function()
+        local n = 0
+        for _ in pairs(State.Observed) do n = n + 1 end
+        return n
+    end)())
+    RemoteDiagnostic.finish("success", "Diagnóstico V1.1 finalizado")
 end
 
 -- ============================================================
@@ -1233,6 +1596,8 @@ local function buildExport()
             endUnix = State.DiagnosticEndUnix,
             status = State.DiagnosticEnabled and "RECORDING" or "STOPPED"
         },
+
+        remoteDelivery = RemoteDiagnostic.getStatus(),
 
         localPlayer = {
             name = LocalPlayer.Name,
@@ -1707,6 +2072,9 @@ ExportButton.Activated:Connect(function()
         return
     end
 
+    -- Tenta descarregar qualquer lote remoto pendente sem bloquear a exportação local.
+    RemoteDiagnostic.forceFlush()
+
     local filename =
         "Psicosenatico_ESPResearch_V1_1_"
         .. tostring(game.PlaceId)
@@ -1768,6 +2136,16 @@ Mini.Activated:Connect(function()
 end)
 
 local function cleanup()
+    if State.DiagnosticEnabled then
+        RemoteDiagnostic.counter("events", #State.Events)
+        RemoteDiagnostic.counter("errors", State.ErrorCount)
+        RemoteDiagnostic.finish("interrupted", "Interface fechada durante o diagnóstico")
+        State.DiagnosticEnabled = false
+        State.DiagnosticEndUnix = unix()
+    else
+        RemoteDiagnostic.forceFlush()
+    end
+
     State.ESPEnabled = false
     removeAllESP("GUI_CLOSED")
     restoreNativeHighlights(nil)
