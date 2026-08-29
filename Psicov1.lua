@@ -7,6 +7,7 @@
 -- • Aplicar um Highlight próprio do ESP sem depender do Highlight nativo
 -- • Registrar decisões/erros do ESP por evento (sem snapshots pesados)
 -- • Exportar JSON compacto para análise posterior
+-- • Enviar os mesmos eventos automaticamente ao site em lotes
 -- • Interface responsiva baseada no BOT RESEARCH V4
 -- ============================================================
 
@@ -16,6 +17,380 @@ local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+
+-- ============================================================
+-- DIAGNÓSTICO REMOTO • SITE
+-- Envio em lotes; falhas de rede não interrompem o ESP.
+-- ============================================================
+
+local RemoteDiagnostic = {}
+
+RemoteDiagnostic.SCRIPT_NAME = "Psicosenatico_ESPResearch_V1.lua"
+RemoteDiagnostic.VERSION = "1.0"
+RemoteDiagnostic.ENDPOINT =
+    "https://cafe-na-ia.onrender.com/api/runtime-diagnostics"
+
+RemoteDiagnostic.FLUSH_INTERVAL = 5
+RemoteDiagnostic.HEARTBEAT_INTERVAL = 20
+RemoteDiagnostic.MAX_PENDING_BEFORE_FLUSH = 25
+
+RemoteDiagnostic.RUN_ID = nil
+RemoteDiagnostic.PendingChanges = 0
+RemoteDiagnostic.LastHTTPStatus = nil
+RemoteDiagnostic.LastHTTPError = nil
+RemoteDiagnostic.SendCount = 0
+RemoteDiagnostic.FailedSendCount = 0
+
+RemoteDiagnostic.Report = {
+    script = RemoteDiagnostic.SCRIPT_NAME,
+    version = RemoteDiagnostic.VERSION,
+    runId = nil,
+    status = "idle",
+    phase = "idle",
+    startedAt = nil,
+    finishedAt = nil,
+    message = "",
+    steps = {},
+    errors = {},
+    counters = {},
+    environment = {}
+}
+
+local function remoteGetRequestFunction()
+    if typeof(request) == "function" then return request end
+    if typeof(http_request) == "function" then return http_request end
+    if syn and typeof(syn.request) == "function" then return syn.request end
+    if http and typeof(http.request) == "function" then return http.request end
+    return nil
+end
+
+local RemoteRequest = remoteGetRequestFunction()
+
+local function remoteExecutorName()
+    local env = _G
+
+    if typeof(getgenv) == "function" then
+        local ok, result = pcall(getgenv)
+        if ok and type(result) == "table" then
+            env = result
+        end
+    end
+
+    for _, functionName in ipairs({"identifyexecutor", "getexecutorname"}) do
+        local fn = env and env[functionName]
+
+        if typeof(fn) == "function" then
+            local ok, result = pcall(fn)
+            if ok and result then
+                return tostring(result)
+            end
+        end
+    end
+
+    return "unknown"
+end
+
+local function remoteCopyTable(original, seen)
+    if type(original) ~= "table" then
+        return original
+    end
+
+    seen = seen or {}
+    if seen[original] then
+        return "<cycle>"
+    end
+
+    seen[original] = true
+    local copy = {}
+
+    for key, value in pairs(original) do
+        local valueType = typeof(value)
+
+        if type(value) == "table" then
+            copy[key] = remoteCopyTable(value, seen)
+        elseif valueType == "Instance" then
+            local ok, path = pcall(function()
+                return value:GetFullName()
+            end)
+            copy[key] = ok and path or tostring(value)
+        elseif valueType == "Vector3" then
+            copy[key] = {x = value.X, y = value.Y, z = value.Z}
+        elseif valueType == "Color3" then
+            copy[key] = {r = value.R, g = value.G, b = value.B}
+        elseif valueType == "EnumItem" then
+            copy[key] = tostring(value)
+        elseif valueType == "string"
+            or valueType == "number"
+            or valueType == "boolean"
+            or value == nil
+        then
+            copy[key] = value
+        else
+            copy[key] = tostring(value)
+        end
+    end
+
+    seen[original] = nil
+    return copy
+end
+
+local remoteSending = false
+local remoteFlushRunning = false
+local remoteHeartbeatRunning = false
+
+function RemoteDiagnostic.send(force)
+    if not RemoteRequest then
+        RemoteDiagnostic.LastHTTPError =
+            "request/http_request indisponível"
+        return false
+    end
+
+    if remoteSending then
+        return false
+    end
+
+    if not force and RemoteDiagnostic.PendingChanges <= 0 then
+        return true
+    end
+
+    local payload = {
+        script = RemoteDiagnostic.SCRIPT_NAME,
+        runId = RemoteDiagnostic.RUN_ID,
+        report = remoteCopyTable(RemoteDiagnostic.Report)
+    }
+
+    remoteSending = true
+
+    task.spawn(function()
+        local okEncode, body = pcall(function()
+            return HttpService:JSONEncode(payload)
+        end)
+
+        if not okEncode then
+            RemoteDiagnostic.LastHTTPError =
+                "JSONEncode: " .. tostring(body)
+            RemoteDiagnostic.FailedSendCount =
+                RemoteDiagnostic.FailedSendCount + 1
+            remoteSending = false
+            return
+        end
+
+        local okRequest, response = pcall(function()
+            return RemoteRequest({
+                Url = RemoteDiagnostic.ENDPOINT,
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json"
+                },
+                Body = body
+            })
+        end)
+
+        if not okRequest then
+            RemoteDiagnostic.LastHTTPError = tostring(response)
+            RemoteDiagnostic.FailedSendCount =
+                RemoteDiagnostic.FailedSendCount + 1
+            remoteSending = false
+            return
+        end
+
+        local statusCode = nil
+
+        if type(response) == "table" then
+            statusCode =
+                response.StatusCode
+                or response.Status
+                or response.status
+        end
+
+        RemoteDiagnostic.LastHTTPStatus = statusCode
+        RemoteDiagnostic.SendCount =
+            RemoteDiagnostic.SendCount + 1
+
+        local numericStatus = tonumber(statusCode)
+        local success =
+            numericStatus == nil
+            or (numericStatus >= 200 and numericStatus < 300)
+
+        if success then
+            RemoteDiagnostic.PendingChanges = 0
+            RemoteDiagnostic.LastHTTPError = nil
+        else
+            RemoteDiagnostic.FailedSendCount =
+                RemoteDiagnostic.FailedSendCount + 1
+            RemoteDiagnostic.LastHTTPError =
+                "HTTP " .. tostring(statusCode)
+        end
+
+        remoteSending = false
+    end)
+
+    return true
+end
+
+function RemoteDiagnostic.start(message)
+    local ok, guid = pcall(function()
+        return HttpService:GenerateGUID(false)
+    end)
+
+    RemoteDiagnostic.RUN_ID =
+        ok and guid
+        or ("run_" .. tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999)))
+
+    RemoteDiagnostic.PendingChanges = 1
+
+    RemoteDiagnostic.Report = {
+        script = RemoteDiagnostic.SCRIPT_NAME,
+        version = RemoteDiagnostic.VERSION,
+        runId = RemoteDiagnostic.RUN_ID,
+        status = "running",
+        phase = "startup",
+        startedAt = os.time(),
+        finishedAt = nil,
+        message = message or "ESP Research V1 iniciado",
+        steps = {},
+        errors = {},
+        counters = {},
+        environment = {
+            placeId = game.PlaceId,
+            gameId = game.GameId,
+            jobId = game.JobId,
+            executor = remoteExecutorName()
+        }
+    }
+
+    RemoteDiagnostic.send(true)
+
+    remoteFlushRunning = true
+    task.spawn(function()
+        while remoteFlushRunning do
+            task.wait(RemoteDiagnostic.FLUSH_INTERVAL)
+
+            if RemoteDiagnostic.Report.status ~= "running" then
+                break
+            end
+
+            if RemoteDiagnostic.PendingChanges > 0 then
+                RemoteDiagnostic.send()
+            end
+        end
+
+        remoteFlushRunning = false
+    end)
+
+    remoteHeartbeatRunning = true
+    task.spawn(function()
+        while remoteHeartbeatRunning do
+            task.wait(RemoteDiagnostic.HEARTBEAT_INTERVAL)
+
+            if RemoteDiagnostic.Report.status ~= "running" then
+                break
+            end
+
+            RemoteDiagnostic.send(true)
+        end
+
+        remoteHeartbeatRunning = false
+    end)
+
+    return RemoteDiagnostic.RUN_ID
+end
+
+function RemoteDiagnostic.step(phase, message, extra)
+    if RemoteDiagnostic.Report.status ~= "running" then
+        return
+    end
+
+    RemoteDiagnostic.Report.phase = tostring(phase or "unknown")
+    RemoteDiagnostic.Report.message = tostring(message or "")
+
+    local step = {
+        name = RemoteDiagnostic.Report.phase,
+        message = RemoteDiagnostic.Report.message,
+        time = os.time()
+    }
+
+    if type(extra) == "table" then
+        local safeExtra = remoteCopyTable(extra)
+        for key, value in pairs(safeExtra) do
+            step[key] = value
+        end
+    end
+
+    table.insert(RemoteDiagnostic.Report.steps, step)
+    RemoteDiagnostic.PendingChanges =
+        RemoteDiagnostic.PendingChanges + 1
+
+    if RemoteDiagnostic.PendingChanges
+        >= RemoteDiagnostic.MAX_PENDING_BEFORE_FLUSH
+    then
+        RemoteDiagnostic.send()
+    end
+end
+
+function RemoteDiagnostic.counter(name, value)
+    if RemoteDiagnostic.Report.status ~= "running" then
+        return
+    end
+
+    RemoteDiagnostic.Report.counters[tostring(name)] =
+        remoteCopyTable(value)
+
+    RemoteDiagnostic.PendingChanges =
+        RemoteDiagnostic.PendingChanges + 1
+end
+
+function RemoteDiagnostic.error(phase, err, traceback)
+    table.insert(RemoteDiagnostic.Report.errors, {
+        phase = tostring(phase or "unknown"),
+        message = tostring(err or "Erro desconhecido"),
+        traceback = traceback,
+        time = os.time()
+    })
+
+    RemoteDiagnostic.Report.phase =
+        tostring(phase or "unknown")
+
+    RemoteDiagnostic.Report.message =
+        tostring(err or "Erro desconhecido")
+
+    RemoteDiagnostic.PendingChanges =
+        RemoteDiagnostic.PendingChanges + 1
+
+    -- Erro de um bot não encerra a sessão inteira.
+    RemoteDiagnostic.send(true)
+end
+
+function RemoteDiagnostic.success(message)
+    RemoteDiagnostic.Report.status = "success"
+    RemoteDiagnostic.Report.phase = "finished"
+    RemoteDiagnostic.Report.message =
+        message or "Diagnóstico ESP V1 finalizado"
+    RemoteDiagnostic.Report.finishedAt = os.time()
+
+    RemoteDiagnostic.PendingChanges =
+        RemoteDiagnostic.PendingChanges + 1
+
+    RemoteDiagnostic.send(true)
+    remoteFlushRunning = false
+    remoteHeartbeatRunning = false
+end
+
+function RemoteDiagnostic.interrupted(message)
+    RemoteDiagnostic.Report.status = "interrupted"
+    RemoteDiagnostic.Report.phase = "interrupted"
+    RemoteDiagnostic.Report.message =
+        message or "Diagnóstico interrompido"
+    RemoteDiagnostic.Report.finishedAt = os.time()
+
+    RemoteDiagnostic.PendingChanges =
+        RemoteDiagnostic.PendingChanges + 1
+
+    RemoteDiagnostic.send(true)
+    remoteFlushRunning = false
+    remoteHeartbeatRunning = false
+end
+
 
 -- ============================================================
 -- CONFIGURAÇÃO
@@ -391,6 +766,28 @@ end
 
 local function addDiagnosticEvent(eventType, record, data, message)
     appendLiveLog(eventType, message)
+
+    if State.DiagnosticEnabled then
+        local remoteExtra = {
+            botId = record and record.id or nil,
+            botName = record and record.name or nil,
+            data = data or {}
+        }
+
+        if eventType == "ERROR" then
+            RemoteDiagnostic.error(
+                data and data.stage or "ESP_RESEARCH",
+                message or "Erro",
+                data and data.traceback or nil
+            )
+        else
+            RemoteDiagnostic.step(
+                eventType,
+                message or "",
+                remoteExtra
+            )
+        end
+    end
 
     if eventType == "ERROR" then
         State.ErrorCount = State.ErrorCount + 1
@@ -1001,6 +1398,10 @@ local function startDiagnostic()
     State.DiagnosticEndUnix = nil
     State.DiagnosticStartClock = clock()
 
+    RemoteDiagnostic.start(
+        "PSICOSENATICO ESP Research V1 • diagnóstico iniciado"
+    )
+
     appendLiveLog("DIAGNOSTIC_STARTED", "Diagnóstico V1 iniciado.")
 
     ensureMonitoring()
@@ -1034,6 +1435,42 @@ local function stopDiagnostic()
         nil,
         {},
         "Diagnóstico V1 parado."
+    )
+
+    local observedNow = 0
+    for _ in pairs(State.Observed) do
+        observedNow = observedNow + 1
+    end
+
+    local ally, enemy, unknown = 0, 0, 0
+
+    for _, currentRecord in pairs(State.Observed) do
+        if currentRecord.classification == "ALLY" then
+            ally = ally + 1
+        elseif currentRecord.classification == "ENEMY" then
+            enemy = enemy + 1
+        else
+            unknown = unknown + 1
+        end
+    end
+
+    local activeESPNow = 0
+    for model, esp in pairs(State.ActiveESP) do
+        if model and model.Parent and esp and esp.Parent then
+            activeESPNow = activeESPNow + 1
+        end
+    end
+
+    RemoteDiagnostic.counter("botsObserved", observedNow)
+    RemoteDiagnostic.counter("ally", ally)
+    RemoteDiagnostic.counter("enemy", enemy)
+    RemoteDiagnostic.counter("unknown", unknown)
+    RemoteDiagnostic.counter("activeESP", activeESPNow)
+    RemoteDiagnostic.counter("localEvents", #State.Events)
+    RemoteDiagnostic.counter("localErrors", State.ErrorCount)
+
+    RemoteDiagnostic.success(
+        "Diagnóstico ESP Research V1 finalizado"
     )
 
     State.DiagnosticEnabled = false
@@ -1471,6 +1908,19 @@ local function updatePreview()
         formatMB(State.EstimatedBytes)
     )
 
+    local siteText = "SITE: "
+    if not RemoteRequest then
+        siteText = siteText .. "SEM REQUEST"
+    elseif RemoteDiagnostic.LastHTTPError then
+        siteText = siteText .. "ERRO"
+    elseif RemoteDiagnostic.LastHTTPStatus then
+        siteText = siteText .. tostring(RemoteDiagnostic.LastHTTPStatus)
+    else
+        siteText = siteText .. "AGUARDANDO"
+    end
+
+    Summary.Text = Summary.Text .. "   •   " .. siteText
+
     local lines = {}
 
     lines[#lines + 1] = "══════════════════════════════════════════"
@@ -1648,6 +2098,12 @@ Mini.Activated:Connect(function()
 end)
 
 local function cleanup()
+    if State.DiagnosticEnabled then
+        RemoteDiagnostic.interrupted(
+            "GUI fechada durante o diagnóstico"
+        )
+    end
+
     State.ESPEnabled = false
     removeAllESP("GUI_CLOSED")
 
