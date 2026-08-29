@@ -7,15 +7,14 @@
 --
 -- BOTS:
 --     Workspace.Soldiers
---     Model.Team
---     BotPatrolPoints = FONTE AUXILIAR
+--     Model:GetAttribute("Team")
 --
 -- ESP:
 --     MEU TIME = VERDE
 --     INIMIGO  = VERMELHO
 --
--- O Highlight original do jogo NÃO é utilizado
--- para definir a cor do nosso ESP.
+-- O Highlight original do jogo é apenas confirmação.
+-- A cor do nosso ESP é independente do jogo.
 --========================================================
 
 local Players = game:GetService("Players")
@@ -29,6 +28,7 @@ local GUI_NAME = "TestControlPanel"
 
 local Connections = {}
 local ESPObjects = {}
+local NativeBotHighlightStates = setmetatable({}, {__mode = "k"})
 
 local Gui
 local Main
@@ -207,182 +207,43 @@ end
 
 
 --========================================================
--- BOT PATROL POINTS
---
--- AUXILIAR SOMENTE.
---
--- NÃO usamos:
---
--- BotPatrolPoints.Army = Army
--- BotPatrolPoints.Rebels = Rebels
---
--- porque o arquivo mostra que existem pontos cujo
--- atributo Team não corresponde ao nome da pasta.
---
--- Procuramos somente o atributo Team dos pontos.
---========================================================
-
-local function GetPatrolPoints()
-
-    local result = {}
-
-    local patrolFolder =
-        workspace:FindFirstChild(
-            "BotPatrolPoints"
-        )
-
-    if not patrolFolder then
-        return result
-    end
-
-
-    for _, object in ipairs(
-        patrolFolder:GetDescendants()
-    ) do
-
-        if object:IsA("BasePart") then
-
-            local team =
-                NormalizeTeamName(
-                    object:GetAttribute("Team")
-                )
-
-            if team then
-
-                table.insert(
-                    result,
-                    {
-                        Part = object,
-                        Team = team
-                    }
-                )
-
-            end
-        end
-    end
-
-
-    return result
-end
-
-
---========================================================
--- TIME AUXILIAR PELO PATROL POINT
---
--- Usado somente quando o bot não possui Team válido.
---
--- O ponto mais próximo é utilizado.
---========================================================
-
-local function GetPatrolPointTeam(character)
-
-    if not character then
-        return nil
-    end
-
-    local root =
-        character:FindFirstChild(
-            "HumanoidRootPart"
-        )
-
-    if not root then
-        return nil
-    end
-
-    local patrolPoints =
-        GetPatrolPoints()
-
-    if #patrolPoints == 0 then
-        return nil
-    end
-
-
-    local closestTeam = nil
-    local closestDistance = math.huge
-
-
-    for _, data in ipairs(
-        patrolPoints
-    ) do
-
-        local part = data.Part
-
-        if part
-        and part.Parent then
-
-            local distance =
-                (
-                    root.Position -
-                    part.Position
-                ).Magnitude
-
-
-            if distance <
-                closestDistance then
-
-                closestDistance =
-                    distance
-
-                closestTeam =
-                    data.Team
-            end
-        end
-    end
-
-
-    return closestTeam
-end
-
-
---========================================================
 -- DETECTAR BOT
 --
--- PRINCIPALMENTE Workspace.Soldiers
+-- FONTE VALIDADA PELO ESP RESEARCH V1.1:
+--     Workspace.Soldiers
+--     Model:GetAttribute("Team")
+--
+-- O HumanoidRootPart NÃO é obrigatório para reconhecer
+-- o bot. Ele pode chegar alguns segundos depois.
 --========================================================
 
 local function IsBot(character)
 
-    if not character then
+    if not character
+    or not character:IsA("Model") then
         return false
     end
-
-    if not character:IsA("Model") then
-        return false
-    end
-
 
     -- Nunca classificar Player como bot.
-
-    if Players:GetPlayerFromCharacter(
-        character
-    ) then
-
+    if Players:GetPlayerFromCharacter(character) then
         return false
     end
 
+    local soldiers =
+        workspace:FindFirstChild("Soldiers")
+
+    if not soldiers
+    or character.Parent ~= soldiers then
+        return false
+    end
 
     local humanoid =
-        character:FindFirstChildOfClass(
-            "Humanoid"
-        )
-
-    local root =
-        character:FindFirstChild(
-            "HumanoidRootPart"
-        )
-
+        character:FindFirstChildOfClass("Humanoid")
 
     if not humanoid
-    or not root then
-
+    or humanoid.Health <= 0 then
         return false
     end
-
-
-    if humanoid.Health <= 0 then
-        return false
-    end
-
 
     return true
 end
@@ -391,9 +252,10 @@ end
 --========================================================
 -- LOCALIZAR TIME DO BOT
 --
--- 1. Model.Team
--- 2. atributo Team
--- 3. Patrol Point auxiliar
+-- Fonte principal validada:
+--     Attribute.Team
+--
+-- Fallbacks leves são mantidos apenas por compatibilidade.
 --========================================================
 
 local function GetBotTeam(character)
@@ -402,37 +264,31 @@ local function GetBotTeam(character)
         return nil
     end
 
-
-    --====================================================
-    -- FONTE PRINCIPAL
-    --====================================================
-
-    local botTeam =
-        character:GetAttribute(
-            "Team"
-        )
-
-
     local normalized =
         NormalizeTeamName(
-            botTeam
+            character:GetAttribute("Team")
         )
 
-
     if normalized then
-
         return normalized
-
     end
 
+    local teamValue =
+        character:FindFirstChild("Team")
 
-    --====================================================
-    -- FONTE AUXILIAR
-    --====================================================
+    if teamValue then
 
-    return GetPatrolPointTeam(
-        character
-    )
+        if teamValue:IsA("StringValue") then
+            return NormalizeTeamName(teamValue.Value)
+        end
+
+        if teamValue:IsA("ObjectValue")
+        and teamValue.Value then
+            return NormalizeTeamName(teamValue.Value.Name)
+        end
+    end
+
+    return nil
 end
 
 
@@ -532,36 +388,27 @@ end
 
 --========================================================
 -- PERSONAGEM DE ESP
+--
+-- Players preservam a validação original.
+-- Bots usam a detecção validada do V1.1 e não dependem
+-- da chegada imediata do HumanoidRootPart.
 --========================================================
 
 local function IsESPCharacter(character)
 
-    if not IsValidCharacter(
-        character
-    ) then
-
+    if not character
+    or not character:IsA("Model") then
         return false
     end
 
-
-    -- Player
-
     local player =
-        Players:GetPlayerFromCharacter(
-            character
-        )
-
+        Players:GetPlayerFromCharacter(character)
 
     if player then
-        return true
+        return IsValidCharacter(character)
     end
 
-
-    -- Bot
-
-    return IsBot(
-        character
-    )
+    return IsBot(character)
 end
 
 
@@ -658,6 +505,56 @@ end
 
 
 --========================================================
+-- HIGHLIGHT NATIVO DOS BOTS
+--
+-- O Highlight original do jogo serve apenas como sinal
+-- auxiliar. Enquanto o nosso ESP estiver ativo, ele é
+-- suprimido para não disputar cor com o PsicoESP.
+-- Ao remover/desligar o ESP, o estado original é restaurado.
+--========================================================
+
+local function SuppressNativeBotHighlights(character)
+
+    if not IsBot(character) then
+        return
+    end
+
+    for _, object in ipairs(character:GetDescendants()) do
+
+        if object:IsA("Highlight") then
+
+            if NativeBotHighlightStates[object] == nil then
+                NativeBotHighlightStates[object] = object.Enabled
+            end
+
+            object.Enabled = false
+        end
+    end
+end
+
+
+local function RestoreNativeBotHighlights(character)
+
+    if not character then
+        return
+    end
+
+    for highlight, originalEnabled in pairs(
+        NativeBotHighlightStates
+    ) do
+
+        if highlight
+        and highlight.Parent
+        and highlight:IsDescendantOf(character) then
+
+            highlight.Enabled = originalEnabled
+            NativeBotHighlightStates[highlight] = nil
+        end
+    end
+end
+
+
+--========================================================
 -- REMOVER ESP
 --========================================================
 
@@ -666,19 +563,27 @@ local function RemoveESP(character)
     local highlight =
         ESPObjects[character]
 
-
     if highlight then
-
         highlight:Destroy()
+        ESPObjects[character] = nil
+    end
 
-        ESPObjects[character] =
-            nil
+    if IsBot(character) then
+        RestoreNativeBotHighlights(character)
     end
 end
 
 
 --========================================================
 -- APLICAR ESP
+--
+-- PLAYERS:
+--     Mantém o comportamento original.
+--
+-- BOTS:
+--     ALLY  = PsicoESP_Ally  / verde
+--     ENEMY = PsicoESP_Enemy / vermelho
+--     Highlight nativo suprimido enquanto ativo.
 --========================================================
 
 local function ApplyESP(
@@ -686,59 +591,59 @@ local function ApplyESP(
     enemy
 )
 
-    if not IsESPCharacter(
-        character
-    ) then
-
+    if not IsESPCharacter(character) then
         return
     end
 
+    local isBot =
+        IsBot(character)
+
+    if isBot then
+        SuppressNativeBotHighlights(character)
+    end
 
     local highlight =
         ESPObjects[character]
 
-
     if not highlight then
 
         highlight =
-            Instance.new(
-                "Highlight"
-            )
-
-
-        highlight.Name =
-            "TestESP"
-
+            Instance.new("Highlight")
 
         highlight.Adornee =
             character
 
-
         highlight.DepthMode =
             Enum.HighlightDepthMode.AlwaysOnTop
-
 
         highlight.FillTransparency =
             0.75
 
-
         highlight.OutlineTransparency =
             0
 
-
         highlight.Parent =
             Gui
-
 
         ESPObjects[character] =
             highlight
     end
 
+    -- Players continuam com o nome original.
+    -- Bots usam os nomes validados no ESP Research V1.1.
+    if isBot then
 
-    --====================================================
-    -- NOSSA COR É INDEPENDENTE DO JOGO
-    --====================================================
+        if enemy then
+            highlight.Name = "PsicoESP_Enemy"
+        else
+            highlight.Name = "PsicoESP_Ally"
+        end
 
+    else
+        highlight.Name = "TestESP"
+    end
+
+    -- Nossa cor é independente da cor nativa do jogo.
     if enemy then
 
         highlight.FillColor =
@@ -761,82 +666,34 @@ end
 --========================================================
 -- PEGAR TODOS OS BOTS
 --
--- PRIMEIRA FONTE:
---     Workspace.Soldiers
+-- Fonte única validada:
+--     filhos diretos de Workspace.Soldiers
 --
--- FALLBACK:
---     Workspace inteiro
---
--- BotPatrolPoints NÃO é usado para transformar Parts
--- em bots. Ele apenas auxilia a descobrir o Team.
+-- Removidos:
+--     varredura global do Workspace
+--     BotPatrolPoints
+--     GetDescendants() global
 --========================================================
 
 local function GetAllBots()
 
     local bots = {}
-    local added = {}
-
-
-    --====================================================
-    -- SOLDIERS
-    --====================================================
 
     local soldiers =
-        workspace:FindFirstChild(
-            "Soldiers"
-        )
+        workspace:FindFirstChild("Soldiers")
 
-
-    if soldiers then
-
-        for _, object in ipairs(
-            soldiers:GetDescendants()
-        ) do
-
-            if object:IsA("Model")
-            and not added[object] then
-
-                if IsBot(object) then
-
-                    added[object] =
-                        true
-
-                    table.insert(
-                        bots,
-                        object
-                    )
-                end
-            end
-        end
+    if not soldiers then
+        return bots
     end
-
-
-    --====================================================
-    -- FALLBACK GLOBAL
-    --
-    -- Caso algum bot esteja fora de Soldiers.
-    --====================================================
 
     for _, object in ipairs(
-        workspace:GetDescendants()
+        soldiers:GetChildren()
     ) do
 
-        if object:IsA("Model")
-        and not added[object] then
-
-            if IsBot(object) then
-
-                added[object] =
-                    true
-
-                table.insert(
-                    bots,
-                    object
-                )
-            end
+        if IsBot(object) then
+            table.insert(bots, object)
         end
     end
-
 
     return bots
 end
@@ -918,9 +775,11 @@ local function ClearAllESP()
             highlight:Destroy()
         end
 
-        ESPObjects[
-            character
-        ] = nil
+        ESPObjects[character] = nil
+
+        if IsBot(character) then
+            RestoreNativeBotHighlights(character)
+        end
     end
 end
 
@@ -2697,29 +2556,84 @@ function CreateInterface()
 
 
     --====================================================
-    -- NOVOS MODELS
+    -- BOTS / WORKSPACE.SOLDIERS
     --
-    -- Isso permite detectar bots recém-gerados.
+    -- Monitoramento específico, sem observar todo o
+    -- Workspace a cada novo descendant.
     --====================================================
 
-    Connect(
-        workspace.DescendantAdded,
-        function(object)
+    local function ConnectSoldiersFolder(folder)
 
-            if not ESPEnabled then
-                return
-            end
+        if not folder then
+            return
+        end
 
+        Connect(
+            folder.ChildAdded,
+            function(object)
 
-            if object:IsA("Model") then
+                if not object:IsA("Model") then
+                    return
+                end
 
                 task.defer(
                     function()
 
-                        task.wait(0.05)
+                        -- O Model/Humanoid pode terminar de
+                        -- replicar depois do ChildAdded.
+                        for _ = 1, 30 do
 
-                        UpdateESP()
+                            if not object.Parent then
+                                return
+                            end
 
+                            if IsBot(object) then
+                                break
+                            end
+
+                            task.wait(0.1)
+                        end
+
+                        if ESPEnabled then
+                            UpdateESP()
+                        end
+                    end
+                )
+            end
+        )
+
+        Connect(
+            folder.ChildRemoved,
+            function(object)
+
+                RemoveESP(object)
+            end
+        )
+    end
+
+
+    local soldiers =
+        workspace:FindFirstChild("Soldiers")
+
+    if soldiers then
+        ConnectSoldiersFolder(soldiers)
+    end
+
+
+    Connect(
+        workspace.ChildAdded,
+        function(object)
+
+            if object.Name == "Soldiers" then
+
+                task.defer(
+                    function()
+
+                        ConnectSoldiersFolder(object)
+
+                        if ESPEnabled then
+                            UpdateESP()
+                        end
                     end
                 )
             end
