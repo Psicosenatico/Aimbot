@@ -8,6 +8,8 @@
 -- • Registrar decisões/erros do ESP por evento (sem snapshots pesados)
 -- • Exportar JSON compacto para análise posterior
 -- • Enviar os mesmos eventos automaticamente ao site em lotes
+-- • Revisão V1: Highlight próprio somente em ENEMY; aliados usam Highlight nativo do jogo
+-- • Revisão V1: diagnóstico separa estado atual de histórico (EverFound/EverCreated)
 -- • Interface responsiva baseada no BOT RESEARCH V4
 -- ============================================================
 
@@ -708,14 +710,23 @@ local function ensureDiagnosticRecord(record)
         classification = classification,
         classificationReason = classificationReason,
 
+        -- Estado atual + histórico. "Ever" não volta para false após remoção.
         humanoidFound = humanoid ~= nil,
+        humanoidCurrentlyPresent = humanoid ~= nil,
+        humanoidEverFound = humanoid ~= nil,
+
         rootFound = root ~= nil,
+        rootCurrentlyPresent = root ~= nil,
+        rootEverFound = root ~= nil,
         rootWaitSeconds = record.rootWaitSeconds,
 
         health = humanoid and humanoid.Health or nil,
         maxHealth = humanoid and humanoid.MaxHealth or nil,
 
         espCreated = State.ActiveESP[record.model] ~= nil,
+        espCurrentlyActive = State.ActiveESP[record.model] ~= nil,
+        espEverCreated = State.ActiveESP[record.model] ~= nil,
+
         nativeHighlight = compactNativeHighlight(record.model)
     }
 
@@ -748,15 +759,37 @@ local function updateDiagnosticRecord(record)
     diag.classification = classification
     diag.classificationReason = classificationReason
 
-    diag.humanoidFound = humanoid ~= nil
-    diag.rootFound = root ~= nil
+    local humanoidPresent = humanoid ~= nil
+    local rootPresent = root ~= nil
+    local espActive =
+        record.model and State.ActiveESP[record.model] ~= nil or false
+
+    -- Campos antigos permanecem por compatibilidade, representando estado atual.
+    diag.humanoidFound = humanoidPresent
+    diag.rootFound = rootPresent
+    diag.espCreated = espActive
+
+    -- Campos novos removem a ambiguidade entre "já existiu" e "existe agora".
+    diag.humanoidCurrentlyPresent = humanoidPresent
+    diag.humanoidEverFound =
+        diag.humanoidEverFound or humanoidPresent
+
+    diag.rootCurrentlyPresent = rootPresent
+    diag.rootEverFound =
+        diag.rootEverFound or rootPresent
+
+    diag.espCurrentlyActive = espActive
+    diag.espEverCreated =
+        diag.espEverCreated or espActive
+
     diag.rootWaitSeconds = record.rootWaitSeconds
 
     diag.health = humanoid and humanoid.Health or diag.health
     diag.maxHealth = humanoid and humanoid.MaxHealth or diag.maxHealth
 
-    diag.espCreated = record.model and State.ActiveESP[record.model] ~= nil or false
-    diag.nativeHighlight = record.model and compactNativeHighlight(record.model) or diag.nativeHighlight
+    diag.nativeHighlight =
+        record.model and compactNativeHighlight(record.model)
+        or diag.nativeHighlight
 
     if record.removed then
         diag.removedAtUnix = record.removedAtUnix
@@ -907,7 +940,22 @@ local function applyOrUpdateESP(record, reason)
         return
     end
 
-    local color = colorForClassification(classification)
+    -- O jogo já fornece Highlight nativo para aliados.
+    -- O Highlight próprio do PSICOSENATICO existe SOMENTE para inimigos.
+    if classification ~= "ENEMY" then
+        destroyESP(
+            model,
+            record,
+            classification == "ALLY"
+                and "ALLY_USES_NATIVE_HIGHLIGHT"
+                or "UNKNOWN_NOT_RENDERED"
+        )
+
+        updateDiagnosticRecord(record)
+        return
+    end
+
+    local color = ESP_ENEMY_COLOR
     local esp = State.ActiveESP[model]
 
     if not esp or not esp.Parent then
