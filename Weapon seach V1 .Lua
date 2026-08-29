@@ -21,7 +21,7 @@ local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local GUI_NAME = "PsicosenaticoWeaponResearch_V1"
-local VERSION = "V1"
+local VERSION = "V1.1"
 local MAX_EVENTS = 4000
 
 local AmmoNames = {"_ammo","ammo","Ammo","currentAmmo","CurrentAmmo"}
@@ -263,79 +263,156 @@ local function registerTool(tool, reason)
         log("TOOL_DEACTIVATED", record, summary, record.name .. " • Deactivated")
     end))
 
-    addToolConnection(tool, tool.AttributeChanged:Connect(function(attributeName)
-        local newValue = safeAttr(tool, attributeName)
-        local change = {time = now(), name = attributeName, value = newValue}
-        record.attributeChanges[#record.attributeChanges + 1] = change
+    -- Mudanças de atributos.
+    -- Usa GetAttributeChangedSignal para compatibilidade e evita depender
+    -- de um evento genérico AttributeChanged.
+    local watchedAttributes = {}
+    for _, attributeName in ipairs(WeaponHints) do
+        if not watchedAttributes[attributeName] then
+            watchedAttributes[attributeName] = true
 
-        local isAmmo = table.find(AmmoNames, attributeName) ~= nil
-        if isAmmo then
-            local oldAmmo = tonumber(record.ammo)
-            local newAmmo = tonumber(newValue)
+            local okSignal, signal = pcall(function()
+                return tool:GetAttributeChangedSignal(attributeName)
+            end)
 
-            if oldAmmo and newAmmo and newAmmo < oldAmmo then
-                local t = now()
-                local interval = record.lastAmmoDrop and (t - record.lastAmmoDrop) or nil
-                if interval then record.shotIntervals[#record.shotIntervals + 1] = interval end
-                record.lastAmmoDrop = t
-                record.totalAmmoDrops = record.totalAmmoDrops + 1
+            if okSignal and signal then
+                addToolConnection(tool, signal:Connect(function()
+                    local newValue = safeAttr(tool, attributeName)
+                    local change = {
+                        time = now(),
+                        name = attributeName,
+                        value = newValue
+                    }
 
-                if record.lastActivation and not record.lastDeactivation then
-                    record.activationShotCount = record.activationShotCount + 1
-                end
+                    record.attributeChanges[#record.attributeChanges + 1] = change
 
-                log("AMMO_DECREASED", record, {
-                    attribute = attributeName,
-                    old = oldAmmo,
-                    new = newAmmo,
-                    intervalFromPrevious = interval,
-                    activationShotCount = record.activationShotCount
-                }, string.format("%s • ammo %s -> %s", record.name, oldAmmo, newAmmo))
+                    local isAmmo = table.find(AmmoNames, attributeName) ~= nil
 
-            elseif oldAmmo and newAmmo and newAmmo > oldAmmo then
-                log("AMMO_INCREASED", record, {
-                    attribute = attributeName,
-                    old = oldAmmo,
-                    new = newAmmo
-                }, string.format("%s • ammo %s -> %s", record.name, oldAmmo, newAmmo))
+                    if isAmmo then
+                        local oldAmmo = tonumber(record.ammo)
+                        local newAmmo = tonumber(newValue)
+
+                        if oldAmmo and newAmmo and newAmmo < oldAmmo then
+                            local t = now()
+                            local interval = nil
+
+                            if record.lastAmmoDrop then
+                                interval = t - record.lastAmmoDrop
+                                record.shotIntervals[#record.shotIntervals + 1] = interval
+                            end
+
+                            record.lastAmmoDrop = t
+                            record.totalAmmoDrops = record.totalAmmoDrops + 1
+
+                            if record.lastActivation and not record.lastDeactivation then
+                                record.activationShotCount = record.activationShotCount + 1
+                            end
+
+                            log(
+                                "AMMO_DECREASED",
+                                record,
+                                {
+                                    attribute = attributeName,
+                                    old = oldAmmo,
+                                    new = newAmmo,
+                                    intervalFromPrevious = interval,
+                                    activationShotCount = record.activationShotCount
+                                },
+                                string.format(
+                                    "%s • ammo %s -> %s",
+                                    record.name,
+                                    tostring(oldAmmo),
+                                    tostring(newAmmo)
+                                )
+                            )
+
+                        elseif oldAmmo and newAmmo and newAmmo > oldAmmo then
+                            log(
+                                "AMMO_INCREASED",
+                                record,
+                                {
+                                    attribute = attributeName,
+                                    old = oldAmmo,
+                                    new = newAmmo
+                                },
+                                string.format(
+                                    "%s • ammo %s -> %s",
+                                    record.name,
+                                    tostring(oldAmmo),
+                                    tostring(newAmmo)
+                                )
+                            )
+                        end
+
+                        record.ammo = newValue
+                        record.ammoAttribute = attributeName
+                    end
+
+                    if attributeName == "_reloading" then
+                        if newValue == true then
+                            record.reloadStarted = now()
+
+                            log(
+                                "RELOAD_STARTED",
+                                record,
+                                {
+                                    reloadTime = safeAttr(tool, "reloadTime"),
+                                    reloadTimePerRound = safeAttr(tool, "reloadTimePerRound"),
+                                    ammo = select(1, readAmmo(tool))
+                                },
+                                record.name .. " • reload iniciado"
+                            )
+
+                        elseif newValue == false and record.reloadStarted then
+                            local duration = now() - record.reloadStarted
+
+                            record.reloads[#record.reloads + 1] = {
+                                duration = duration
+                            }
+
+                            log(
+                                "RELOAD_FINISHED",
+                                record,
+                                {
+                                    duration = duration,
+                                    ammo = select(1, readAmmo(tool))
+                                },
+                                string.format(
+                                    "%s • reload %.3fs",
+                                    record.name,
+                                    duration
+                                )
+                            )
+
+                            record.reloadStarted = nil
+                        end
+                    end
+
+                    if table.find(RateNames, attributeName) then
+                        record.rate = newValue
+                        record.rateAttribute = attributeName
+                    end
+
+                    if table.find(AutoNames, attributeName) then
+                        record.auto = newValue
+                        record.autoAttribute = attributeName
+                    end
+
+                    log(
+                        "ATTRIBUTE_CHANGED",
+                        record,
+                        change,
+                        string.format(
+                            "%s • %s = %s",
+                            record.name,
+                            attributeName,
+                            tostring(newValue)
+                        )
+                    )
+                end))
             end
-
-            record.ammo = newValue
-            record.ammoAttribute = attributeName
         end
-
-        if attributeName == "_reloading" then
-            if newValue == true then
-                record.reloadStarted = now()
-                log("RELOAD_STARTED", record, {
-                    reloadTime = safeAttr(tool, "reloadTime"),
-                    reloadTimePerRound = safeAttr(tool, "reloadTimePerRound"),
-                    ammo = select(1, readAmmo(tool))
-                }, record.name .. " • reload iniciado")
-            elseif newValue == false and record.reloadStarted then
-                local duration = now() - record.reloadStarted
-                record.reloads[#record.reloads + 1] = {duration = duration}
-                log("RELOAD_FINISHED", record, {
-                    duration = duration,
-                    ammo = select(1, readAmmo(tool))
-                }, string.format("%s • reload %.3fs", record.name, duration))
-                record.reloadStarted = nil
-            end
-        end
-
-        if table.find(RateNames, attributeName) then
-            record.rate = newValue
-            record.rateAttribute = attributeName
-        end
-
-        if table.find(AutoNames, attributeName) then
-            record.auto = newValue
-            record.autoAttribute = attributeName
-        end
-
-        log("ATTRIBUTE_CHANGED", record, change,
-            string.format("%s • %s = %s", record.name, attributeName, tostring(newValue)))
-    end))
+    end
 
     addToolConnection(tool, tool.DescendantAdded:Connect(function(obj)
         if obj:IsA("Animation") or obj:IsA("RemoteEvent")
@@ -381,16 +458,47 @@ local function connectAnimator(character)
             local tool = State.ActiveTool
             local record = tool and State.Tools[tool] or nil
 
+            local animationName = nil
+            local animationId = nil
+            local trackName = nil
+            local priority = nil
+            local speed = nil
+            local length = nil
+
+            pcall(function()
+                animationName = animation and animation.Name or nil
+            end)
+
+            pcall(function()
+                animationId = animation and animation.AnimationId or nil
+            end)
+
+            pcall(function()
+                trackName = track.Name
+            end)
+
+            pcall(function()
+                priority = tostring(track.Priority)
+            end)
+
+            pcall(function()
+                speed = track.Speed
+            end)
+
+            pcall(function()
+                length = track.Length
+            end)
+
             local info = {
                 time = now(),
                 toolId = record and record.id or nil,
                 toolName = record and record.name or nil,
-                animationName = animation and animation.Name or nil,
-                animationId = animation and animation.AnimationId or nil,
-                trackName = track.Name,
-                priority = tostring(track.Priority),
-                speed = track.Speed,
-                length = track.Length
+                animationName = animationName,
+                animationId = animationId,
+                trackName = trackName,
+                priority = priority,
+                speed = speed,
+                length = length
             }
 
             State.Animations[#State.Animations + 1] = info
@@ -464,14 +572,14 @@ local function startDiagnostic()
     State.StartUnix = unix()
     State.EndUnix = nil
 
-    log("DIAGNOSTIC_STARTED", nil, {}, "Weapon Research V1 iniciado.")
+    log("DIAGNOSTIC_STARTED", nil, {}, "Weapon Research V1.1 iniciado.")
     scanBlasterSystem()
     scanWeapons("DIAGNOSTIC_START")
 end
 
 local function stopDiagnostic()
     if not State.Recording then return end
-    log("DIAGNOSTIC_STOPPED", nil, {}, "Weapon Research V1 parado.")
+    log("DIAGNOSTIC_STOPPED", nil, {}, "Weapon Research V1.1 parado.")
     State.Recording = false
     State.EndUnix = unix()
 end
@@ -592,6 +700,15 @@ local function resize()
 end
 resize()
 
+if workspace.CurrentCamera then
+    local okResize, resizeSignal = pcall(function()
+        return workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize")
+    end)
+    if okResize and resizeSignal then
+        State.Connections[#State.Connections + 1] = resizeSignal:Connect(resize)
+    end
+end
+
 local Header=new("Frame",{Parent=Main,Size=UDim2.new(1,0,0,61),BackgroundColor3=C.panel,BorderSizePixel=0})
 round(Header,16)
 label(Header,"PSICOSENATICO • WEAPON RESEARCH",UDim2.new(1,-145,0,25),UDim2.fromOffset(18,7),16)
@@ -610,7 +727,7 @@ local Summary=label(Main,"",UDim2.new(1,-36,0,25),UDim2.fromOffset(18,137),9); S
 local Viewer=new("ScrollingFrame",{Parent=Main,Position=UDim2.fromOffset(18,168),Size=UDim2.new(1,-36,1,-177),BackgroundColor3=C.panel,BorderSizePixel=0,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=5,ScrollingDirection=Enum.ScrollingDirection.Y}); round(Viewer,10)
 local Text=new("TextLabel",{Parent=Viewer,BackgroundTransparency=1,Position=UDim2.fromOffset(10,8),Size=UDim2.new(1,-20,0,0),AutomaticSize=Enum.AutomaticSize.Y,Text="",TextColor3=C.text,Font=Enum.Font.Code,TextSize=9,TextWrapped=false,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top})
 
-local Mini=new("TextButton",{Parent=Gui,Visible=false,Size=UDim2.fromOffset(58,58),Position=UDim2.fromScale(0.07,0.25),Text="W V1",BackgroundColor3=C.blue,TextColor3=C.text,Font=Enum.Font.GothamBold,TextSize=12,BorderSizePixel=0}); round(Mini,18)
+local Mini=new("TextButton",{Parent=Gui,Visible=false,Size=UDim2.fromOffset(58,58),Position=UDim2.fromScale(0.07,0.25),Text="W1.1",BackgroundColor3=C.blue,TextColor3=C.text,Font=Enum.Font.GothamBold,TextSize=12,BorderSizePixel=0}); round(Mini,18)
 
 local function draggable(target,handle)
     local dragging,dragInput,dragStart,startPos=false,nil,nil,nil
@@ -639,7 +756,7 @@ local function updatePreview()
 
     local lines={
         "══════════════════════════════════════════",
-        "PSICOSENATICO • WEAPON RESEARCH V1",
+        "PSICOSENATICO • WEAPON RESEARCH V1.1",
         "══════════════════════════════════════════","",
         "TESTE SUGERIDO",
         "  1. Semiautomática: vários cliques",
@@ -686,7 +803,7 @@ Export.Activated:Connect(function()
         return
     end
 
-    local filename="Psicosenatico_WeaponResearch_V1_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+    local filename="Psicosenatico_WeaponResearch_V1_1_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
     local ok=false
     if typeof(writefile)=="function" then ok=pcall(function() writefile(filename,data) end) end
     if ok then
@@ -714,7 +831,7 @@ Close.Activated:Connect(cleanup)
 
 connectContainers()
 scanWeapons("INITIAL_SCAN")
-log("SYSTEM",nil,{},"Weapon Research V1 inicializado.")
+log("SYSTEM",nil,{},"Weapon Research V1.1 inicializado.")
 log("SYSTEM",nil,{},"Nenhuma arma é modificada pelo scanner.")
 updatePreview()
 
