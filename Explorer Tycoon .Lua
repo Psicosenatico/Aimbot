@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE DIAGNOSTIC - V2.2
+PSICOSENATICO - TYCOON PURCHASE DIAGNOSTIC - V2.3
 COMPATIBILITY / STABILITY BUILD
 
 Diagnostic only.
@@ -8,8 +8,16 @@ Does not buy, fire remotes, change Money, Rebirths or Marketplace state.
 Purchase classes:
 - TYCOON_MONEY
 - REBIRTH
-- ROBUX
+- KILLS_OR_PREMIUM
+- ROBUX_ONLY
 - UNKNOWN
+
+Automation policy:
+- TYCOON_MONEY: eligible
+- REBIRTH: eligible when requirement is satisfied
+- KILLS_OR_PREMIUM: ignored
+- ROBUX_ONLY: ignored
+- UNKNOWN: ignored
 ]]
 
 local Players = game:GetService("Players")
@@ -17,8 +25,8 @@ local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 
-local VERSION = "2.2"
-local GUI_NAME = "PsicoTycoonPurchaseDiagnosticV22"
+local VERSION = "2.3"
+local GUI_NAME = "PsicoTycoonPurchaseDiagnosticV23"
 
 local MAX_EVENTS = 1500
 local MONEY_INTERVAL = 0.25
@@ -514,7 +522,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "V2.2 - stability build"
+    version.Text = "V2.3 - stability build"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -652,7 +660,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio V2.2 (.txt)"
+    export.Text = "Exportar relatorio V2.3 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -666,7 +674,7 @@ local function createGui()
     floating.Position = UDim2.new(0, 18, 0.5, -30)
     floating.BackgroundColor3 = COLORS.Floating
     floating.BorderSizePixel = 0
-    floating.Text = "V2.2"
+    floating.Text = "V2.3"
     floating.TextColor3 = Color3.fromRGB(240, 246, 255)
     floating.Font = Enum.Font.GothamBold
     floating.TextSize = 11
@@ -729,14 +737,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Diagnostic V2.2] LocalPlayer indisponivel.")
+    warn("[Tycoon Diagnostic V2.3] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Diagnostic V2.2] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Diagnostic V2.3] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -767,6 +775,7 @@ local function describeButton(button)
         DevProduct = attrCI(button, "DevProduct"),
         NonPurchase = attrCI(button, "NonPurchase"),
         Dependency = attrCI(button, "Dependency"),
+        Kills = attrCI(button, "Kills"),
         Robux = attrCI(button, "Robux"),
         Attributes = getAttributes(button),
         HasTouch = button:FindFirstChild("Touch", true) ~= nil,
@@ -791,6 +800,7 @@ local function describePurchase(purchase)
         DevProduct = attrCI(purchase, "DevProduct"),
         NonPurchase = attrCI(purchase, "NonPurchase"),
         Dependency = attrCI(purchase, "Dependency"),
+        Kills = attrCI(purchase, "Kills"),
         Attributes = getAttributes(purchase),
     }
 
@@ -809,85 +819,116 @@ local function describePurchase(purchase)
 end
 
 local function classify(buttonInfo, purchaseInfo)
-    local moneyScore = 0
-    local rebirthScore = 0
-    local robuxScore = 0
-    local evidence = {}
-
     local button = buttonInfo or {}
     local purchase = purchaseInfo or {}
 
+    local evidence = {}
+
     local price = parseNumber(button.Price or button.Cost)
     local requiredRebirths = parseNumber(button.RequiredRebirths or button.Rebirths)
+    local killsRequired = parseNumber(button.Kills or purchase.Kills)
+
+    local gamepass = button.Gamepass or purchase.Gamepass
+    local devProduct = button.DevProduct or purchase.DevProduct
+    local productId = button.ProductId or purchase.ProductId
+    local developerProductId = button.DeveloperProductId or purchase.DeveloperProductId
+    local gamePassId = button.GamePassId or purchase.GamePassId
+    local robux = button.Robux
+
+    local hasMarketplaceMarker =
+        (gamepass ~= nil and tostring(gamepass) ~= "")
+        or (devProduct ~= nil and tostring(devProduct) ~= "")
+        or (productId ~= nil and tostring(productId) ~= "")
+        or (developerProductId ~= nil and tostring(developerProductId) ~= "")
+        or (gamePassId ~= nil and tostring(gamePassId) ~= "")
+        or (robux ~= nil and tostring(robux) ~= "")
 
     if price and price > 0 then
-        moneyScore = moneyScore + 7
         table.insert(evidence, "Price/Cost=" .. tostring(price))
     end
 
     if requiredRebirths and requiredRebirths > 0 then
-        rebirthScore = rebirthScore + 9
         table.insert(evidence, "Rebirth requirement=" .. tostring(requiredRebirths))
     end
 
-    local marketplaceNamed = {
-        {"Gamepass", button.Gamepass or purchase.Gamepass},
-        {"DevProduct", button.DevProduct or purchase.DevProduct},
-        {"ProductId", button.ProductId or purchase.ProductId},
-        {"DeveloperProductId", button.DeveloperProductId or purchase.DeveloperProductId},
-        {"GamePassId", button.GamePassId or purchase.GamePassId},
-        {"Robux", button.Robux},
-    }
-
-    for _, pair in ipairs(marketplaceNamed) do
-        local key = pair[1]
-        local value = pair[2]
-
-        if value ~= nil and tostring(value) ~= "" then
-            robuxScore = robuxScore + 10
-            table.insert(evidence, key .. "=" .. tostring(value))
-        end
+    if killsRequired and killsRequired > 0 then
+        table.insert(evidence, "Kills requirement=" .. tostring(killsRequired))
     end
 
-    local nonPurchase = normalize(button.NonPurchase or purchase.NonPurchase)
-    if nonPurchase == "true" then
-        robuxScore = robuxScore + 3
-        table.insert(evidence, "NonPurchase=true")
+    if gamepass ~= nil and tostring(gamepass) ~= "" then
+        table.insert(evidence, "Gamepass=" .. tostring(gamepass))
+    end
+    if devProduct ~= nil and tostring(devProduct) ~= "" then
+        table.insert(evidence, "DevProduct=" .. tostring(devProduct))
+    end
+    if productId ~= nil and tostring(productId) ~= "" then
+        table.insert(evidence, "ProductId=" .. tostring(productId))
+    end
+    if developerProductId ~= nil and tostring(developerProductId) ~= "" then
+        table.insert(evidence, "DeveloperProductId=" .. tostring(developerProductId))
+    end
+    if gamePassId ~= nil and tostring(gamePassId) ~= "" then
+        table.insert(evidence, "GamePassId=" .. tostring(gamePassId))
+    end
+    if robux ~= nil and tostring(robux) ~= "" then
+        table.insert(evidence, "Robux=" .. tostring(robux))
     end
 
-    local bestType = "UNKNOWN"
-    local bestScore = 0
-
-    if moneyScore > bestScore then
-        bestType = "TYCOON_MONEY"
-        bestScore = moneyScore
-    end
-
-    if rebirthScore > bestScore then
-        bestType = "REBIRTH"
-        bestScore = rebirthScore
-    end
-
-    if robuxScore > bestScore then
-        bestType = "ROBUX"
-        bestScore = robuxScore
-    end
-
+    local classType = "UNKNOWN"
     local confidence = "unknown"
+    local score = 0
+    local eligible = false
+    local eligibilityReason = "Insufficient evidence"
 
-    if bestScore >= 10 then
+    if hasMarketplaceMarker and killsRequired and killsRequired > 0 then
+        classType = "KILLS_OR_PREMIUM"
         confidence = "high"
-    elseif bestScore >= 7 then
+        score = 14
+        eligible = false
+        eligibilityReason = "Ignored: item exposes Kills and Marketplace/premium evidence"
+    elseif hasMarketplaceMarker then
+        classType = "ROBUX_ONLY"
+        confidence = "high"
+        score = 12
+        eligible = false
+        eligibilityReason = "Ignored: Marketplace/premium purchase"
+    elseif requiredRebirths and requiredRebirths > 0 then
+        classType = "REBIRTH"
+        confidence = "high"
+        score = 10
+        local currentRebirths = State.LastRebirths
+        local satisfied = currentRebirths ~= nil and currentRebirths >= requiredRebirths
+        eligible = satisfied
+        eligibilityReason = satisfied
+            and ("Eligible: rebirth requirement satisfied (" .. tostring(currentRebirths) .. "/" .. tostring(requiredRebirths) .. ")")
+            or ("Blocked: requires " .. tostring(requiredRebirths) .. " rebirth(s), current=" .. tostring(currentRebirths ~= nil and currentRebirths or "unknown"))
+    elseif price and price > 0 then
+        classType = "TYCOON_MONEY"
+        confidence = "high"
+        score = 9
+        eligible = true
+        eligibilityReason = "Eligible: ordinary Tycoon-money purchase"
+    elseif killsRequired and killsRequired > 0 then
+        classType = "KILLS_OR_PREMIUM"
         confidence = "medium"
-    elseif bestScore > 0 then
-        confidence = "low"
+        score = 7
+        eligible = false
+        eligibilityReason = "Ignored: Kills-based requirement"
     end
 
     return {
-        Type = bestType,
+        Type = classType,
         Confidence = confidence,
-        Score = bestScore,
+        Score = score,
         Evidence = evidence,
+        AutomationEligible = eligible,
+        AutomationReason = eligibilityReason,
+        Requirements = {
+            Price = price,
+            Rebirths = requiredRebirths,
+            Kills = killsRequired,
+            HasMarketplaceMarker = hasMarketplaceMarker,
+        },
     }
 end
 
@@ -1081,6 +1122,8 @@ local function finalize(name)
         Time = clockText(),
         Elapsed = elapsed(),
         Classification = classification,
+        AutomationEligible = classification.AutomationEligible,
+        AutomationReason = classification.AutomationReason,
 
         Button = pending.Button,
         Purchase = pending.Purchase,
@@ -1128,6 +1171,10 @@ local function finalize(name)
     and transaction.EconomyEvidence.ExactPriceMatch then
         transaction.Classification.Confidence = "confirmed"
         transaction.Classification.Score = math.max(transaction.Classification.Score or 0, 15)
+        transaction.AutomationEligible = true
+        transaction.AutomationReason = "Eligible: confirmed Tycoon-money purchase"
+        transaction.Classification.AutomationEligible = true
+        transaction.Classification.AutomationReason = "Eligible: confirmed Tycoon-money purchase"
         table.insert(transaction.Classification.Evidence, "Money deduction exactly matches declared Price")
     elseif transaction.Classification.Type == "TYCOON_MONEY"
     and delta ~= nil and delta > 0 then
@@ -1197,6 +1244,7 @@ local function watchButtonAttributes(button)
         "DevProduct",
         "NonPurchase",
         "Dependency",
+        "Kills",
         "Robux",
     }
 
@@ -1401,10 +1449,12 @@ local function refreshUI()
 
     local tycoonName = State.Tycoon and State.Tycoon.Name or "nao identificado"
 
+    local candidates = buildAutomationCandidates()
+
     UI.Status.Text =
         "Tycoon: " .. tostring(tycoonName) ..
-        " | Score: " .. tostring(State.TycoonScore) ..
-        " | Compras: " .. tostring(#State.Transactions)
+        " | Compras: " .. tostring(#State.Transactions) ..
+        " | Elegiveis: " .. tostring(#candidates.Eligible)
 
     UI.Money.Text =
         "Money: " ..
@@ -1444,6 +1494,41 @@ local function refreshUI()
     else
         UI.Live.Text = table.concat(lines, "\n")
     end
+end
+
+local function buildAutomationCandidates()
+    local result = {Eligible = {}, Ignored = {}}
+    if not State.ButtonsFolder then return result end
+
+    for _, button in ipairs(State.ButtonsFolder:GetChildren()) do
+        if button:IsA("Model") or button:IsA("Folder") then
+            local info = State.ButtonCache[button.Name] or describeButton(button)
+            local classification = classify(info, nil)
+            local record = {
+                Name = button.Name,
+                Path = safeFullName(button),
+                Type = classification.Type,
+                AutomationEligible = classification.AutomationEligible,
+                AutomationReason = classification.AutomationReason,
+                Requirements = classification.Requirements,
+                Dependency = info.Dependency,
+                Price = info.Price or info.Cost,
+                Rebirths = info.RequiredRebirths or info.Rebirths,
+                Kills = info.Kills,
+                Gamepass = info.Gamepass,
+                DevProduct = info.DevProduct,
+            }
+            if classification.AutomationEligible then
+                table.insert(result.Eligible, record)
+            else
+                table.insert(result.Ignored, record)
+            end
+        end
+    end
+
+    table.sort(result.Eligible, function(a, b) return tostring(a.Name) < tostring(b.Name) end)
+    table.sort(result.Ignored, function(a, b) return tostring(a.Name) < tostring(b.Name) end)
+    return result
 end
 
 local function buildProgressionGraph()
@@ -1514,6 +1599,7 @@ local function buildReport()
         InitialButtons = State.InitialButtons,
         InitialPurchases = State.InitialPurchases,
         Transactions = State.Transactions,
+        AutomationCandidates = buildAutomationCandidates(),
         ProgressionGraph = buildProgressionGraph(),
         Events = State.Events,
         Errors = State.Errors,
@@ -1534,7 +1620,7 @@ end
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Diagnostic_V2_2_" ..
+        "Tycoon_Purchase_Diagnostic_V2_3_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
@@ -1692,5 +1778,5 @@ task.spawn(function()
     end
 end)
 
-UI.Status.Text = "V2.2 ativa. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "V2.3 ativa. GUI=" .. tostring(UI.ParentKind)
 refreshUI()
