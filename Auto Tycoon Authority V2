@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V1.0
+PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V2.0
 DESTINO: LocalScript / ambiente de teste do cliente
 
 OBJETIVO
@@ -24,8 +24,8 @@ local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 
-local VERSION = "SERVER-RESPONSE-RESEARCH-1.0"
-local GUI_NAME = "PsicoTycoonServerResponseResearchV1"
+local VERSION = "SERVER-RESPONSE-RESEARCH-2.0"
+local GUI_NAME = "PsicoTycoonServerResponseResearchV2"
 local MAX_EVENTS = 3500
 local SAMPLE_INTERVAL = 0.20
 local CORRELATION_WINDOW = 4.0
@@ -56,6 +56,10 @@ local State = {
     TycoonConnections = {},
     RecentRemoteInbound = {},
     Correlations = {},
+
+    VerificationActive = false,
+    VerificationSessions = {},
+    CurrentVerificationSession = nil,
 }
 
 local UI = {}
@@ -146,7 +150,17 @@ local function disconnectAll(bucket)
     end
 end
 
+local ALWAYS_STORE_EVENT = {
+    VERIFICATION_STARTED = true,
+    VERIFICATION_STOPPED = true,
+    SERVER_RESPONSE_RESEARCH_READY = true,
+}
+
 local function pushEvent(kind, details)
+    if not State.VerificationActive and not ALWAYS_STORE_EVENT[kind] then
+        return nil
+    end
+
     local item = {
         Time = os.date("%H:%M:%S"),
         Unix = os.time(),
@@ -471,6 +485,91 @@ local function setupDrag(frame, handle)
     end)
 end
 
+
+local function setMinimized(minimized)
+    if not UI.Main or not UI.Floating then return end
+    UI.Main.Visible = not minimized
+    UI.Floating.Visible = minimized
+end
+
+local function beginVerification()
+    if State.VerificationActive then return end
+
+    State.VerificationActive = true
+    State.RecentRemoteInbound = {}
+    State.Correlations = {}
+    State.Events = {}
+
+    local session = {
+        Id = #State.VerificationSessions + 1,
+        StartedUnix = os.time(),
+        StartedElapsed = elapsed(),
+        StartedMoney = State.LastMoney,
+        StartedCollector = State.LastCollector,
+        StartedRebirths = State.LastRebirths,
+        StartedTycoon = State.Tycoon and safeFullName(State.Tycoon) or nil,
+    }
+
+    State.CurrentVerificationSession = session
+    table.insert(State.VerificationSessions, session)
+
+    pushEvent("VERIFICATION_STARTED", {
+        SessionId = session.Id,
+        Money = State.LastMoney,
+        Collector = State.LastCollector,
+        Rebirths = State.LastRebirths,
+        Tycoon = session.StartedTycoon,
+    })
+
+    if UI.Toggle and UI.Toggle.Parent then
+        UI.Toggle.Text = "Parar verificacao"
+        UI.Toggle.BackgroundColor3 = Color3.fromRGB(86,43,48)
+    end
+
+    if UI.Status and UI.Status.Parent then
+        UI.Status.Text = "VERIFICACAO ATIVA | realize as compras e pare quando terminar"
+    end
+end
+
+local function stopVerification()
+    if not State.VerificationActive then return end
+
+    local session = State.CurrentVerificationSession
+    if session then
+        session.StoppedUnix = os.time()
+        session.StoppedElapsed = elapsed()
+        session.StoppedMoney = State.LastMoney
+        session.StoppedCollector = State.LastCollector
+        session.StoppedRebirths = State.LastRebirths
+        session.EventsCaptured = #State.Events
+        session.CorrelationsCaptured = #State.Correlations
+    end
+
+    pushEvent("VERIFICATION_STOPPED", {
+        SessionId = session and session.Id or nil,
+        Money = State.LastMoney,
+        Collector = State.LastCollector,
+        Rebirths = State.LastRebirths,
+        EventsCaptured = #State.Events,
+        CorrelationsCaptured = #State.Correlations,
+    })
+
+    State.VerificationActive = false
+    State.CurrentVerificationSession = nil
+    State.RecentRemoteInbound = {}
+
+    if UI.Toggle and UI.Toggle.Parent then
+        UI.Toggle.Text = "Iniciar verificacao"
+        UI.Toggle.BackgroundColor3 = Color3.fromRGB(18,49,88)
+    end
+
+    if UI.Status and UI.Status.Parent then
+        UI.Status.Text =
+            "VERIFICACAO PAUSADA | Eventos: " .. tostring(#State.Events) ..
+            " | Correlacoes: " .. tostring(#State.Correlations)
+    end
+end
+
 local function createGui()
     local parent = resolveGuiParent()
     local old = parent:FindFirstChild(GUI_NAME)
@@ -500,15 +599,25 @@ local function createGui()
     round(header, 12)
 
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -90, 1, 0)
+    title.Size = UDim2.new(1, -132, 1, 0)
     title.Position = UDim2.new(0, 12, 0, 0)
     title.BackgroundTransparency = 1
     title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V1"
+    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V2"
     title.TextColor3 = Color3.fromRGB(83,226,169)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 11
     title.Parent = header
+
+    local minimize = Instance.new("TextButton")
+    minimize.Size = UDim2.new(0, 34, 0, 34)
+    minimize.Position = UDim2.new(1, -82, 0, 7)
+    minimize.BackgroundColor3 = Color3.fromRGB(18,49,88)
+    minimize.TextColor3 = Color3.new(1,1,1)
+    minimize.Text = "—"
+    minimize.Font = Enum.Font.GothamBold
+    minimize.Parent = header
+    round(minimize, 8)
 
     local close = Instance.new("TextButton")
     close.Size = UDim2.new(0, 34, 0, 34)
@@ -533,7 +642,7 @@ local function createGui()
     round(status, 8)
 
     local log = Instance.new("TextLabel")
-    log.Size = UDim2.new(1, -16, 1, -168)
+    log.Size = UDim2.new(1, -16, 1, -210)
     log.Position = UDim2.new(0, 8, 0, 122)
     log.BackgroundColor3 = Color3.fromRGB(14,19,27)
     log.TextColor3 = Color3.fromRGB(238,242,250)
@@ -546,6 +655,17 @@ local function createGui()
     log.Parent = main
     round(log, 8)
 
+    local toggle = Instance.new("TextButton")
+    toggle.Size = UDim2.new(1, -16, 0, 36)
+    toggle.Position = UDim2.new(0, 8, 1, -86)
+    toggle.BackgroundColor3 = Color3.fromRGB(18,49,88)
+    toggle.TextColor3 = Color3.fromRGB(238,242,250)
+    toggle.Font = Enum.Font.GothamBold
+    toggle.TextSize = 11
+    toggle.Text = "Iniciar verificacao"
+    toggle.Parent = main
+    round(toggle, 8)
+
     local export = Instance.new("TextButton")
     export.Size = UDim2.new(1, -16, 0, 36)
     export.Position = UDim2.new(0, 8, 1, -44)
@@ -553,9 +673,24 @@ local function createGui()
     export.TextColor3 = Color3.fromRGB(238,242,250)
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
-    export.Text = "Exportar SERVER RESPONSE V1 (.txt)"
+    export.Text = "Exportar SERVER RESPONSE V2 (.txt)"
     export.Parent = main
     round(export, 8)
+
+    local floating = Instance.new("TextButton")
+    floating.Name = "RestoreFloatingButton"
+    floating.Size = UDim2.new(0, 60, 0, 60)
+    floating.Position = UDim2.new(0, 18, 0.5, -30)
+    floating.BackgroundColor3 = Color3.fromRGB(18,49,88)
+    floating.TextColor3 = Color3.new(1,1,1)
+    floating.Text = "SR V2"
+    floating.Font = Enum.Font.GothamBold
+    floating.TextSize = 11
+    floating.Visible = false
+    floating.Active = true
+    floating.ZIndex = 100
+    floating.Parent = screen
+    round(floating, 14)
 
     UI.Screen = screen
     UI.Main = main
@@ -563,10 +698,33 @@ local function createGui()
     UI.Status = status
     UI.Log = log
     UI.Export = export
+    UI.Toggle = toggle
+    UI.Minimize = minimize
+    UI.Floating = floating
 
     setupDrag(main, header)
+    setupDrag(floating, floating)
+
+    addConnection(minimize.MouseButton1Click, function()
+        setMinimized(true)
+    end)
+
+    addConnection(floating.MouseButton1Click, function()
+        setMinimized(false)
+    end)
+
+    addConnection(toggle.MouseButton1Click, function()
+        if State.VerificationActive then
+            stopVerification()
+        else
+            beginVerification()
+        end
+    end)
 
     addConnection(close.MouseButton1Click, function()
+        if State.VerificationActive then
+            stopVerification()
+        end
         State.Running = false
         disconnectAll(State.TycoonConnections)
         disconnectAll(State.Connections)
@@ -596,6 +754,13 @@ local function createGui()
             Correlations = State.Correlations,
             Events = State.Events,
             Errors = State.Errors,
+            Verification = {
+                Active = State.VerificationActive,
+                Sessions = State.VerificationSessions,
+                CurrentSession = State.CurrentVerificationSession,
+                CapturedEvents = #State.Events,
+                CapturedCorrelations = #State.Correlations,
+            },
             Policy = {
                 Perspective = "server response as observed by client",
                 TrueServerAuthority = false,
@@ -615,7 +780,7 @@ local function createGui()
             return
         end
 
-        local filename = "Auto_Tycoon_Server_Response_Research_V1_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
+        local filename = "Auto_Tycoon_Server_Response_Research_V2_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
         local saved, copied = false, false
 
         if type(writefile) == "function" then
@@ -692,23 +857,32 @@ task.spawn(function()
             local remoteCount = 0
             for _ in pairs(State.Remotes) do remoteCount += 1 end
 
-            UI.Status.Text =
-                "Money: " .. tostring(State.LastMoney) ..
-                " | Collector: " .. tostring(State.LastCollector) ..
-                " | Rebirths: " .. tostring(State.LastRebirths) ..
-                " | Remotes: " .. tostring(remoteCount) ..
-                " | Correlacoes: " .. tostring(#State.Correlations) ..
-                " | Eventos: " .. tostring(#State.Events)
+            if State.VerificationActive then
+                UI.Status.Text =
+                    "VERIFICACAO ATIVA | Money: " .. tostring(State.LastMoney) ..
+                    " | Rebirths: " .. tostring(State.LastRebirths)
+            else
+                UI.Status.Text =
+                    "VERIFICACAO PAUSADA | Eventos: " .. tostring(#State.Events) ..
+                    " | Correlacoes: " .. tostring(#State.Correlations)
+            end
         end
 
         if UI.Log and UI.Log.Parent then
-            local lines = {}
-            local first = math.max(1, #State.Events - 13)
-            for i = #State.Events, first, -1 do
-                local e = State.Events[i]
-                table.insert(lines, "[" .. tostring(e.Time) .. "] " .. tostring(e.Kind))
+            if State.VerificationActive then
+                local lines = {}
+                local first = math.max(1, #State.Events - 8)
+                for i = #State.Events, first, -1 do
+                    local e = State.Events[i]
+                    table.insert(lines, "[" .. tostring(e.Time) .. "] " .. tostring(e.Kind))
+                end
+                UI.Log.Text = #lines > 0 and table.concat(lines, "\n") or "Capturando..."
+            else
+                UI.Log.Text =
+                    "Verificacao pausada.\n" ..
+                    "Toque em Iniciar verificacao antes das compras.\n" ..
+                    "Ao terminar, toque em Parar verificacao e exporte o relatorio."
             end
-            UI.Log.Text = #lines > 0 and table.concat(lines, "\n") or "Aguardando eventos..."
         end
 
         task.wait(SAMPLE_INTERVAL)
@@ -718,4 +892,5 @@ end)
 pushEvent("SERVER_RESPONSE_RESEARCH_READY", {
     Version = VERSION,
     Perspective = "server response as observed by client",
+    VerificationDefault = "PAUSED",
 })
