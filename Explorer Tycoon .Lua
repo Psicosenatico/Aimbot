@@ -1,132 +1,86 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE DIAGNOSTIC - V2.4.2
-COMPATIBILITY / STABILITY BUILD
+PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V2.3.1
+DESTINO: LocalScript / ambiente de teste do cliente
 
-Diagnostic only.
-Does not buy, fire remotes, change Money, Rebirths or Marketplace state.
+OBJETIVO
+- Estudar a resposta do servidor VISTA PELO CLIENTE.
+- Não finge ser código de servidor.
+- Não depende de APIs exclusivas de servidor nem de modo de teste do Studio.
+- Não altera Money/Rebirths.
+- Não falsifica saldo, Owner, Rebirths ou respostas.
+- Não dispara RemoteFunction desconhecida nem RemoteEvent desconhecido.
+- Cataloga remotes visíveis, eventos recebidos e mudanças replicadas do Tycoon.
+- Correlaciona mudanças de botão/purchase/dinheiro com eventos remotos recebidos.
+- Exporta relatório TXT/JSON quando writefile/setclipboard estiver disponível.
 
-Purchase classes:
-- TYCOON_MONEY
-- REBIRTH
-- KILLS_OR_PREMIUM
-- ROBUX_ONLY
-- UNKNOWN
-
-Context diagnostics:
-- MAIN_TYCOON and BUNKER are tracked separately
-- Floor progression 1/2/3 is tracked independently from Zone
-- StageUnlocks groups newly observed buttons by progression floor
-- Money discovery prefers leaderstats ValueBase, then Player/Tycoon, with PlayerGui as fallback
-- Bunker-dependent purchases use MovementPolicy=USE_GAME_TRANSITION
-- This diagnostic does not teleport or bypass movement correction
-
-Automation policy:
-- TYCOON_MONEY: eligible
-- REBIRTH: eligible when requirement is satisfied
-- KILLS_OR_PREMIUM: ignored
-- ROBUX_ONLY: ignored
-- UNKNOWN: ignored
+IMPORTANTE
+- Este script mede "server response as observed by the client".
+- Ele NÃO fornece acesso ao estado interno real do servidor.
 ]]
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 
-local VERSION = "2.4.1"
-local GUI_NAME = "PsicoTycoonPurchaseDiagnosticV242"
+local VERSION = "SERVER-RESPONSE-RESEARCH-2.3"
+local GUI_NAME = "PsicoTycoonServerResponseResearchV2_3"
+local MAX_EVENTS = 3500
+local SAMPLE_INTERVAL = 0.20
+local CORRELATION_WINDOW = 4.0
+local PURCHASE_RESPONSE_WINDOW = 1.0
 
-local MAX_AUX_EVENTS = 2000
-local MONEY_INTERVAL = 0.25
-local TYCOON_INTERVAL = 1.5
-local CORRELATION_WINDOW = 4
-local UNLOCK_WINDOW = 3.5
-local DRAG_THRESHOLD = 8
-
-local COLORS = {
-    Background = Color3.fromRGB(18, 23, 31),
-    Header = Color3.fromRGB(24, 31, 43),
-    Card = Color3.fromRGB(29, 37, 51),
-    CardDark = Color3.fromRGB(14, 19, 27),
-    Accent = Color3.fromRGB(83, 226, 169),
-    Text = Color3.fromRGB(238, 242, 250),
-    Muted = Color3.fromRGB(160, 171, 190),
-    Danger = Color3.fromRGB(86, 43, 48),
-    Floating = Color3.fromRGB(18, 49, 88),
-}
+local Player = Players.LocalPlayer
+if not Player then
+    warn("[Psico Server Response Research V1] LocalPlayer unavailable")
+    return
+end
 
 local State = {
     Running = true,
-    Reading = false,
-    ReadingSessions = {},
-    CurrentReadingSession = nil,
-
     StartedUnix = os.time(),
     StartedClock = os.clock(),
-
-    Player = nil,
-
+    Events = {},
+    Errors = {},
+    Remotes = {},
+    MoneyCandidates = {},
+    CollectorCandidates = {},
+    RebirthCandidates = {},
+    LastMoney = nil,
+    LastCollector = nil,
+    LastRebirths = nil,
     Tycoon = nil,
-    TycoonScore = 0,
     ButtonsFolder = nil,
     PurchasesFolder = nil,
-
-    CurrentZone = "UNKNOWN",
-    ZoneEvidence = "not evaluated",
-    MainFloor = 1,
-    ZoneTransitions = {},
-    FloorTransitions = {},
-    StageUnlocks = {},
-    StageUnlockSeen = {},
-    LastTransitionPrompt = nil,
-    WatchedTransitionPrompts = setmetatable({}, {__mode = "k"}),
-
-    MoneyObject = nil,
-    MoneySourceKind = nil,
-    MoneySourceEvidence = nil,
-    MoneyCandidates = {},
-    LastMoneyDiscoveryClock = 0,
-    LastMoney = nil,
-
-    RebirthObject = nil,
-    LastRebirths = nil,
-
-    InitialButtons = {},
-    InitialPurchases = {},
-    ButtonCache = {},
-
-    Pending = {},
-    Transactions = {},
-    Events = {},
-    CriticalEvents = {},
-    Errors = {},
-    ErrorRepeats = {},
-
-    DataStats = {
-        TotalEventsObserved = 0,
-        AuxiliaryEventsStored = 0,
-        AuxiliaryEventsDiscarded = 0,
-        CriticalEventsStored = 0,
-        TransactionsStored = 0,
-        TransactionDataDiscarded = 0,
-    },
-
     Connections = {},
     TycoonConnections = {},
+    RecentRemoteInbound = {},
+    Correlations = {},
 
-    Health = {
-        Bootstrap = "STARTING",
-        UI = "STARTING",
-        Tycoon = "SEARCHING",
-        Money = "SEARCHING",
-        Rebirths = "SEARCHING",
-        Engine = "STARTING",
-        Reading = "PAUSED",
-        Zone = "UNKNOWN",
-        Floor = "1",
+    VerificationActive = false,
+    VerificationSessions = {},
+    CurrentVerificationSession = nil,
+
+    PurchaseResponses = {},
+    PendingPurchaseResponse = nil,
+    ResponseCounters = {
+        Accepted = 0,
+        Rejected = 0,
+        Unresolved = 0,
     },
 
-    Minimized = false,
+    LastRemovedButton = nil,
+    LastAcceptedResponse = nil,
+    PrimaryTycoonMoneySignals = {
+        SuccessRemote = "TycoonService.ButtonPurchased",
+        RejectRemote = "TycoonService.ButtonCannotPurchase",
+        Direction = "SERVER_TO_CLIENT",
+        ClientRequestPayloadObserved = false,
+        ClientRequestMechanismObserved = false,
+        Note = "This client-side observer confirms server responses, not the exact client-to-server purchase request payload.",
+        PurchaseAddedPolicy = "PURCHASE_ADDED enriches an existing/recent accepted response; it never starts a new pending response.",
+    },
 }
 
 local UI = {}
@@ -135,676 +89,906 @@ local function elapsed()
     return math.floor((os.clock() - State.StartedClock) * 1000) / 1000
 end
 
-local function clockText()
-    return os.date("%H:%M:%S")
-end
-
 local function normalize(value)
     return string.lower(tostring(value or "")):gsub("[%s_%-%./]", "")
 end
 
+local function parseNumber(value)
+    if value == nil then return nil end
+    if type(value) == "number" then return value end
+    local s = tostring(value):gsub(",", ""):gsub("%s", ""):gsub("R%$", ""):gsub("%$", "")
+    local suffix = string.upper(string.sub(s, -1))
+    local mult = 1
+    if suffix == "K" then mult = 1e3; s = string.sub(s, 1, -2)
+    elseif suffix == "M" then mult = 1e6; s = string.sub(s, 1, -2)
+    elseif suffix == "B" then mult = 1e9; s = string.sub(s, 1, -2)
+    elseif suffix == "T" then mult = 1e12; s = string.sub(s, 1, -2)
+    end
+    local n = tonumber(s)
+    return n and n * mult or nil
+end
+
 local function safeFullName(inst)
-    if not inst then
-        return "<nil>"
-    end
-
-    local ok, result = pcall(function()
-        return inst:GetFullName()
-    end)
-
-    if ok then
-        return result
-    end
-
-    return "<detached>"
+    if not inst then return "<nil>" end
+    local ok, result = pcall(function() return inst:GetFullName() end)
+    return ok and result or "<detached>"
 end
 
 local function getAttributes(inst)
-    if not inst then
-        return {}
-    end
-
-    local ok, attrs = pcall(function()
-        return inst:GetAttributes()
-    end)
-
-    if not ok or type(attrs) ~= "table" then
-        return {}
-    end
-
     local result = {}
-
-    for key, value in pairs(attrs) do
-        result[tostring(key)] = tostring(value)
+    if not inst then return result end
+    local ok, attrs = pcall(function() return inst:GetAttributes() end)
+    if ok and type(attrs) == "table" then
+        for k, v in pairs(attrs) do
+            result[tostring(k)] = tostring(v)
+        end
     end
-
     return result
 end
 
 local function attrCI(inst, wanted)
+    if not inst then return nil end
     local wantedNorm = normalize(wanted)
-    local attrs = getAttributes(inst)
-
-    for key, value in pairs(attrs) do
-        if normalize(key) == wantedNorm then
-            return value
-        end
+    local ok, attrs = pcall(function() return inst:GetAttributes() end)
+    if not ok or type(attrs) ~= "table" then return nil end
+    for k, v in pairs(attrs) do
+        if normalize(k) == wantedNorm then return v end
     end
-
     return nil
 end
 
-local function parseNumber(value)
-    if value == nil then
-        return nil
-    end
-
-    if type(value) == "number" then
-        return value
-    end
-
-    local text = tostring(value)
-    text = text:gsub(",", "")
-    text = text:gsub("%s", "")
-    text = text:gsub("R%$", "")
-    text = text:gsub("%$", "")
-
-    local suffix = string.upper(string.sub(text, -1))
-    local multiplier = 1
-
-    if suffix == "K" then
-        multiplier = 1e3
-        text = string.sub(text, 1, -2)
-    elseif suffix == "M" then
-        multiplier = 1e6
-        text = string.sub(text, 1, -2)
-    elseif suffix == "B" then
-        multiplier = 1e9
-        text = string.sub(text, 1, -2)
-    elseif suffix == "T" then
-        multiplier = 1e12
-        text = string.sub(text, 1, -2)
-    end
-
-    local number = tonumber(text)
-    if number == nil then
-        return nil
-    end
-
-    return number * multiplier
-end
-
-local function containsAny(value, words)
-    local text = normalize(value)
-
-    for _, word in ipairs(words) do
-        if string.find(text, normalize(word), 1, true) then
-            return true
-        end
-    end
-
-    return false
-end
-
-local CRITICAL_EVENT_KINDS = {
-    TRANSACTION_FINALIZED = true,
-    MONEY_SPEND = true,
-    REBIRTH_CHANGE = true,
-    BUTTON_REMOVED = true,
-    PURCHASE_CREATED = true,
-    BUTTONS_UNLOCKED = true,
-    READING_STARTED = true,
-    READING_STOPPED = true,
-    ZONE_CHANGED = true,
-    FLOOR_CHANGED = true,
-    TRANSITION_PROMPT = true,
-    ERROR = true,
-}
-
-local function pushEvent(kind, label, details)
-    local item = {
-        Time = clockText(),
-        Unix = os.time(),
-        Elapsed = elapsed(),
-        Kind = kind,
-        Label = label,
-        Details = details or {},
-    }
-
-    State.DataStats.TotalEventsObserved = State.DataStats.TotalEventsObserved + 1
-
-    if CRITICAL_EVENT_KINDS[kind] then
-        table.insert(State.CriticalEvents, item)
-        State.DataStats.CriticalEventsStored = #State.CriticalEvents
-    end
-
-    table.insert(State.Events, item)
-    State.DataStats.AuxiliaryEventsStored = #State.Events
-
-    while #State.Events > MAX_AUX_EVENTS do
-        table.remove(State.Events, 1)
-        State.DataStats.AuxiliaryEventsDiscarded =
-            State.DataStats.AuxiliaryEventsDiscarded + 1
-        State.DataStats.AuxiliaryEventsStored = #State.Events
-    end
-
-    return item
-end
-
-local function pushError(stage, err)
-    local message = tostring(err)
-    local key = tostring(stage) .. "|" .. message
-    local nowClock = os.clock()
-    local repeatInfo = State.ErrorRepeats[key]
-
-    if repeatInfo and (nowClock - repeatInfo.LastClock) < 2 then
-        repeatInfo.Count = repeatInfo.Count + 1
-        repeatInfo.LastClock = nowClock
-
-        if UI.Status and UI.Status.Parent then
-            UI.Status.Text =
-                "Erro em " .. tostring(stage) .. ": " .. message ..
-                " (repetido x" .. tostring(repeatInfo.Count) .. ")"
-        end
-
-        return
-    end
-
-    State.ErrorRepeats[key] = {
-        Count = repeatInfo and (repeatInfo.Count + 1) or 1,
-        LastClock = nowClock,
-    }
-
-    local item = {
-        Time = clockText(),
-        Elapsed = elapsed(),
-        Stage = stage,
-        Error = message,
-        RepeatCount = State.ErrorRepeats[key].Count,
-    }
-
-    table.insert(State.Errors, item)
-    pushEvent("ERROR", stage, {
-        Error = message,
-        RepeatCount = item.RepeatCount,
-    })
-
-    if UI.Status and UI.Status.Parent then
-        UI.Status.Text = "Erro em " .. tostring(stage) .. ": " .. message
-    end
-end
-
-local function safeCall(stage, fn)
-    local ok, result = pcall(fn)
-
-    if not ok then
-        pushError(stage, result)
-        return false, result
-    end
-
-    return true, result
+local function ownerMatches(owner)
+    if owner == nil then return false end
+    local textOwner = tostring(owner)
+    return textOwner == Player.Name
+        or textOwner == tostring(Player.UserId)
+        or normalize(textOwner) == normalize(Player.Name)
 end
 
 local function addConnection(signal, callback, bucket)
-    local target = bucket or State.Connections
-
-    local ok, connection = pcall(function()
-        return signal:Connect(function(...)
-            local args = {...}
-            local callbackOk, callbackErr = pcall(function()
-                callback(unpack(args))
-            end)
-
-            if not callbackOk then
-                pushError("EVENT_CALLBACK", callbackErr)
-            end
-        end)
+    bucket = bucket or State.Connections
+    local connection = signal:Connect(function(...)
+        local args = {...}
+        local ok, err = pcall(function() callback(unpack(args)) end)
+        if not ok then
+            table.insert(State.Errors, {
+                Time = os.date("%H:%M:%S"),
+                Unix = os.time(),
+                Elapsed = elapsed(),
+                Error = tostring(err),
+            })
+        end
     end)
+    table.insert(bucket, connection)
+    return connection
+end
 
-    if ok and connection then
-        table.insert(target, connection)
-        return connection
+local function disconnectAll(bucket)
+    for i = #bucket, 1, -1 do
+        local c = bucket[i]
+        bucket[i] = nil
+        pcall(function() c:Disconnect() end)
+    end
+end
+
+local ALWAYS_STORE_EVENT = {
+    VERIFICATION_STARTED = true,
+    VERIFICATION_STOPPED = true,
+    SERVER_RESPONSE_RESEARCH_READY = true,
+}
+
+local function pushEvent(kind, details)
+    if not State.VerificationActive and not ALWAYS_STORE_EVENT[kind] then
+        return nil
     end
 
-    if not ok then
-        pushError("CONNECT", connection)
-    end
+    local item = {
+        Time = os.date("%H:%M:%S"),
+        Unix = os.time(),
+        Elapsed = elapsed(),
+        Kind = kind,
+        Details = details or {},
+    }
+    table.insert(State.Events, item)
+    while #State.Events > MAX_EVENTS do table.remove(State.Events, 1) end
+    return item
+end
 
+local function readObjectValue(obj)
+    if not obj or not obj.Parent then return nil end
+    if obj:IsA("ValueBase") then return parseNumber(obj.Value) end
+    if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+        return parseNumber(obj.Text)
+    end
     return nil
 end
 
-local function disconnectAll(list)
-    local old = list
-
-    for i = #old, 1, -1 do
-        local connection = old[i]
-        old[i] = nil
-
-        pcall(function()
-            connection:Disconnect()
-        end)
-    end
-end
-
-local function waitForLocalPlayer(timeout)
-    local startTime = os.clock()
-    local player = Players.LocalPlayer
-
-    while not player and os.clock() - startTime < timeout do
-        task.wait(0.1)
-        player = Players.LocalPlayer
-    end
-
-    return player
-end
-
-local function resolveGuiParent(player)
-    -- First choice for executor environments.
-    local gethuiFn = rawget(_G, "gethui")
-
-    if type(gethuiFn) ~= "function" then
-        local ok, env = pcall(function()
-            if type(getgenv) == "function" then
-                return getgenv()
+local function findTycoon()
+    local tycoons = workspace:FindFirstChild("Tycoons")
+    if not tycoons then return nil end
+    local best, bestScore = nil, -1
+    for _, tycoon in ipairs(tycoons:GetChildren()) do
+        local buttons = tycoon:FindFirstChild("Buttons")
+        local purchases = tycoon:FindFirstChild("Purchases")
+        if buttons and purchases then
+            local score = ownerMatches(attrCI(tycoon, "Owner")) and 100 or 0
+            for _, folder in ipairs({buttons, purchases}) do
+                local checked = 0
+                for _, child in ipairs(folder:GetChildren()) do
+                    checked = checked + 1
+                    if ownerMatches(attrCI(child, "Owner")) then
+                        score = score + 40
+                        break
+                    end
+                    if checked >= 100 then break end
+                end
             end
-            return nil
+            if score > bestScore then
+                best, bestScore = tycoon, score
+            end
+        end
+    end
+    return bestScore >= 40 and best or nil
+end
+
+local function scanNumericCandidates()
+    local money, collectors, rebirths = {}, {}, {}
+    local function consider(obj, rootKind)
+        if not obj then return end
+        local isValue = obj:IsA("ValueBase")
+        local isText = obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")
+        if not isValue and not isText then return end
+        local value = readObjectValue(obj)
+        if value == nil then return end
+
+        local path = safeFullName(obj)
+        local pathNorm = normalize(path)
+        local nameNorm = normalize(obj.Name)
+
+        if nameNorm == "money"
+        or string.find(nameNorm, "cash", 1, true)
+        or string.find(nameNorm, "coin", 1, true)
+        or string.find(nameNorm, "saldo", 1, true) then
+            table.insert(money, {Path=path, ClassName=obj.ClassName, RootKind=rootKind, Value=value})
+        end
+
+        if string.find(pathNorm, "collector", 1, true)
+        or string.find(pathNorm, "collect", 1, true) then
+            table.insert(collectors, {Path=path, ClassName=obj.ClassName, RootKind=rootKind, Value=value})
+        end
+
+        if string.find(nameNorm, "rebirth", 1, true)
+        or string.find(nameNorm, "prestige", 1, true) then
+            table.insert(rebirths, {Path=path, ClassName=obj.ClassName, RootKind=rootKind, Value=value})
+        end
+    end
+
+    local function scan(root, kind, limit)
+        if not root then return end
+        consider(root, kind)
+        local n = 0
+        for _, d in ipairs(root:GetDescendants()) do
+            n += 1
+            if n > limit then break end
+            consider(d, kind)
+        end
+    end
+
+    scan(Player:FindFirstChild("leaderstats"), "LEADERSTATS", 160)
+    scan(Player:FindFirstChild("PlayerGui"), "PLAYERGUI", 1800)
+    scan(State.Tycoon, "TYCOON", 1800)
+
+    State.MoneyCandidates = money
+    State.CollectorCandidates = collectors
+    State.RebirthCandidates = rebirths
+end
+
+local function choosePrimary(list, keyword)
+    for _, item in ipairs(list) do
+        if item.RootKind == "LEADERSTATS"
+        and normalize(item.Path):find(keyword, 1, true) then
+            return item
+        end
+    end
+    return list[1]
+end
+
+local function trimRecentRemoteInbound()
+    local now = elapsed()
+    local fresh = {}
+    for _, item in ipairs(State.RecentRemoteInbound) do
+        if now - item.Elapsed <= CORRELATION_WINDOW then
+            table.insert(fresh, item)
+        end
+    end
+    State.RecentRemoteInbound = fresh
+end
+
+local function correlate(kind, details)
+    trimRecentRemoteInbound()
+    if #State.RecentRemoteInbound == 0 then return end
+    local related = {}
+    for _, remoteEvent in ipairs(State.RecentRemoteInbound) do
+        table.insert(related, {
+            RemotePath = remoteEvent.Path,
+            RemoteName = remoteEvent.Name,
+            ClassName = remoteEvent.ClassName,
+            EventElapsed = remoteEvent.Elapsed,
+            DeltaSeconds = math.floor((elapsed() - remoteEvent.Elapsed) * 1000) / 1000,
+            ArgumentCount = remoteEvent.ArgumentCount,
+            ArgumentTypes = remoteEvent.ArgumentTypes,
+        })
+    end
+    local record = {
+        Time = os.date("%H:%M:%S"),
+        Unix = os.time(),
+        Elapsed = elapsed(),
+        ChangeKind = kind,
+        ChangeDetails = details,
+        RecentInboundRemotes = related,
+    }
+    table.insert(State.Correlations, record)
+    pushEvent("CORRELATION_OBSERVED", record)
+end
+
+
+local function snapshotEconomy()
+    local money = State.MoneyCandidates[1]
+    local collector = State.CollectorCandidates[1]
+    local rebirth = State.RebirthCandidates[1]
+
+    return {
+        Money = money and money.Value or State.LastMoney,
+        Collector = collector and collector.Value or State.LastCollector,
+        Rebirths = rebirth and rebirth.Value or State.LastRebirths,
+    }
+end
+
+local function nearestButtonInfo()
+    if not State.ButtonsFolder then return nil end
+
+    local character = Player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+
+    local best, bestDist = nil, math.huge
+
+    for _, button in ipairs(State.ButtonsFolder:GetChildren()) do
+        local part = button:FindFirstChild("Touch", true)
+        if part and part:IsA("BasePart") then
+            local dist = (part.Position - root.Position).Magnitude
+            if dist < bestDist then
+                bestDist = dist
+                best = {
+                    Name = button.Name,
+                    Path = safeFullName(button),
+                    Distance = math.floor(dist * 100) / 100,
+                    Price = attrCI(button, "Price") or attrCI(button, "Cost"),
+                    Rebirths = attrCI(button, "RequiredRebirths") or attrCI(button, "Rebirths"),
+                    Dependency = attrCI(button, "Dependency"),
+                    Attributes = getAttributes(button),
+                }
+            end
+        end
+    end
+
+    return best
+end
+
+local finalizePendingResponse
+
+
+local function expirePendingResponse(nowElapsed)
+    local pending = State.PendingPurchaseResponse
+    if not pending then return end
+    local started = pending.StartedElapsed or nowElapsed
+    if (nowElapsed - started) > PURCHASE_RESPONSE_WINDOW then
+        finalizePendingResponse("UNRESOLVED", "TIMEOUT", nowElapsed)
+    end
+end
+
+finalizePendingResponse = function(status, remoteName, remoteElapsed)
+    if not State.VerificationActive then return end
+
+    local pending = State.PendingPurchaseResponse or {
+        StartedUnix = os.time(),
+        StartedElapsed = remoteElapsed or elapsed(),
+        EconomyBefore = snapshotEconomy(),
+        NearbyButton = nearestButtonInfo(),
+    }
+
+    pending.Status = status
+    pending.RemoteName = remoteName
+    pending.SignalDirection = "SERVER_TO_CLIENT"
+    pending.RequirementResult =
+        status == "ACCEPTED" and "REQUIREMENTS_CONFIRMED_BY_SERVER_RESPONSE" or
+        status == "REJECTED" and "REQUIREMENTS_REJECTED_BY_SERVER_RESPONSE" or
+        "NO_TERMINAL_SERVER_RESPONSE"
+
+    pending.ResponseElapsed = remoteElapsed or elapsed()
+    pending.ResponseUnix = os.time()
+    pending.ResponseLatency = pending.ResponseElapsed - (pending.StartedElapsed or pending.ResponseElapsed)
+    pending.EconomyAfter = snapshotEconomy()
+
+    if pending.CandidateButton then
+        pending.TargetName = pending.CandidateButton.Name
+        pending.TargetPath = pending.CandidateButton.Path
+        pending.TargetInference = pending.TargetInference or "BUTTON_REMOVED"
+    elseif pending.NearbyButton then
+        pending.TargetName = pending.NearbyButton.Name
+        pending.TargetPath = pending.NearbyButton.Path
+        pending.TargetInference = pending.TargetInference or "NEARBY_BUTTON_FALLBACK"
+    end
+
+    if status == "REJECTED" and not pending.CandidateButton then
+        local nearby = nearestButtonInfo()
+        if nearby then
+            pending.NearbyButton = nearby
+            pending.TargetName = nearby.Name
+            pending.TargetPath = nearby.Path
+            pending.TargetInference = "NEARBY_BUTTON_AT_REJECTION"
+        end
+    end
+
+    if status == "ACCEPTED" then
+        State.ResponseCounters.Accepted += 1
+        State.LastAcceptedResponse = pending
+    elseif status == "REJECTED" then
+        State.ResponseCounters.Rejected += 1
+    else
+        State.ResponseCounters.Unresolved += 1
+    end
+
+    pending.Id = #State.PurchaseResponses + 1
+    table.insert(State.PurchaseResponses, pending)
+    State.PendingPurchaseResponse = nil
+
+    pushEvent("PURCHASE_RESPONSE_" .. status, {
+        Id = pending.Id,
+        RemoteName = remoteName,
+        ResponseLatency = pending.ResponseLatency,
+        TargetName = pending.TargetName,
+        TargetPath = pending.TargetPath,
+        TargetInference = pending.TargetInference,
+        RequirementResult = pending.RequirementResult,
+        SignalDirection = pending.SignalDirection,
+        CandidateButton = pending.CandidateButton,
+        NearbyButton = pending.NearbyButton,
+        EconomyBefore = pending.EconomyBefore,
+        EconomyAfter = pending.EconomyAfter,
+    })
+end
+
+local function notePurchaseStructure(kind, details)
+    if not State.VerificationActive then return end
+
+    local nowElapsed = elapsed()
+
+    if State.PendingPurchaseResponse then
+        local started = State.PendingPurchaseResponse.StartedElapsed or nowElapsed
+        if (nowElapsed - started) > PURCHASE_RESPONSE_WINDOW then
+            finalizePendingResponse("UNRESOLVED", "TIMEOUT", nowElapsed)
+        end
+    end
+
+    if kind == "BUTTON_REMOVED" then
+        State.LastRemovedButton = {
+            Details = details,
+            Elapsed = nowElapsed,
+            Unix = os.time(),
+        }
+
+        if State.PendingPurchaseResponse then
+            finalizePendingResponse("UNRESOLVED", "REPLACED_BY_NEW_BUTTON_REMOVAL", nowElapsed)
+        end
+
+        State.PendingPurchaseResponse = {
+            StartedUnix = os.time(),
+            StartedElapsed = nowElapsed,
+            EconomyBefore = snapshotEconomy(),
+            CandidateButton = details,
+            TargetInference = "BUTTON_REMOVED",
+            StructuralEvidence = {},
+        }
+
+        table.insert(State.PendingPurchaseResponse.StructuralEvidence, {
+            Kind = "BUTTON_REMOVED",
+            Elapsed = nowElapsed,
+            Details = details,
+        })
+        State.PendingPurchaseResponse.ButtonRemoved = details
+        return
+    end
+
+    if kind == "PURCHASE_ADDED" then
+        -- Important V2.3 rule:
+        -- PURCHASE_ADDED alone must NEVER open a new pending response.
+        if State.PendingPurchaseResponse then
+            State.PendingPurchaseResponse.StructuralEvidence = State.PendingPurchaseResponse.StructuralEvidence or {}
+            table.insert(State.PendingPurchaseResponse.StructuralEvidence, {
+                Kind = "PURCHASE_ADDED",
+                Elapsed = nowElapsed,
+                Details = details,
+            })
+            State.PendingPurchaseResponse.PurchaseAdded = details
+
+            local candidate = State.PendingPurchaseResponse.CandidateButton
+            if candidate and candidate.Name and details and details.Name == candidate.Name then
+                State.PendingPurchaseResponse.TargetConfirmedByPurchaseAdded = true
+            end
+            return
+        end
+
+        -- If the accepted response already closed a few milliseconds earlier,
+        -- attach PURCHASE_ADDED retroactively instead of creating UNRESOLVED noise.
+        local lastAccepted = State.LastAcceptedResponse
+        if lastAccepted and lastAccepted.ResponseElapsed and
+            (nowElapsed - lastAccepted.ResponseElapsed) <= PURCHASE_RESPONSE_WINDOW then
+
+            lastAccepted.StructuralEvidence = lastAccepted.StructuralEvidence or {}
+            table.insert(lastAccepted.StructuralEvidence, {
+                Kind = "PURCHASE_ADDED",
+                Elapsed = nowElapsed,
+                Details = details,
+            })
+            lastAccepted.PurchaseAdded = details
+
+            if lastAccepted.TargetName and details and details.Name == lastAccepted.TargetName then
+                lastAccepted.TargetConfirmedByPurchaseAdded = true
+            end
+
+            pushEvent("PURCHASE_RESPONSE_ENRICHED", {
+                Id = lastAccepted.Id,
+                Status = lastAccepted.Status,
+                TargetName = lastAccepted.TargetName,
+                TargetPath = lastAccepted.TargetPath,
+                PurchaseAdded = details,
+                TargetConfirmedByPurchaseAdded = lastAccepted.TargetConfirmedByPurchaseAdded == true,
+            })
+        end
+
+        return
+    end
+end
+
+local function catalogRemote(obj)
+    if not (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) then return end
+    local path = safeFullName(obj)
+    if State.Remotes[path] then return end
+
+    local info = {
+        Path = path,
+        Name = obj.Name,
+        ClassName = obj.ClassName,
+        Attributes = getAttributes(obj),
+        FirstSeenUnix = os.time(),
+        FirstSeenElapsed = elapsed(),
+        InboundEventsObserved = 0,
+    }
+    State.Remotes[path] = info
+    pushEvent("REMOTE_DISCOVERED", {Path=path, Name=obj.Name, ClassName=obj.ClassName})
+
+    if obj:IsA("RemoteEvent") then
+        addConnection(obj.OnClientEvent, function(...)
+            local args = {...}
+            local types = {}
+            for i, value in ipairs(args) do types[i] = typeof(value) end
+
+            info.InboundEventsObserved += 1
+            info.LastInboundUnix = os.time()
+            info.LastInboundElapsed = elapsed()
+            info.LastArgumentCount = #args
+            info.LastArgumentTypes = types
+
+            local inbound = {
+                Path = path,
+                Name = obj.Name,
+                ClassName = obj.ClassName,
+                Unix = os.time(),
+                Elapsed = elapsed(),
+                ArgumentCount = #args,
+                ArgumentTypes = types,
+            }
+
+            table.insert(State.RecentRemoteInbound, inbound)
+            trimRecentRemoteInbound()
+            pushEvent("REMOTE_ON_CLIENT_EVENT", inbound)
+
+            if obj.Name == "ButtonPurchased" then
+                expirePendingResponse(inbound.Elapsed)
+
+                -- If BUTTON_REMOVED happened immediately before this signal,
+                -- it is the strongest observable target identity.
+                local removed = State.LastRemovedButton
+                if removed and (inbound.Elapsed - removed.Elapsed) <= PURCHASE_RESPONSE_WINDOW then
+                    if not State.PendingPurchaseResponse then
+                        State.PendingPurchaseResponse = {
+                            StartedUnix = removed.Unix,
+                            StartedElapsed = removed.Elapsed,
+                            EconomyBefore = snapshotEconomy(),
+                            CandidateButton = removed.Details,
+                            ButtonRemoved = removed.Details,
+                            TargetInference = "BUTTON_REMOVED",
+                            StructuralEvidence = {},
+                        }
+                    elseif not State.PendingPurchaseResponse.CandidateButton then
+                        State.PendingPurchaseResponse.CandidateButton = removed.Details
+                        State.PendingPurchaseResponse.ButtonRemoved = removed.Details
+                        State.PendingPurchaseResponse.TargetInference = "BUTTON_REMOVED"
+                    end
+                end
+
+                finalizePendingResponse("ACCEPTED", obj.Name, inbound.Elapsed)
+
+            elseif obj.Name == "ButtonCannotPurchase" then
+                -- Rejection normally leaves the target button in place.
+                -- Use proximity only at the instant of the rejection and never
+                -- carry a previous successful purchase into this record.
+                State.PendingPurchaseResponse = {
+                    StartedUnix = os.time(),
+                    StartedElapsed = inbound.Elapsed,
+                    EconomyBefore = snapshotEconomy(),
+                    NearbyButton = nearestButtonInfo(),
+                    TargetInference = "NEARBY_BUTTON_AT_REJECTION",
+                    StructuralEvidence = {},
+                }
+                finalizePendingResponse("REJECTED", obj.Name, inbound.Elapsed)
+            end
         end)
-
-        if ok and env and type(env.gethui) == "function" then
-            gethuiFn = env.gethui
-        end
     end
+end
 
-    if type(gethuiFn) == "function" then
-        local ok, result = pcall(gethuiFn)
-        if ok and result then
-            return result, "gethui"
-        end
+local function scanRemotes()
+    for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+        catalogRemote(d)
     end
+end
 
-    -- Second choice: CoreGui.
-    local coreOk = pcall(function()
-        local probe = Instance.new("Folder")
-        probe.Name = "__PsicoGuiProbe"
-        probe.Parent = CoreGui
-        probe:Destroy()
+local function describeButton(button)
+    return {
+        Name = button.Name,
+        Path = safeFullName(button),
+        Attributes = getAttributes(button),
+        Price = attrCI(button, "Price") or attrCI(button, "Cost"),
+        Rebirths = attrCI(button, "RequiredRebirths") or attrCI(button, "Rebirths"),
+        Dependency = attrCI(button, "Dependency"),
+        Gamepass = attrCI(button, "Gamepass") or attrCI(button, "GamePassId"),
+        DevProduct = attrCI(button, "DevProduct") or attrCI(button, "DeveloperProductId"),
+        HasTouch = button:FindFirstChild("Touch", true) ~= nil,
+        HasTouchInterest = button:FindFirstChildWhichIsA("TouchTransmitter", true) ~= nil,
+        HasPrompt = button:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil,
+    }
+end
+
+local function describePurchase(purchase)
+    local prompt = purchase:FindFirstChildWhichIsA("ProximityPrompt", true)
+    local result = {
+        Name = purchase.Name,
+        Path = safeFullName(purchase),
+        Attributes = getAttributes(purchase),
+    }
+    if prompt then
+        result.Prompt = {
+            Path = safeFullName(prompt),
+            ActionText = prompt.ActionText,
+            ObjectText = prompt.ObjectText,
+            HoldDuration = prompt.HoldDuration,
+            MaxActivationDistance = prompt.MaxActivationDistance,
+            Enabled = prompt.Enabled,
+        }
+    end
+    return result
+end
+
+local function bindTycoon(tycoon)
+    disconnectAll(State.TycoonConnections)
+    State.Tycoon = tycoon
+    State.ButtonsFolder = tycoon and tycoon:FindFirstChild("Buttons") or nil
+    State.PurchasesFolder = tycoon and tycoon:FindFirstChild("Purchases") or nil
+    if not State.ButtonsFolder or not State.PurchasesFolder then return end
+
+    pushEvent("TYCOON_BOUND", {
+        Path=safeFullName(tycoon),
+        Buttons=#State.ButtonsFolder:GetChildren(),
+        Purchases=#State.PurchasesFolder:GetChildren(),
+    })
+
+    addConnection(State.ButtonsFolder.ChildAdded, function(child)
+        local details = describeButton(child)
+        pushEvent("BUTTON_ADDED", details)
+        correlate("BUTTON_ADDED", details)
+    end, State.TycoonConnections)
+
+    addConnection(State.ButtonsFolder.ChildRemoved, function(child)
+        local details = describeButton(child)
+        pushEvent("BUTTON_REMOVED", details)
+        notePurchaseStructure("BUTTON_REMOVED", details)
+        correlate("BUTTON_REMOVED", details)
+    end, State.TycoonConnections)
+
+    addConnection(State.PurchasesFolder.ChildAdded, function(child)
+        local details = describePurchase(child)
+        pushEvent("PURCHASE_ADDED", details)
+        notePurchaseStructure("PURCHASE_ADDED", details)
+        correlate("PURCHASE_ADDED", details)
+    end, State.TycoonConnections)
+end
+
+local function resolveGuiParent()
+    local ok, hui = pcall(function()
+        if type(gethui) == "function" then return gethui() end
     end)
+    if ok and hui then return hui end
 
-    if coreOk then
-        return CoreGui, "CoreGui"
-    end
+    local probeOk = pcall(function()
+        local f = Instance.new("Folder")
+        f.Parent = CoreGui
+        f:Destroy()
+    end)
+    if probeOk then return CoreGui end
 
-    -- Final fallback: PlayerGui.
-    local playerGui = player:FindFirstChildOfClass("PlayerGui")
-    if not playerGui then
-        playerGui = player:WaitForChild("PlayerGui", 10)
-    end
-
-    if playerGui then
-        return playerGui, "PlayerGui"
-    end
-
-    return nil, "NONE"
+    return Player:WaitForChild("PlayerGui")
 end
 
 local function round(gui, radius)
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, radius)
-    corner.Parent = gui
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius)
+    c.Parent = gui
 end
 
-local function clampNumber(value, low, high)
-    if value < low then
-        return low
-    end
-    if value > high then
-        return high
-    end
-    return value
-end
-
-local function resizeMenu()
-    if not UI.Main or not UI.Main.Parent then
-        return
-    end
-
-    local camera = workspace.CurrentCamera
-    if not camera then
-        return
-    end
-
-    local viewport = camera.ViewportSize
-    local width = clampNumber(math.floor(viewport.X * 0.44), 300, 420)
-    local height = clampNumber(math.floor(viewport.Y * 0.70), 250, 500)
-
-    UI.Main.Size = UDim2.new(0, width, 0, height)
-end
-
-local function setMinimized(value)
-    State.Minimized = value and true or false
-
-    if UI.Main and UI.Main.Parent then
-        UI.Main.Visible = not State.Minimized
-    end
-
-    if UI.Floating and UI.Floating.Parent then
-        UI.Floating.Visible = State.Minimized
-    end
-end
-
-local function setupDrag(frame, handle, isFloating)
+local function setupDrag(frame, handle)
     local dragging = false
-    local dragInput = nil
-    local dragStart = nil
-    local startPosition = nil
-    local moved = false
-    local suppressClick = false
+    local dragStart, startPos
 
     addConnection(handle.InputBegan, function(input)
-        local kind = input.UserInputType
-
-        if kind ~= Enum.UserInputType.MouseButton1
-        and kind ~= Enum.UserInputType.Touch then
-            return
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
         end
-
-        dragging = true
-        dragInput = input
-        dragStart = input.Position
-        startPosition = frame.Position
-        moved = false
-
-        local endConnection
-        endConnection = input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                dragging = false
-
-                if moved and isFloating then
-                    suppressClick = true
-                    task.delay(0.15, function()
-                        suppressClick = false
-                    end)
-                end
-
-                if endConnection then
-                    endConnection:Disconnect()
-                    endConnection = nil
-                end
-            end
-        end)
     end)
 
     addConnection(UserInputService.InputChanged, function(input)
-        if not dragging or not dragStart or not startPosition then
-            return
+        if not dragging or not dragStart or not startPos then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
         end
-
-        local valid = false
-
-        if dragInput and dragInput.UserInputType == Enum.UserInputType.Touch then
-            valid = (input == dragInput)
-        elseif input.UserInputType == Enum.UserInputType.MouseMovement then
-            valid = true
-        end
-
-        if not valid then
-            return
-        end
-
-        local delta = input.Position - dragStart
-
-        if delta.Magnitude >= DRAG_THRESHOLD then
-            moved = true
-        end
-
-        frame.Position = UDim2.new(
-            startPosition.X.Scale,
-            startPosition.X.Offset + delta.X,
-            startPosition.Y.Scale,
-            startPosition.Y.Offset + delta.Y
-        )
     end)
 
-    if isFloating then
-        addConnection(handle.MouseButton1Click, function()
-            if suppressClick then
-                return
-            end
+    addConnection(UserInputService.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
 
-            setMinimized(false)
-        end)
+
+local function setMinimized(minimized)
+    if not UI.Main or not UI.Floating then return end
+    UI.Main.Visible = not minimized
+    UI.Floating.Visible = minimized
+end
+
+local function beginVerification()
+    if State.VerificationActive then return end
+
+    State.VerificationActive = true
+    State.RecentRemoteInbound = {}
+    State.Correlations = {}
+    State.Events = {}
+    State.PurchaseResponses = {}
+    State.PendingPurchaseResponse = nil
+    State.LastRemovedButton = nil
+    State.LastAcceptedResponse = nil
+    State.ResponseCounters = {
+        Accepted = 0,
+        Rejected = 0,
+        Unresolved = 0,
+    }
+
+    local session = {
+        Id = #State.VerificationSessions + 1,
+        StartedUnix = os.time(),
+        StartedElapsed = elapsed(),
+        StartedMoney = State.LastMoney,
+        StartedCollector = State.LastCollector,
+        StartedRebirths = State.LastRebirths,
+        StartedTycoon = State.Tycoon and safeFullName(State.Tycoon) or nil,
+    }
+
+    State.CurrentVerificationSession = session
+    table.insert(State.VerificationSessions, session)
+
+    pushEvent("VERIFICATION_STARTED", {
+        SessionId = session.Id,
+        Money = State.LastMoney,
+        Collector = State.LastCollector,
+        Rebirths = State.LastRebirths,
+        Tycoon = session.StartedTycoon,
+    })
+
+    if UI.Toggle and UI.Toggle.Parent then
+        UI.Toggle.Text = "Parar verificacao"
+        UI.Toggle.BackgroundColor3 = Color3.fromRGB(86,43,48)
+    end
+
+    if UI.Status and UI.Status.Parent then
+        UI.Status.Text = "VERIFICACAO ATIVA | realize as compras e pare quando terminar"
+    end
+end
+
+local function stopVerification()
+    if not State.VerificationActive then return end
+
+    if State.PendingPurchaseResponse then
+        finalizePendingResponse("UNRESOLVED", "NO_TERMINAL_REMOTE", elapsed())
+    end
+
+    local session = State.CurrentVerificationSession
+    if session then
+        session.StoppedUnix = os.time()
+        session.StoppedElapsed = elapsed()
+        session.StoppedMoney = State.LastMoney
+        session.StoppedCollector = State.LastCollector
+        session.StoppedRebirths = State.LastRebirths
+        session.EventsCaptured = #State.Events
+        session.CorrelationsCaptured = #State.Correlations
+        session.PurchaseResponsesCaptured = #State.PurchaseResponses
+        session.Accepted = State.ResponseCounters.Accepted
+        session.Rejected = State.ResponseCounters.Rejected
+        session.Unresolved = State.ResponseCounters.Unresolved
+    end
+
+    pushEvent("VERIFICATION_STOPPED", {
+        SessionId = session and session.Id or nil,
+        Money = State.LastMoney,
+        Collector = State.LastCollector,
+        Rebirths = State.LastRebirths,
+        EventsCaptured = #State.Events,
+        CorrelationsCaptured = #State.Correlations,
+        PurchaseResponsesCaptured = #State.PurchaseResponses,
+        Accepted = State.ResponseCounters.Accepted,
+        Rejected = State.ResponseCounters.Rejected,
+        Unresolved = State.ResponseCounters.Unresolved,
+    })
+
+    State.VerificationActive = false
+    State.CurrentVerificationSession = nil
+    State.RecentRemoteInbound = {}
+
+    if UI.Toggle and UI.Toggle.Parent then
+        UI.Toggle.Text = "Iniciar verificacao"
+        UI.Toggle.BackgroundColor3 = Color3.fromRGB(18,49,88)
+    end
+
+    if UI.Status and UI.Status.Parent then
+        UI.Status.Text =
+            "VERIFICACAO PAUSADA | Eventos: " .. tostring(#State.Events) ..
+            " | Correlacoes: " .. tostring(#State.Correlations)
     end
 end
 
 local function createGui()
-    local parent, parentKind = resolveGuiParent(State.Player)
-
-    if not parent then
-        error("Nenhum parent de GUI disponivel: gethui/CoreGui/PlayerGui falharam")
-    end
-
-    -- Remove only this version's GUI.
+    local parent = resolveGuiParent()
     local old = parent:FindFirstChild(GUI_NAME)
-    if old then
-        old:Destroy()
-    end
+    if old then old:Destroy() end
 
     local screen = Instance.new("ScreenGui")
     screen.Name = GUI_NAME
-    screen.Enabled = true
     screen.ResetOnSpawn = false
     screen.IgnoreGuiInset = true
     screen.DisplayOrder = 1000000
-    screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     screen.Parent = parent
 
     local main = Instance.new("Frame")
-    main.Name = "Main"
-    main.AnchorPoint = Vector2.new(0.5, 0.5)
-    main.Position = UDim2.new(0.5, 0, 0.5, 0)
-    main.Size = UDim2.new(0, 350, 0, 360)
-    main.BackgroundColor3 = COLORS.Background
+    main.Size = UDim2.new(0, 400, 0, 390)
+    main.Position = UDim2.new(0.5, -200, 0.5, -195)
+    main.BackgroundColor3 = Color3.fromRGB(18,23,31)
     main.BorderSizePixel = 0
-    main.Visible = true
-    main.ZIndex = 10
+    main.Active = true
     main.Parent = screen
     round(main, 12)
 
     local header = Instance.new("Frame")
-    header.Name = "Header"
-    header.Size = UDim2.new(1, 0, 0, 50)
-    header.BackgroundColor3 = COLORS.Header
+    header.Size = UDim2.new(1, 0, 0, 48)
+    header.BackgroundColor3 = Color3.fromRGB(24,31,43)
     header.BorderSizePixel = 0
-    header.Active = true
-    header.ZIndex = 11
     header.Parent = main
     round(header, 12)
 
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -100, 0, 23)
-    title.Position = UDim2.new(0, 12, 0, 5)
+    title.Size = UDim2.new(1, -132, 1, 0)
+    title.Position = UDim2.new(0, 12, 0, 0)
     title.BackgroundTransparency = 1
     title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Text = "TYCOON PURCHASE DIAGNOSTIC"
-    title.TextColor3 = COLORS.Accent
+    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V2.3"
+    title.TextColor3 = Color3.fromRGB(83,226,169)
     title.Font = Enum.Font.GothamBold
-    title.TextSize = 13
-    title.ZIndex = 12
+    title.TextSize = 11
     title.Parent = header
 
-    local version = Instance.new("TextLabel")
-    version.Size = UDim2.new(1, -100, 0, 16)
-    version.Position = UDim2.new(0, 12, 0, 28)
-    version.BackgroundTransparency = 1
-    version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "V2.4.2 - stability build"
-    version.TextColor3 = COLORS.Muted
-    version.Font = Enum.Font.Gotham
-    version.TextSize = 10
-    version.ZIndex = 12
-    version.Parent = header
-
     local minimize = Instance.new("TextButton")
-    minimize.Name = "Minimize"
     minimize.Size = UDim2.new(0, 34, 0, 34)
-    minimize.Position = UDim2.new(1, -78, 0, 8)
-    minimize.BackgroundColor3 = COLORS.Floating
-    minimize.BorderSizePixel = 0
-    minimize.Text = "-"
-    minimize.TextColor3 = Color3.new(1, 1, 1)
+    minimize.Position = UDim2.new(1, -82, 0, 7)
+    minimize.BackgroundColor3 = Color3.fromRGB(18,49,88)
+    minimize.TextColor3 = Color3.new(1,1,1)
+    minimize.Text = "—"
     minimize.Font = Enum.Font.GothamBold
-    minimize.TextSize = 18
-    minimize.ZIndex = 14
     minimize.Parent = header
     round(minimize, 8)
 
     local close = Instance.new("TextButton")
-    close.Name = "Close"
     close.Size = UDim2.new(0, 34, 0, 34)
-    close.Position = UDim2.new(1, -40, 0, 8)
-    close.BackgroundColor3 = COLORS.Danger
-    close.BorderSizePixel = 0
+    close.Position = UDim2.new(1, -42, 0, 7)
+    close.BackgroundColor3 = Color3.fromRGB(86,43,48)
+    close.TextColor3 = Color3.new(1,1,1)
     close.Text = "X"
-    close.TextColor3 = Color3.new(1, 1, 1)
     close.Font = Enum.Font.GothamBold
-    close.TextSize = 13
-    close.ZIndex = 14
     close.Parent = header
     round(close, 8)
 
-    local body = Instance.new("Frame")
-    body.Name = "Body"
-    body.Position = UDim2.new(0, 8, 0, 58)
-    body.Size = UDim2.new(1, -16, 1, -66)
-    body.BackgroundTransparency = 1
-    body.ZIndex = 10
-    body.Parent = main
-
     local status = Instance.new("TextLabel")
-    status.Name = "Status"
-    status.Size = UDim2.new(1, 0, 0, 38)
-    status.BackgroundColor3 = COLORS.Card
-    status.BorderSizePixel = 0
-    status.TextColor3 = COLORS.Text
+    status.Size = UDim2.new(1, -16, 0, 58)
+    status.Position = UDim2.new(0, 8, 0, 56)
+    status.BackgroundColor3 = Color3.fromRGB(29,37,51)
+    status.TextColor3 = Color3.fromRGB(238,242,250)
     status.TextWrapped = true
-    status.Text = "Interface aberta. Inicializando analisador..."
     status.Font = Enum.Font.Gotham
     status.TextSize = 10
-    status.ZIndex = 11
-    status.Parent = body
+    status.Text = "Inicializando pesquisa de resposta do servidor..."
+    status.Parent = main
     round(status, 8)
 
-    local money = Instance.new("TextLabel")
-    money.Name = "Money"
-    money.Position = UDim2.new(0, 0, 0, 44)
-    money.Size = UDim2.new(0.5, -3, 0, 24)
-    money.BackgroundTransparency = 1
-    money.TextXAlignment = Enum.TextXAlignment.Left
-    money.TextColor3 = COLORS.Accent
-    money.Text = "Money: procurando..."
-    money.Font = Enum.Font.GothamBold
-    money.TextSize = 10
-    money.ZIndex = 11
-    money.Parent = body
+    local log = Instance.new("TextLabel")
+    log.Size = UDim2.new(1, -16, 1, -210)
+    log.Position = UDim2.new(0, 8, 0, 122)
+    log.BackgroundColor3 = Color3.fromRGB(14,19,27)
+    log.TextColor3 = Color3.fromRGB(238,242,250)
+    log.TextXAlignment = Enum.TextXAlignment.Left
+    log.TextYAlignment = Enum.TextYAlignment.Top
+    log.TextWrapped = true
+    log.Font = Enum.Font.Code
+    log.TextSize = 10
+    log.Text = "Aguardando eventos..."
+    log.Parent = main
+    round(log, 8)
 
-    local rebirths = Instance.new("TextLabel")
-    rebirths.Name = "Rebirths"
-    rebirths.Position = UDim2.new(0.5, 3, 0, 44)
-    rebirths.Size = UDim2.new(0.5, -3, 0, 24)
-    rebirths.BackgroundTransparency = 1
-    rebirths.TextXAlignment = Enum.TextXAlignment.Right
-    rebirths.TextColor3 = COLORS.Accent
-    rebirths.Text = "Rebirths: procurando..."
-    rebirths.Font = Enum.Font.GothamBold
-    rebirths.TextSize = 10
-    rebirths.ZIndex = 11
-    rebirths.Parent = body
-
-    local health = Instance.new("TextLabel")
-    health.Name = "Health"
-    health.Position = UDim2.new(0, 0, 0, 70)
-    health.Size = UDim2.new(1, 0, 0, 30)
-    health.BackgroundTransparency = 1
-    health.TextXAlignment = Enum.TextXAlignment.Left
-    health.TextWrapped = true
-    health.TextColor3 = COLORS.Muted
-    health.Text = "Motor: iniciando..."
-    health.Font = Enum.Font.Gotham
-    health.TextSize = 9
-    health.ZIndex = 11
-    health.Parent = body
-
-    local scroll = Instance.new("ScrollingFrame")
-    scroll.Name = "Log"
-    scroll.Position = UDim2.new(0, 0, 0, 102)
-    scroll.Size = UDim2.new(1, 0, 1, -188)
-    scroll.BackgroundColor3 = COLORS.CardDark
-    scroll.BorderSizePixel = 0
-    scroll.ScrollBarThickness = 4
-    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    scroll.ZIndex = 11
-    scroll.Parent = body
-    round(scroll, 8)
-
-    local padding = Instance.new("UIPadding")
-    padding.PaddingTop = UDim.new(0, 7)
-    padding.PaddingBottom = UDim.new(0, 7)
-    padding.PaddingLeft = UDim.new(0, 8)
-    padding.PaddingRight = UDim.new(0, 8)
-    padding.Parent = scroll
-
-    local live = Instance.new("TextLabel")
-    live.Name = "LiveText"
-    live.Size = UDim2.new(1, 0, 0, 140)
-    live.AutomaticSize = Enum.AutomaticSize.Y
-    live.BackgroundTransparency = 1
-    live.TextWrapped = true
-    live.TextXAlignment = Enum.TextXAlignment.Left
-    live.TextYAlignment = Enum.TextYAlignment.Top
-    live.TextColor3 = COLORS.Text
-    live.Text = "[BOOT] GUI criada em " .. parentKind
-    live.Font = Enum.Font.Code
-    live.TextSize = 10
-    live.ZIndex = 12
-    live.Parent = scroll
-
-    local readToggle = Instance.new("TextButton")
-    readToggle.Name = "ReadToggle"
-    readToggle.Position = UDim2.new(0, 0, 1, -80)
-    readToggle.Size = UDim2.new(1, 0, 0, 36)
-    readToggle.BackgroundColor3 = COLORS.Floating
-    readToggle.BorderSizePixel = 0
-    readToggle.Text = "Iniciar leitura de dados"
-    readToggle.TextColor3 = COLORS.Text
-    readToggle.Font = Enum.Font.GothamBold
-    readToggle.TextSize = 11
-    readToggle.ZIndex = 12
-    readToggle.Parent = body
-    round(readToggle, 8)
+    local toggle = Instance.new("TextButton")
+    toggle.Size = UDim2.new(1, -16, 0, 36)
+    toggle.Position = UDim2.new(0, 8, 1, -86)
+    toggle.BackgroundColor3 = Color3.fromRGB(18,49,88)
+    toggle.TextColor3 = Color3.fromRGB(238,242,250)
+    toggle.Font = Enum.Font.GothamBold
+    toggle.TextSize = 11
+    toggle.Text = "Iniciar verificacao"
+    toggle.Parent = main
+    round(toggle, 8)
 
     local export = Instance.new("TextButton")
-    export.Name = "Export"
-    export.Position = UDim2.new(0, 0, 1, -38)
-    export.Size = UDim2.new(1, 0, 0, 36)
-    export.BackgroundColor3 = COLORS.Card
-    export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio V2.4.2 (.txt)"
-    export.TextColor3 = COLORS.Text
+    export.Size = UDim2.new(1, -16, 0, 36)
+    export.Position = UDim2.new(0, 8, 1, -44)
+    export.BackgroundColor3 = Color3.fromRGB(18,49,88)
+    export.TextColor3 = Color3.fromRGB(238,242,250)
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
-    export.ZIndex = 12
-    export.Parent = body
+    export.Text = "Exportar SERVER RESPONSE V2.3 (.txt)"
+    export.Parent = main
     round(export, 8)
 
     local floating = Instance.new("TextButton")
     floating.Name = "RestoreFloatingButton"
     floating.Size = UDim2.new(0, 60, 0, 60)
     floating.Position = UDim2.new(0, 18, 0.5, -30)
-    floating.BackgroundColor3 = COLORS.Floating
-    floating.BorderSizePixel = 0
-    floating.Text = "V2.4.2"
-    floating.TextColor3 = Color3.fromRGB(240, 246, 255)
+    floating.BackgroundColor3 = Color3.fromRGB(18,49,88)
+    floating.TextColor3 = Color3.new(1,1,1)
+    floating.Text = "SR V2"
     floating.Font = Enum.Font.GothamBold
     floating.TextSize = 11
     floating.Visible = false
@@ -817,1898 +1001,209 @@ local function createGui()
     UI.Main = main
     UI.Header = header
     UI.Status = status
-    UI.Money = money
-    UI.Rebirths = rebirths
-    UI.Health = health
-    UI.Live = live
-    UI.ReadToggle = readToggle
+    UI.Log = log
     UI.Export = export
+    UI.Toggle = toggle
     UI.Minimize = minimize
-    UI.Close = close
     UI.Floating = floating
-    UI.ParentKind = parentKind
 
-    setupDrag(main, header, false)
-    setupDrag(floating, floating, true)
+    setupDrag(main, header)
+    setupDrag(floating, floating)
 
     addConnection(minimize.MouseButton1Click, function()
         setMinimized(true)
     end)
 
-    addConnection(close.MouseButton1Click, function()
-        State.Running = false
+    addConnection(floating.MouseButton1Click, function()
+        setMinimized(false)
+    end)
 
-        if UI.Screen and UI.Screen.Parent then
-            UI.Screen:Destroy()
+    addConnection(toggle.MouseButton1Click, function()
+        if State.VerificationActive then
+            stopVerification()
+        else
+            beginVerification()
         end
+    end)
 
+    addConnection(close.MouseButton1Click, function()
+        if State.VerificationActive then
+            stopVerification()
+        end
+        State.Running = false
         disconnectAll(State.TycoonConnections)
         disconnectAll(State.Connections)
+        screen:Destroy()
     end)
 
-    resizeMenu()
-
-    local camera = workspace.CurrentCamera
-    if camera then
-        addConnection(camera:GetPropertyChangedSignal("ViewportSize"), function()
-            resizeMenu()
-        end)
-    end
-
-    State.Health.UI = "ACTIVE"
-
-    return parentKind
-end
-
--- ============================================================
--- GUI BOOTSTRAP FIRST
--- ============================================================
-
-State.Player = waitForLocalPlayer(10)
-
-if not State.Player then
-    warn("[Tycoon Diagnostic V2.4.2] LocalPlayer indisponivel.")
-    return
-end
-
-local guiOk, guiResult = pcall(createGui)
-
-if not guiOk then
-    warn("[Tycoon Diagnostic V2.4.2] GUI ERROR: " .. tostring(guiResult))
-    return
-end
-
-State.Health.Bootstrap = "GUI_OK"
-
-pushEvent("SYSTEM", "GUI_READY", {
-    Version = VERSION,
-    Parent = tostring(guiResult),
-})
-
--- From this point onward, a backend error should not prevent the GUI
--- from having appeared.
-
-local function describeButton(button)
-    local info = {
-        Name = button.Name,
-        Path = safeFullName(button),
-        Price = attrCI(button, "Price"),
-        Cost = attrCI(button, "Cost"),
-        Owner = attrCI(button, "Owner"),
-        Rebirths = attrCI(button, "Rebirths"),
-        RequiredRebirths = attrCI(button, "RequiredRebirths"),
-        LinkedPurchases = attrCI(button, "LinkedPurchases"),
-        ProductId = attrCI(button, "ProductId"),
-        DeveloperProductId = attrCI(button, "DeveloperProductId"),
-        GamePassId = attrCI(button, "GamePassId"),
-        Gamepass = attrCI(button, "Gamepass"),
-        DevProduct = attrCI(button, "DevProduct"),
-        NonPurchase = attrCI(button, "NonPurchase"),
-        Dependency = attrCI(button, "Dependency"),
-        Kills = attrCI(button, "Kills"),
-        Robux = attrCI(button, "Robux"),
-        Attributes = getAttributes(button),
-        HasTouch = button:FindFirstChild("Touch", true) ~= nil,
-        HasTouchInterest = button:FindFirstChildWhichIsA("TouchTransmitter", true) ~= nil,
-        HasPrompt = button:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil,
-    }
-
-    local dependency = tostring(info.Dependency or "")
-    local name = tostring(info.Name or "")
-
-    if string.find(normalize(dependency), "bunker", 1, true)
-    or string.find(normalize(name), "bunker", 1, true) then
-        info.Zone = "BUNKER"
-        info.MovementPolicy = "USE_GAME_TRANSITION"
-    else
-        info.Zone = "MAIN_TYCOON"
-        info.MovementPolicy = "NORMAL_LOCAL_ACCESS"
-    end
-
-    return info
-end
-
-local function describePurchase(purchase)
-    local prompt = purchase:FindFirstChildWhichIsA("ProximityPrompt", true)
-
-    local info = {
-        Name = purchase.Name,
-        Path = safeFullName(purchase),
-        Owner = attrCI(purchase, "Owner"),
-        Rebirths = attrCI(purchase, "Rebirths"),
-        LinkedPurchases = attrCI(purchase, "LinkedPurchases"),
-        ProductId = attrCI(purchase, "ProductId"),
-        DeveloperProductId = attrCI(purchase, "DeveloperProductId"),
-        GamePassId = attrCI(purchase, "GamePassId"),
-        Gamepass = attrCI(purchase, "Gamepass"),
-        DevProduct = attrCI(purchase, "DevProduct"),
-        NonPurchase = attrCI(purchase, "NonPurchase"),
-        Dependency = attrCI(purchase, "Dependency"),
-        Kills = attrCI(purchase, "Kills"),
-        Attributes = getAttributes(purchase),
-    }
-
-    if prompt then
-        info.ProximityPrompt = {
-            Path = safeFullName(prompt),
-            ActionText = prompt.ActionText,
-            ObjectText = prompt.ObjectText,
-            HoldDuration = prompt.HoldDuration,
-            MaxActivationDistance = prompt.MaxActivationDistance,
-            Enabled = prompt.Enabled,
-        }
-    end
-
-    local dependency = tostring(info.Dependency or "")
-    local name = tostring(info.Name or "")
-
-    if string.find(normalize(dependency), "bunker", 1, true)
-    or string.find(normalize(name), "bunker", 1, true) then
-        info.Zone = "BUNKER"
-        info.MovementPolicy = "USE_GAME_TRANSITION"
-    else
-        info.Zone = "MAIN_TYCOON"
-        info.MovementPolicy = "NORMAL_LOCAL_ACCESS"
-    end
-
-    return info
-end
-
-
-local function textContains(value, needle)
-    return string.find(normalize(value), normalize(needle), 1, true) ~= nil
-end
-
-local function inferLogicalZone(info)
-    info = info or {}
-
-    local name = tostring(info.Name or "")
-    local dependency = tostring(info.Dependency or "")
-    local path = tostring(info.Path or "")
-
-    if textContains(name, "Bunker")
-    or textContains(dependency, "Bunker")
-    or textContains(path, ".Bunker") then
-        return "BUNKER"
-    end
-
-    return "MAIN_TYCOON"
-end
-
-local function modelPosition(instance)
-    if not instance or not instance.Parent then
-        return nil
-    end
-
-    local ok, position = pcall(function()
-        if instance:IsA("Model") then
-            return instance:GetPivot().Position
-        end
-
-        if instance:IsA("BasePart") then
-            return instance.Position
-        end
-
-        local part = instance:FindFirstChildWhichIsA("BasePart", true)
-        return part and part.Position or nil
-    end)
-
-    if ok then
-        return position
-    end
-
-    return nil
-end
-
-
-local function stageNumberFromDependency(dependency)
-    local text = tostring(dependency or "")
-
-    local direct = string.match(text, "[Ff]loor%s*(%d+)")
-    if direct then
-        return tonumber(direct)
-    end
-
-    return nil
-end
-
-local function recordStageUnlock(buttonInfo, reason)
-    if not buttonInfo then
-        return
-    end
-
-    local floor = stageNumberFromDependency(buttonInfo.Dependency)
-        or tonumber(State.MainFloor)
-        or 1
-
-    local stageName = "Floor" .. tostring(floor)
-    local name = tostring(buttonInfo.Name or "?")
-    local seenKey = stageName .. "|" .. name
-
-    if State.StageUnlockSeen[seenKey] then
-        return
-    end
-
-    State.StageUnlockSeen[seenKey] = true
-
-    local bucket = nil
-
-    for _, item in ipairs(State.StageUnlocks) do
-        if item.Stage == stageName then
-            bucket = item
-            break
-        end
-    end
-
-    if not bucket then
-        bucket = {
-            Stage = stageName,
-            Floor = floor,
-            FirstObservedUnix = os.time(),
-            FirstObservedElapsed = elapsed(),
-            Buttons = {},
-        }
-
-        table.insert(State.StageUnlocks, bucket)
-    end
-
-    table.insert(bucket.Buttons, {
-        Name = name,
-        Path = buttonInfo.Path,
-        Dependency = buttonInfo.Dependency,
-        Zone = buttonInfo.Zone or inferLogicalZone(buttonInfo),
-        Type = (buttonInfo.RequiredRebirths or buttonInfo.Rebirths)
-            and "REBIRTH"
-            or ((buttonInfo.Price or buttonInfo.Cost) and "TYCOON_MONEY" or "UNKNOWN"),
-        Reason = reason or "BUTTON_AVAILABLE",
-        ObservedUnix = os.time(),
-        ObservedElapsed = elapsed(),
-    })
-end
-
-local function detectMainFloor()
-    if not State.PurchasesFolder then
-        return State.MainFloor or 1, "Purchases folder unavailable"
-    end
-
-    if State.PurchasesFolder:FindFirstChild("Floor3") then
-        return 3, "Floor3 exists in Purchases"
-    end
-
-    if State.PurchasesFolder:FindFirstChild("Floor2") then
-        return 2, "Floor2 exists in Purchases"
-    end
-
-    return 1, "Floor2/Floor3 not yet purchased"
-end
-
-local function setMainFloor(newFloor, evidence)
-    newFloor = tonumber(newFloor) or 1
-
-    if State.MainFloor == newFloor then
-        State.Health.Floor = tostring(newFloor)
-        return
-    end
-
-    local previous = State.MainFloor
-    State.MainFloor = newFloor
-    State.Health.Floor = tostring(newFloor)
-
-    local transition = {
-        Time = clockText(),
-        Unix = os.time(),
-        Elapsed = elapsed(),
-        From = previous,
-        To = newFloor,
-        Evidence = evidence,
-    }
-
-    table.insert(State.FloorTransitions, transition)
-
-    if State.Reading then
-        pushEvent("FLOOR_CHANGED", "Floor " .. tostring(newFloor), transition)
-    end
-end
-
-local function setZone(newZone, evidence)
-    newZone = tostring(newZone or "UNKNOWN")
-
-    if State.CurrentZone == newZone then
-        State.ZoneEvidence = evidence or State.ZoneEvidence
-        State.Health.Zone = newZone
-        return
-    end
-
-    local previous = State.CurrentZone
-    State.CurrentZone = newZone
-    State.ZoneEvidence = evidence or "no evidence"
-    State.Health.Zone = newZone
-
-    local transition = {
-        Time = clockText(),
-        Unix = os.time(),
-        Elapsed = elapsed(),
-        From = previous,
-        To = newZone,
-        Evidence = State.ZoneEvidence,
-    }
-
-    table.insert(State.ZoneTransitions, transition)
-
-    if State.Reading then
-        pushEvent("ZONE_CHANGED", newZone, transition)
-    end
-end
-
-local function detectZoneByPosition()
-    local character = State.Player and State.Player.Character
-    local root = character and character:FindFirstChild("HumanoidRootPart")
-
-    if not root then
-        return "UNKNOWN", "HumanoidRootPart unavailable"
-    end
-
-    -- A recent legitimate Enter/Exit prompt is stronger evidence than raw distance.
-    if State.LastTransitionPrompt then
-        local age = os.clock() - (State.LastTransitionPrompt.Clock or 0)
-
-        if age <= 8 then
-            if State.LastTransitionPrompt.Direction == "ENTER_BUNKER" then
-                return "BUNKER", "recent Bunker Enter prompt"
-            elseif State.LastTransitionPrompt.Direction == "EXIT_BUNKER" then
-                return "MAIN_TYCOON", "recent Bunker Exit prompt"
-            end
-        end
-    end
-
-    local nearestBunker = math.huge
-    local nearestMain = math.huge
-
-    local function inspectFolder(folder, isButtons)
-        if not folder then
-            return
-        end
-
-        local count = 0
-
-        for _, child in ipairs(folder:GetChildren()) do
-            count = count + 1
-            if count > 120 then
-                break
-            end
-
-            if child:IsA("Model") or child:IsA("Folder") then
-                local info = isButtons
-                    and (State.ButtonCache[child.Name] or describeButton(child))
-                    or describePurchase(child)
-
-                local position = modelPosition(child)
-
-                if position then
-                    local distance = (root.Position - position).Magnitude
-
-                    if inferLogicalZone(info) == "BUNKER" then
-                        if distance < nearestBunker then
-                            nearestBunker = distance
-                        end
-                    else
-                        if distance < nearestMain then
-                            nearestMain = distance
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    inspectFolder(State.ButtonsFolder, true)
-    inspectFolder(State.PurchasesFolder, false)
-
-    if nearestBunker <= 90 and nearestBunker < nearestMain then
-        return "BUNKER",
-            "nearest Bunker-related object=" .. tostring(math.floor(nearestBunker)) .. " studs"
-    end
-
-    if nearestMain <= 180 then
-        return "MAIN_TYCOON",
-            "nearest main Tycoon object=" .. tostring(math.floor(nearestMain)) .. " studs"
-    end
-
-    if nearestBunker <= 180 then
-        return "BUNKER",
-            "near Bunker-related objects=" .. tostring(math.floor(nearestBunker)) .. " studs"
-    end
-
-    return "OUTSIDE_TYCOON", "far from known Tycoon/Bunker purchase objects"
-end
-
-local function classifyTransitionPrompt(prompt)
-    local action = normalize(prompt and prompt.ActionText)
-    local object = normalize(prompt and prompt.ObjectText)
-    local path = normalize(prompt and safeFullName(prompt))
-
-    local bunkerEvidence =
-        string.find(object, "bunker", 1, true)
-        or string.find(path, "bunker", 1, true)
-
-    if bunkerEvidence and string.find(action, "enter", 1, true) then
-        return "ENTER_BUNKER"
-    end
-
-    if bunkerEvidence
-    and (string.find(action, "exit", 1, true)
-        or string.find(action, "leave", 1, true)
-        or string.find(action, "return", 1, true)) then
-        return "EXIT_BUNKER"
-    end
-
-    return nil
-end
-
-local function watchTransitionPrompts(instance)
-    if not instance then
-        return
-    end
-
-    local prompts = {}
-
-    if instance:IsA("ProximityPrompt") then
-        table.insert(prompts, instance)
-    end
-
-    for _, descendant in ipairs(instance:GetDescendants()) do
-        if descendant:IsA("ProximityPrompt") then
-            table.insert(prompts, descendant)
-        end
-    end
-
-    for _, prompt in ipairs(prompts) do
-        if not State.WatchedTransitionPrompts[prompt] then
-            local direction = classifyTransitionPrompt(prompt)
-
-            if direction then
-                State.WatchedTransitionPrompts[prompt] = true
-
-                addConnection(prompt.Triggered, function(player)
-                    if player ~= State.Player then
-                        return
-                    end
-
-                    local item = {
-                        Direction = direction,
-                        Clock = os.clock(),
-                        Time = clockText(),
-                        Unix = os.time(),
-                        Path = safeFullName(prompt),
-                        ActionText = prompt.ActionText,
-                        ObjectText = prompt.ObjectText,
-                    }
-
-                    State.LastTransitionPrompt = item
-
-                    if direction == "ENTER_BUNKER" then
-                        setZone("BUNKER", "Bunker Enter prompt triggered by LocalPlayer")
-                    elseif direction == "EXIT_BUNKER" then
-                        setZone("MAIN_TYCOON", "Bunker Exit prompt triggered by LocalPlayer")
-                    end
-
-                    if State.Reading then
-                        pushEvent("TRANSITION_PROMPT", direction, item)
-                    end
-                end, State.TycoonConnections)
-            end
-        end
-    end
-end
-
-local function classify(buttonInfo, purchaseInfo)
-    local button = buttonInfo or {}
-    local purchase = purchaseInfo or {}
-
-    local evidence = {}
-
-    local price = parseNumber(button.Price or button.Cost)
-    local requiredRebirths = parseNumber(button.RequiredRebirths or button.Rebirths)
-    local killsRequired = parseNumber(button.Kills or purchase.Kills)
-
-    local gamepass = button.Gamepass or purchase.Gamepass
-    local devProduct = button.DevProduct or purchase.DevProduct
-    local productId = button.ProductId or purchase.ProductId
-    local developerProductId = button.DeveloperProductId or purchase.DeveloperProductId
-    local gamePassId = button.GamePassId or purchase.GamePassId
-    local robux = button.Robux
-
-    local hasMarketplaceMarker =
-        (gamepass ~= nil and tostring(gamepass) ~= "")
-        or (devProduct ~= nil and tostring(devProduct) ~= "")
-        or (productId ~= nil and tostring(productId) ~= "")
-        or (developerProductId ~= nil and tostring(developerProductId) ~= "")
-        or (gamePassId ~= nil and tostring(gamePassId) ~= "")
-        or (robux ~= nil and tostring(robux) ~= "")
-
-    if price and price > 0 then
-        table.insert(evidence, "Price/Cost=" .. tostring(price))
-    end
-
-    if requiredRebirths and requiredRebirths > 0 then
-        table.insert(evidence, "Rebirth requirement=" .. tostring(requiredRebirths))
-    end
-
-    if killsRequired and killsRequired > 0 then
-        table.insert(evidence, "Kills requirement=" .. tostring(killsRequired))
-    end
-
-    if gamepass ~= nil and tostring(gamepass) ~= "" then
-        table.insert(evidence, "Gamepass=" .. tostring(gamepass))
-    end
-    if devProduct ~= nil and tostring(devProduct) ~= "" then
-        table.insert(evidence, "DevProduct=" .. tostring(devProduct))
-    end
-    if productId ~= nil and tostring(productId) ~= "" then
-        table.insert(evidence, "ProductId=" .. tostring(productId))
-    end
-    if developerProductId ~= nil and tostring(developerProductId) ~= "" then
-        table.insert(evidence, "DeveloperProductId=" .. tostring(developerProductId))
-    end
-    if gamePassId ~= nil and tostring(gamePassId) ~= "" then
-        table.insert(evidence, "GamePassId=" .. tostring(gamePassId))
-    end
-    if robux ~= nil and tostring(robux) ~= "" then
-        table.insert(evidence, "Robux=" .. tostring(robux))
-    end
-
-    local classType = "UNKNOWN"
-    local confidence = "unknown"
-    local score = 0
-    local eligible = false
-    local eligibilityReason = "Insufficient evidence"
-
-    if hasMarketplaceMarker and killsRequired and killsRequired > 0 then
-        classType = "KILLS_OR_PREMIUM"
-        confidence = "high"
-        score = 14
-        eligible = false
-        eligibilityReason = "Ignored: item exposes Kills and Marketplace/premium evidence"
-    elseif hasMarketplaceMarker then
-        classType = "ROBUX_ONLY"
-        confidence = "high"
-        score = 12
-        eligible = false
-        eligibilityReason = "Ignored: Marketplace/premium purchase"
-    elseif requiredRebirths and requiredRebirths > 0 then
-        classType = "REBIRTH"
-        confidence = "high"
-        score = 10
-        local currentRebirths = State.LastRebirths
-        local satisfied = currentRebirths ~= nil and currentRebirths >= requiredRebirths
-        eligible = satisfied
-        eligibilityReason = satisfied
-            and ("Eligible: rebirth requirement satisfied (" .. tostring(currentRebirths) .. "/" .. tostring(requiredRebirths) .. ")")
-            or ("Blocked: requires " .. tostring(requiredRebirths) .. " rebirth(s), current=" .. tostring(currentRebirths ~= nil and currentRebirths or "unknown"))
-    elseif price and price > 0 then
-        classType = "TYCOON_MONEY"
-        confidence = "high"
-        score = 9
-        eligible = true
-        eligibilityReason = "Eligible: ordinary Tycoon-money purchase"
-    elseif killsRequired and killsRequired > 0 then
-        classType = "KILLS_OR_PREMIUM"
-        confidence = "medium"
-        score = 7
-        eligible = false
-        eligibilityReason = "Ignored: Kills-based requirement"
-    end
-
-    return {
-        Type = classType,
-        Confidence = confidence,
-        Score = score,
-        Evidence = evidence,
-        AutomationEligible = eligible,
-        AutomationReason = eligibilityReason,
-        Requirements = {
-            Price = price,
-            Rebirths = requiredRebirths,
-            Kills = killsRequired,
-            HasMarketplaceMarker = hasMarketplaceMarker,
-        },
-    }
-end
-
-local function ownerMatches(owner)
-    if owner == nil or not State.Player then
-        return false
-    end
-
-    local text = tostring(owner)
-
-    return text == State.Player.Name
-        or text == tostring(State.Player.UserId)
-        or normalize(text) == normalize(State.Player.Name)
-end
-
-local function scoreTycoon(tycoon)
-    if not tycoon then
-        return -1, {}
-    end
-
-    if not tycoon:IsA("Model") and not tycoon:IsA("Folder") then
-        return -1, {}
-    end
-
-    local score = 0
-    local evidence = {}
-
-    local buttons = tycoon:FindFirstChild("Buttons")
-    local purchases = tycoon:FindFirstChild("Purchases")
-
-    if not buttons or not purchases then
-        return 0, evidence
-    end
-
-    local owner = attrCI(tycoon, "Owner")
-
-    if ownerMatches(owner) then
-        score = score + 100
-        table.insert(evidence, "Tycoon Owner matches LocalPlayer")
-    end
-
-    local folders = {buttons, purchases}
-
-    for _, folder in ipairs(folders) do
-        local count = 0
-
-        for _, child in ipairs(folder:GetChildren()) do
-            count = count + 1
-
-            if ownerMatches(attrCI(child, "Owner")) then
-                score = score + 40
-                table.insert(evidence, child.Name .. " Owner matches LocalPlayer")
-                break
-            end
-
-            if count >= 80 then
-                break
-            end
-        end
-    end
-
-    return score, evidence
-end
-
-local function findPlayerTycoon()
-    local tycoons = workspace:FindFirstChild("Tycoons")
-
-    if not tycoons then
-        return nil, 0, {}
-    end
-
-    local best = nil
-    local bestScore = 0
-    local bestEvidence = {}
-
-    for _, tycoon in ipairs(tycoons:GetChildren()) do
-        local score, evidence = scoreTycoon(tycoon)
-
-        if score > bestScore then
-            best = tycoon
-            bestScore = score
-            bestEvidence = evidence
-        end
-    end
-
-    if best and bestScore >= 40 then
-        return best, bestScore, bestEvidence
-    end
-
-    return nil, bestScore, bestEvidence
-end
-
-local function findStat(names)
-    local leaderstats = State.Player and State.Player:FindFirstChild("leaderstats")
-
-    if not leaderstats then
-        return nil
-    end
-
-    for _, wanted in ipairs(names) do
-        local direct = leaderstats:FindFirstChild(wanted)
-        if direct and direct:IsA("ValueBase") then
-            return direct
-        end
-    end
-
-    for _, child in ipairs(leaderstats:GetChildren()) do
-        if child:IsA("ValueBase") and containsAny(child.Name, names) then
-            return child
-        end
-    end
-
-    return nil
-end
-
-local MONEY_NAMES = {"Money", "Cash", "Coins", "Coin", "Currency", "Saldo"}
-
-
-local function readValue(obj)
-    if not obj or not obj.Parent then
-        return nil
-    end
-
-    local ok, value = pcall(function()
-        if obj:IsA("ValueBase") then
-            return obj.Value
-        end
-
-        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
-            return obj.Text
-        end
-
-        return nil
-    end)
-
-    if not ok then
-        return nil
-    end
-
-    return parseNumber(value)
-end
-
-local function moneyCandidateScore(instance, rootKind)
-    if not instance or not instance.Parent then
-        return nil
-    end
-
-    local isValue = instance:IsA("ValueBase")
-    local isText = instance:IsA("TextLabel")
-        or instance:IsA("TextButton")
-        or instance:IsA("TextBox")
-
-    if not isValue and not isText then
-        return nil
-    end
-
-    local nameNorm = normalize(instance.Name)
-    local nameMatches = containsAny(instance.Name, MONEY_NAMES)
-    local value = readValue(instance)
-
-    if value == nil then
-        return nil
-    end
-
-    local score = 0
-    local evidence = {}
-
-    if nameNorm == "money" then
-        score = score + 60
-        table.insert(evidence, "exact name=Money")
-    elseif nameMatches then
-        score = score + 35
-        table.insert(evidence, "money-like name")
-    elseif isText then
-        local text = tostring(instance.Text or "")
-        if string.find(text, "$", 1, true) then
-            score = score + 8
-            table.insert(evidence, "HUD text contains $")
-        else
-            return nil
-        end
-    else
-        return nil
-    end
-
-    if rootKind == "LEADERSTATS" then
-        score = score + 100
-        table.insert(evidence, "leaderstats")
-    elseif rootKind == "PLAYER" then
-        score = score + 55
-        table.insert(evidence, "Player descendant")
-    elseif rootKind == "TYCOON" then
-        score = score + 45
-        table.insert(evidence, "local Tycoon descendant")
-    elseif rootKind == "PLAYERGUI" then
-        score = score + 20
-        table.insert(evidence, "PlayerGui display fallback")
-    end
-
-    if isValue then
-        score = score + 25
-        table.insert(evidence, "ValueBase")
-    else
-        table.insert(evidence, "GUI text fallback")
-    end
-
-    local pathNorm = normalize(safeFullName(instance))
-
-    if string.find(pathNorm, "price", 1, true)
-    or string.find(pathNorm, "cost", 1, true)
-    or string.find(pathNorm, "button", 1, true)
-    or string.find(pathNorm, "shop", 1, true) then
-        score = score - 45
-        table.insert(evidence, "penalty: shop/price-like path")
-    end
-
-    return score, value, evidence
-end
-
-local function discoverMoneySource()
-    local candidates = {}
-    local seen = setmetatable({}, {__mode = "k"})
-
-    local function consider(instance, rootKind)
-        if not instance or seen[instance] then
-            return
-        end
-
-        seen[instance] = true
-
-        local score, value, evidence = moneyCandidateScore(instance, rootKind)
-        if score then
-            table.insert(candidates, {
-                Instance = instance,
-                Path = safeFullName(instance),
-                ClassName = instance.ClassName,
-                RootKind = rootKind,
-                Score = score,
-                Value = value,
-                Evidence = evidence,
-            })
-        end
-    end
-
-    local function scanRoot(root, rootKind, limit)
-        if not root then
-            return
-        end
-
-        consider(root, rootKind)
-
-        local count = 0
-        for _, descendant in ipairs(root:GetDescendants()) do
-            count = count + 1
-            if count > limit then
-                break
-            end
-            consider(descendant, rootKind)
-        end
-    end
-
-    local leaderstats = State.Player and State.Player:FindFirstChild("leaderstats")
-    scanRoot(leaderstats, "LEADERSTATS", 100)
-
-    if State.Player then
-        for _, child in ipairs(State.Player:GetChildren()) do
-            if child ~= leaderstats and child.Name ~= "PlayerGui" then
-                scanRoot(child, "PLAYER", 600)
-            end
-        end
-    end
-
-    scanRoot(State.Tycoon, "TYCOON", 1200)
-
-    local playerGui = State.Player and State.Player:FindFirstChild("PlayerGui")
-    scanRoot(playerGui, "PLAYERGUI", 1200)
-
-    table.sort(candidates, function(a, b)
-        if a.Score == b.Score then
-            return tostring(a.Path) < tostring(b.Path)
-        end
-        return a.Score > b.Score
-    end)
-
-    local exportCandidates = {}
-    for index, candidate in ipairs(candidates) do
-        if index > 20 then
-            break
-        end
-        table.insert(exportCandidates, {
-            Path = candidate.Path,
-            ClassName = candidate.ClassName,
-            RootKind = candidate.RootKind,
-            Score = candidate.Score,
-            Value = candidate.Value,
-            Evidence = candidate.Evidence,
-        })
-    end
-
-    State.MoneyCandidates = exportCandidates
-    State.LastMoneyDiscoveryClock = os.clock()
-
-    local best = candidates[1]
-    if best then
-        State.MoneySourceKind = best.RootKind
-        State.MoneySourceEvidence = best.Evidence
-        return best.Instance
-    end
-
-    State.MoneySourceKind = nil
-    State.MoneySourceEvidence = {"no numeric money candidate found"}
-    return nil
-end
-
-local function refreshStatsObjects()
-    if not State.MoneyObject or not State.MoneyObject.Parent then
-        State.MoneyObject = discoverMoneySource()
-    elseif os.clock() - (State.LastMoneyDiscoveryClock or 0) >= 4 then
-        -- Refresh the candidate inventory periodically, but keep a valid
-        -- selected source unless a clearly stronger source is discovered.
-        local current = State.MoneyObject
-        local currentPath = safeFullName(current)
-        local discovered = discoverMoneySource()
-
-        if discovered then
-            local currentEntry = nil
-            local bestEntry = State.MoneyCandidates[1]
-
-            for _, entry in ipairs(State.MoneyCandidates) do
-                if entry.Path == currentPath then
-                    currentEntry = entry
-                    break
-                end
-            end
-
-            if not currentEntry
-            or (bestEntry and bestEntry.Score >= (currentEntry.Score or 0) + 20) then
-                State.MoneyObject = discovered
-            else
-                State.MoneyObject = current
-                State.MoneySourceKind = currentEntry.RootKind
-                State.MoneySourceEvidence = currentEntry.Evidence
-            end
-        else
-            State.MoneyObject = current
-            State.MoneySourceKind = "PRESERVED"
-            State.MoneySourceEvidence = {"previous valid source preserved; refresh found no stronger candidate"}
-        end
-    end
-
-    if not State.RebirthObject or not State.RebirthObject.Parent then
-        State.RebirthObject = findStat({"Rebirths", "Rebirth", "Renascimentos", "Renascimento"})
-    end
-end
-
-local function buttonsSet()
-    local result = {}
-
-    if State.ButtonsFolder then
-        for _, child in ipairs(State.ButtonsFolder:GetChildren()) do
-            result[child.Name] = true
-        end
-    end
-
-    return result
-end
-
-local function pendingFor(name)
-    local item = State.Pending[name]
-
-    if not item or item.Completed then
-        item = {
-            Name = name,
-            Started = os.clock(),
-            Button = nil,
-            Purchase = nil,
-            ButtonRemovedAt = nil,
-            PurchaseCreatedAt = nil,
-            MoneyBefore = State.LastMoney,
-            MoneyAfter = nil,
-            RebirthsBefore = State.LastRebirths,
-            RebirthsAfter = nil,
-            Unlocks = {},
-            Completed = false,
-        }
-
-        State.Pending[name] = item
-    end
-
-    return item
-end
-
-local function finalize(name)
-    local pending = State.Pending[name]
-
-    if not pending or pending.Completed then
-        return
-    end
-
-    local classification = classify(pending.Button, pending.Purchase)
-
-    local transaction = {
-        Id = #State.Transactions + 1,
-        Name = name,
-        Time = clockText(),
-        Elapsed = elapsed(),
-        Classification = classification,
-        AutomationEligible = classification.AutomationEligible,
-        AutomationReason = classification.AutomationReason,
-        Zone = (pending.Button and pending.Button.Zone)
-            or inferLogicalZone(pending.Button or pending.Purchase),
-        MainFloorAtTransaction = State.MainFloor,
-        MovementPolicy = (pending.Button and pending.Button.MovementPolicy)
-            or (inferLogicalZone(pending.Button or pending.Purchase) == "BUNKER"
-                and "USE_GAME_TRANSITION"
-                or "NORMAL_LOCAL_ACCESS"),
-
-        Button = pending.Button,
-        Purchase = pending.Purchase,
-
-        DeclaredPrice = pending.Button and (pending.Button.Price or pending.Button.Cost) or nil,
-        RequiredRebirths = pending.Button and (pending.Button.RequiredRebirths or pending.Button.Rebirths) or nil,
-        LinkedPurchases = (pending.Button and pending.Button.LinkedPurchases)
-            or (pending.Purchase and pending.Purchase.LinkedPurchases) or nil,
-        Dependency = (pending.Button and pending.Button.Dependency)
-            or (pending.Purchase and pending.Purchase.Dependency) or nil,
-
-        MoneyBefore = pending.MoneyBefore,
-        MoneyAfter = pending.MoneyAfter,
-        MoneyDelta = (
-            pending.MoneyBefore ~= nil and pending.MoneyAfter ~= nil
-        ) and (pending.MoneyAfter - pending.MoneyBefore) or nil,
-
-        RebirthsBefore = pending.RebirthsBefore,
-        RebirthsAfter = pending.RebirthsAfter,
-
-        UnlockedButtons = pending.Unlocks,
-
-        Timing = {
-            ButtonRemovedAt = pending.ButtonRemovedAt,
-            PurchaseCreatedAt = pending.PurchaseCreatedAt,
-        },
-    }
-
-    local declaredPriceNumber = parseNumber(transaction.DeclaredPrice)
-    local delta = transaction.MoneyDelta
-
-    transaction.EconomyEvidence = {
-        Direction = delta and (delta < 0 and "SPEND" or (delta > 0 and "INCOME" or "NO_CHANGE")) or "UNOBSERVED",
-        ExactPriceMatch = (
-            declaredPriceNumber ~= nil
-            and delta ~= nil
-            and delta < 0
-            and math.abs(delta) == declaredPriceNumber
-        ) or false,
-        ObservedSpend = (delta ~= nil and delta < 0) and math.abs(delta) or nil,
-        ObservedIncome = (delta ~= nil and delta > 0) and delta or nil,
-    }
-
-    if transaction.Classification.Type == "TYCOON_MONEY"
-    and transaction.EconomyEvidence.ExactPriceMatch then
-        transaction.Classification.Confidence = "confirmed"
-        transaction.Classification.Score = math.max(transaction.Classification.Score or 0, 15)
-        transaction.AutomationEligible = true
-        transaction.AutomationReason = "Eligible: confirmed Tycoon-money purchase"
-        transaction.Classification.AutomationEligible = true
-        transaction.Classification.AutomationReason = "Eligible: confirmed Tycoon-money purchase"
-        table.insert(transaction.Classification.Evidence, "Money deduction exactly matches declared Price")
-    elseif transaction.Classification.Type == "TYCOON_MONEY"
-    and delta ~= nil and delta > 0 then
-        table.insert(transaction.Classification.Evidence, "Positive Money delta is income, not purchase cost")
-    end
-
-    table.insert(State.Transactions, transaction)
-    State.DataStats.TransactionsStored = #State.Transactions
-    pending.Completed = true
-
-    pushEvent("TRANSACTION_FINALIZED", name, transaction)
-end
-
-local function watchUnlocks(name, baseline)
-    task.spawn(function()
-        local seen = {}
-        local finishAt = os.clock() + UNLOCK_WINDOW
-
-        while State.Running and os.clock() < finishAt do
-            if State.ButtonsFolder then
-                for _, child in ipairs(State.ButtonsFolder:GetChildren()) do
-                    if not baseline[child.Name] then
-                        seen[child.Name] = true
-                    end
-                end
-            end
-
-            task.wait(0.15)
-        end
-
-        local pending = State.Pending[name]
-
-        if not pending then
-            return
-        end
-
-        local list = {}
-
-        for childName in pairs(seen) do
-            table.insert(list, childName)
-        end
-
-        table.sort(list)
-        pending.Unlocks = list
-
-        if #list > 0 then
-            pushEvent("BUTTONS_UNLOCKED", name, {
-                UnlockedButtons = list,
-            })
-        end
-
-        finalize(name)
-    end)
-end
-
-local function watchButtonAttributes(button)
-    local attrs = {
-        "Price",
-        "Cost",
-        "Owner",
-        "Rebirths",
-        "RequiredRebirths",
-        "LinkedPurchases",
-        "ProductId",
-        "DeveloperProductId",
-        "GamePassId",
-        "Gamepass",
-        "DevProduct",
-        "NonPurchase",
-        "Dependency",
-        "Kills",
-        "Robux",
-    }
-
-    for _, attrName in ipairs(attrs) do
-        addConnection(button:GetAttributeChangedSignal(attrName), function()
-            local info = describeButton(button)
-            State.ButtonCache[button.Name] = info
-
-            if not State.Reading then
-                return
-            end
-
-            pushEvent("BUTTON_ATTRIBUTE_CHANGED", button.Name, {
-                Attribute = attrName,
-                Button = info,
-                Classification = classify(info, nil),
-            })
-        end, State.TycoonConnections)
-    end
-end
-
-local function onButtonAdded(button)
-    if not button:IsA("Model") and not button:IsA("Folder") then
-        return
-    end
-
-    local info = describeButton(button)
-    State.ButtonCache[button.Name] = info
-    watchButtonAttributes(button)
-    watchTransitionPrompts(button)
-
-    if not State.Reading then
-        return
-    end
-
-    recordStageUnlock(info, "BUTTON_AVAILABLE")
-
-    pushEvent("BUTTON_AVAILABLE", button.Name, {
-        Button = info,
-        Classification = classify(info, nil),
-    })
-end
-
-local function onButtonRemoved(button)
-    local name = button.Name
-    local info = State.ButtonCache[name] or describeButton(button)
-
-    State.ButtonCache[name] = nil
-
-    if not State.Reading then
-        return
-    end
-
-    local pending = pendingFor(name)
-
-    pending.Button = info
-    pending.ButtonRemovedAt = os.clock()
-    pending.MoneyBefore = State.LastMoney
-    pending.RebirthsBefore = State.LastRebirths
-
-    local baseline = buttonsSet()
-
-    pushEvent("BUTTON_REMOVED", name, {
-        Button = info,
-        Classification = classify(info, nil),
-        MoneyBefore = pending.MoneyBefore,
-        RebirthsBefore = pending.RebirthsBefore,
-    })
-
-    watchUnlocks(name, baseline)
-end
-
-local function onPurchaseAdded(purchase)
-    if not purchase:IsA("Model") and not purchase:IsA("Folder") then
-        return
-    end
-
-    if not State.Reading then
-        return
-    end
-
-    local name = purchase.Name
-    local pending = pendingFor(name)
-    local info = describePurchase(purchase)
-
-    watchTransitionPrompts(purchase)
-
-    pending.Purchase = info
-    pending.PurchaseCreatedAt = os.clock()
-
-    pushEvent("PURCHASE_CREATED", name, {
-        Purchase = info,
-        Classification = classify(pending.Button, info),
-    })
-end
-
-local function scanInitial()
-    State.ButtonCache = {}
-
-    local buttonsSnapshot = {}
-    local purchasesSnapshot = {}
-
-    if State.ButtonsFolder then
-        for _, button in ipairs(State.ButtonsFolder:GetChildren()) do
-            if button:IsA("Model") or button:IsA("Folder") then
-                local info = describeButton(button)
-                table.insert(buttonsSnapshot, info)
-                State.ButtonCache[button.Name] = info
-                watchButtonAttributes(button)
-                watchTransitionPrompts(button)
-            end
-        end
-    end
-
-    if State.PurchasesFolder then
-        for _, purchase in ipairs(State.PurchasesFolder:GetChildren()) do
-            if purchase:IsA("Model") or purchase:IsA("Folder") then
-                table.insert(purchasesSnapshot, describePurchase(purchase))
-                watchTransitionPrompts(purchase)
-            end
-        end
-    end
-
-    if State.Reading then
-        State.InitialButtons = buttonsSnapshot
-        State.InitialPurchases = purchasesSnapshot
-
-        pushEvent("INITIAL_STATE", "Initial state", {
-            Buttons = #State.InitialButtons,
-            Purchases = #State.InitialPurchases,
-        })
-    end
-end
-
-local function bindTycoon(tycoon, score, evidence)
-    if not tycoon then
-        return false
-    end
-
-    if State.Tycoon == tycoon
-    and State.ButtonsFolder
-    and State.PurchasesFolder then
-        State.TycoonScore = score
-        State.Health.Tycoon = "CONFIRMED"
-        return true
-    end
-
-    disconnectAll(State.TycoonConnections)
-
-    local buttons = tycoon:FindFirstChild("Buttons")
-    local purchases = tycoon:FindFirstChild("Purchases")
-
-    if not buttons or not purchases then
-        return false
-    end
-
-    State.Tycoon = tycoon
-    State.TycoonScore = score or 0
-    State.ButtonsFolder = buttons
-    State.PurchasesFolder = purchases
-
-    scanInitial()
-
-    addConnection(buttons.ChildAdded, onButtonAdded, State.TycoonConnections)
-    addConnection(buttons.ChildRemoved, onButtonRemoved, State.TycoonConnections)
-    addConnection(purchases.ChildAdded, onPurchaseAdded, State.TycoonConnections)
-
-    State.Health.Tycoon = "CONFIRMED"
-
-    if State.Reading then
-        pushEvent("TYCOON_BOUND", tycoon.Name, {
-            Path = safeFullName(tycoon),
-            Score = State.TycoonScore,
-            Evidence = evidence,
-        })
-    end
-
-    return true
-end
-
-local function reconsiderTycoon()
-    local tycoon, score, evidence = findPlayerTycoon()
-
-    if tycoon then
-        bindTycoon(tycoon, score, evidence)
-    else
-        State.Health.Tycoon = "SEARCHING"
-    end
-end
-
-local function correlateStatChanges(oldMoney, newMoney, oldRebirths, newRebirths)
-    local now = os.clock()
-    local best = nil
-    local bestTime = -1
-
-    for _, pending in pairs(State.Pending) do
-        if not pending.Completed then
-            local eventTime = pending.PurchaseCreatedAt or pending.ButtonRemovedAt
-
-            if eventTime
-            and now - eventTime <= CORRELATION_WINDOW
-            and eventTime > bestTime then
-                best = pending
-                bestTime = eventTime
-            end
-        end
-    end
-
-    if not best then
-        return
-    end
-
-    -- Only negative Money deltas are purchase-spend evidence.
-    -- Positive deltas are income/collection and are deliberately not
-    -- attached as MoneyAfter to a purchase.
-    if oldMoney ~= nil and newMoney ~= nil and newMoney < oldMoney then
-        best.MoneyBefore = best.MoneyBefore or oldMoney
-        best.MoneyAfter = newMoney
-    end
-
-    if oldRebirths ~= nil
-    and newRebirths ~= nil
-    and oldRebirths ~= newRebirths then
-        best.RebirthsBefore = best.RebirthsBefore or oldRebirths
-        best.RebirthsAfter = newRebirths
-    end
-end
-
-local buildAutomationCandidates
-
-local function refreshUI()
-    if not UI.Screen or not UI.Screen.Parent then
-        return
-    end
-
-    local tycoonName = State.Tycoon and State.Tycoon.Name or "nao identificado"
-
-    local candidates = buildAutomationCandidates()
-
-    UI.Status.Text =
-        "Leitura: " .. (State.Reading and "ATIVA" or "PAUSADA") ..
-        " | Zona: " .. tostring(State.CurrentZone) ..
-        " | Andar: " .. tostring(State.MainFloor) ..
-        " | Compras: " .. tostring(#State.Transactions) ..
-        " | Elegiveis: " .. tostring(#candidates.Eligible)
-
-    if UI.ReadToggle and UI.ReadToggle.Parent then
-        UI.ReadToggle.Text = State.Reading
-            and "Parar leitura de dados"
-            or "Iniciar leitura de dados"
-
-        UI.ReadToggle.BackgroundColor3 = State.Reading
-            and COLORS.Danger
-            or COLORS.Floating
-    end
-
-    UI.Money.Text =
-        "Money: " ..
-        (State.LastMoney ~= nil and tostring(State.LastMoney) or "nao encontrado")
-
-    UI.Rebirths.Text =
-        "Rebirths: " ..
-        (State.LastRebirths ~= nil and tostring(State.LastRebirths) or "nao encontrado")
-
-    UI.Health.Text =
-        "UI:" .. tostring(State.Health.UI) ..
-        " Leitura:" .. tostring(State.Health.Reading) ..
-        " Tycoon:" .. tostring(State.Health.Tycoon) ..
-        " Zona:" .. tostring(State.Health.Zone) ..
-        " Andar:" .. tostring(State.Health.Floor) ..
-        " Money:" .. tostring(State.Health.Money) ..
-        "(" .. tostring(State.MoneySourceKind or "?") .. ")" ..
-        " Rebirth:" .. tostring(State.Health.Rebirths) ..
-        " Tx:" .. tostring(#State.Transactions) ..
-        " Ev:" .. tostring(State.DataStats.TotalEventsObserved) ..
-        " Desc:" .. tostring(State.DataStats.AuxiliaryEventsDiscarded) ..
-        " Errors:" .. tostring(#State.Errors)
-
-    local lines = {}
-    local first = #State.Events - 17
-
-    if first < 1 then
-        first = 1
-    end
-
-    for i = #State.Events, first, -1 do
-        local item = State.Events[i]
-
-        table.insert(
-            lines,
-            "[" .. tostring(item.Time) .. "] " ..
-            tostring(item.Kind) .. " - " ..
-            tostring(item.Label)
-        )
-    end
-
-    if #lines == 0 then
-        UI.Live.Text = "Aguardando eventos..."
-    else
-        UI.Live.Text = table.concat(lines, "\n")
-    end
-end
-
-buildAutomationCandidates = function()
-    local result = {Eligible = {}, Ignored = {}}
-    if not State.ButtonsFolder then return result end
-
-    for _, button in ipairs(State.ButtonsFolder:GetChildren()) do
-        if button:IsA("Model") or button:IsA("Folder") then
-            local info = State.ButtonCache[button.Name] or describeButton(button)
-            local classification = classify(info, nil)
-            local record = {
-                Name = button.Name,
-                Path = safeFullName(button),
-                Type = classification.Type,
-                AutomationEligible = classification.AutomationEligible,
-                AutomationReason = classification.AutomationReason,
-                Requirements = classification.Requirements,
-                Dependency = info.Dependency,
-                Zone = info.Zone or inferLogicalZone(info),
-                MovementPolicy = info.MovementPolicy or
-                    (inferLogicalZone(info) == "BUNKER"
-                        and "USE_GAME_TRANSITION"
-                        or "NORMAL_LOCAL_ACCESS"),
-                Price = info.Price or info.Cost,
-                Rebirths = info.RequiredRebirths or info.Rebirths,
-                Kills = info.Kills,
-                Gamepass = info.Gamepass,
-                DevProduct = info.DevProduct,
-            }
-            if classification.AutomationEligible then
-                table.insert(result.Eligible, record)
-            else
-                table.insert(result.Ignored, record)
-            end
-        end
-    end
-
-    table.sort(result.Eligible, function(a, b) return tostring(a.Name) < tostring(b.Name) end)
-    table.sort(result.Ignored, function(a, b) return tostring(a.Name) < tostring(b.Name) end)
-    return result
-end
-
-local function setReading(enabled)
-    enabled = enabled and true or false
-
-    if State.Reading == enabled then
-        return
-    end
-
-    if enabled then
-        State.Reading = true
-        State.Health.Reading = "ACTIVE"
-        State.Pending = {}
-
-        refreshStatsObjects()
-        State.LastMoney = readValue(State.MoneyObject)
-        State.LastRebirths = readValue(State.RebirthObject)
-
-        local session = {
-            StartedUnix = os.time(),
-            StartedElapsed = elapsed(),
-            StartedMoney = State.LastMoney,
-            StartedRebirths = State.LastRebirths,
-            StartedZone = State.CurrentZone,
-            StartedFloor = State.MainFloor,
-            StartedEventCount = State.DataStats.TotalEventsObserved,
-            StartedTransactionCount = #State.Transactions,
-        }
-
-        State.CurrentReadingSession = session
-        table.insert(State.ReadingSessions, session)
-
-        scanInitial()
-
-        pushEvent("READING_STARTED", "READING_STARTED", {
-            Money = State.LastMoney,
-            Rebirths = State.LastRebirths,
-            Buttons = #State.InitialButtons,
-            Purchases = #State.InitialPurchases,
-            TransactionsStored = #State.Transactions,
-            EventsObserved = State.DataStats.TotalEventsObserved,
-        })
-    else
-        pushEvent("READING_STOPPED", "READING_STOPPED", {
-            Money = State.LastMoney,
-            Rebirths = State.LastRebirths,
-            TransactionsStored = #State.Transactions,
-            EventsObserved = State.DataStats.TotalEventsObserved,
-            AuxiliaryEventsDiscarded = State.DataStats.AuxiliaryEventsDiscarded,
-        })
-
-        if State.CurrentReadingSession then
-            State.CurrentReadingSession.StoppedUnix = os.time()
-            State.CurrentReadingSession.StoppedElapsed = elapsed()
-            State.CurrentReadingSession.StoppedMoney = State.LastMoney
-            State.CurrentReadingSession.StoppedRebirths = State.LastRebirths
-            State.CurrentReadingSession.StoppedZone = State.CurrentZone
-            State.CurrentReadingSession.StoppedFloor = State.MainFloor
-            State.CurrentReadingSession.StoppedEventCount =
-                State.DataStats.TotalEventsObserved
-            State.CurrentReadingSession.StoppedTransactionCount =
-                #State.Transactions
-            State.CurrentReadingSession.EventsObserved =
-                State.CurrentReadingSession.StoppedEventCount -
-                (State.CurrentReadingSession.StartedEventCount or 0)
-            State.CurrentReadingSession.TransactionsRecorded =
-                State.CurrentReadingSession.StoppedTransactionCount -
-                (State.CurrentReadingSession.StartedTransactionCount or 0)
-        end
-
-        State.CurrentReadingSession = nil
-        State.Pending = {}
-        State.Reading = false
-        State.Health.Reading = "PAUSED"
-    end
-
-    safeCall("READING_UI_REFRESH", function()
-        refreshUI()
-    end)
-end
-
-local function buildProgressionGraph()
-    local edges = {}
-
-    for _, transaction in ipairs(State.Transactions) do
-        local source = transaction.Name
-
-        if transaction.Dependency and tostring(transaction.Dependency) ~= "" then
-            table.insert(edges, {
-                Type = "DEPENDENCY",
-                From = tostring(transaction.Dependency),
-                To = source,
-            })
-        end
-
-        if transaction.LinkedPurchases and tostring(transaction.LinkedPurchases) ~= "" then
-            for linked in string.gmatch(tostring(transaction.LinkedPurchases), "[^,]+") do
-                linked = linked:gsub("^%s+", ""):gsub("%s+$", "")
-                if linked ~= "" then
-                    table.insert(edges, {
-                        Type = "LINKED_PURCHASE",
-                        From = source,
-                        To = linked,
-                    })
-                end
-            end
-        end
-
-        for _, unlocked in ipairs(transaction.UnlockedButtons or {}) do
-            table.insert(edges, {
-                Type = "OBSERVED_UNLOCK",
-                From = source,
-                To = unlocked,
-            })
-        end
-    end
-
-    return edges
-end
-
-local function buildReport()
-    local payload = {
-        Report = "Tycoon Purchase Diagnostic",
-        Version = VERSION,
-        PlaceId = game.PlaceId,
-        JobId = game.JobId,
-
-        StartedAtUnix = State.StartedUnix,
-        FinishedAtUnix = os.time(),
-
-        Player = {
-            Name = State.Player.Name,
-            UserId = State.Player.UserId,
-        },
-
-        GuiParent = UI.ParentKind,
-
-        Tycoon = {
-            Name = State.Tycoon and State.Tycoon.Name or nil,
-            Path = State.Tycoon and safeFullName(State.Tycoon) or nil,
-            Score = State.TycoonScore,
-        },
-
-        MoneyPath = State.MoneyObject and safeFullName(State.MoneyObject) or nil,
-        RebirthPath = State.RebirthObject and safeFullName(State.RebirthObject) or nil,
-
-        EconomySources = {
-            SelectedMoneyPath = State.MoneyObject and safeFullName(State.MoneyObject) or nil,
-            SelectedMoneyKind = State.MoneySourceKind,
-            SelectedMoneyEvidence = State.MoneySourceEvidence,
+    addConnection(export.MouseButton1Click, function()
+        scanNumericCandidates()
+
+        local remotesArray = {}
+        for _, info in pairs(State.Remotes) do table.insert(remotesArray, info) end
+        table.sort(remotesArray, function(a,b) return a.Path < b.Path end)
+
+        local payload = {
+            Report = "Psicosenatico Auto Tycoon Server Response Research",
+            Version = VERSION,
+            PlaceId = game.PlaceId,
+            JobId = game.JobId,
+            Player = {Name=Player.Name, UserId=Player.UserId},
+            StartedAtUnix = State.StartedUnix,
+            FinishedAtUnix = os.time(),
+            Tycoon = State.Tycoon and safeFullName(State.Tycoon) or nil,
             MoneyCandidates = State.MoneyCandidates,
-            Note = "ValueBase sources are preferred. PlayerGui text is fallback evidence only.",
-        },
-
-        Context = {
-            CurrentZone = State.CurrentZone,
-            ZoneEvidence = State.ZoneEvidence,
-            MainFloor = State.MainFloor,
-            ZoneTransitions = State.ZoneTransitions,
-            FloorTransitions = State.FloorTransitions,
-            StageUnlocks = State.StageUnlocks,
-            MovementSafetyPolicy = {
-                Bunker = "USE_GAME_TRANSITION_ONLY",
-                LongDistanceDirectTeleport = "DO_NOT_USE",
-                Reason = "Bunker is a separate progression zone; direct long-distance movement can conflict with the game's movement correction.",
+            CollectorCandidates = State.CollectorCandidates,
+            RebirthCandidates = State.RebirthCandidates,
+            Remotes = remotesArray,
+            Correlations = State.Correlations,
+            Events = State.Events,
+            Errors = State.Errors,
+            Verification = {
+                Active = State.VerificationActive,
+                Sessions = State.VerificationSessions,
+                CurrentSession = State.CurrentVerificationSession,
+                CapturedEvents = #State.Events,
+                CapturedCorrelations = #State.Correlations,
+                PurchaseResponses = State.PurchaseResponses,
+                ResponseCounters = State.ResponseCounters,
+                PrimaryTycoonMoneySignals = State.PrimaryTycoonMoneySignals,
             },
-        },
+            Policy = {
+                Perspective = "server response as observed by client",
+                TrueServerAuthority = false,
+                ServerOnlyApiDependency = false,
+                StudioOnlyDependency = false,
+                MoneyMutation = false,
+                RebirthMutation = false,
+                UnknownRemoteInvocation = false,
+                ServerAuthorizationForgery = false,
+                OutboundPurchaseRequestCaptured = false,
+                OutboundPurchaseRequestPayloadKnown = false,
+                Notes = "Inbound RemoteEvent activity and replicated state changes are observational evidence, not internal server state.",
+            },
+        }
 
-        InitialButtons = State.InitialButtons,
-        InitialPurchases = State.InitialPurchases,
-        ReadingActive = State.Reading,
-        ReadingSessions = State.ReadingSessions,
+        local ok, content = pcall(function() return HttpService:JSONEncode(payload) end)
+        if not ok then
+            UI.Status.Text = "Falha ao gerar JSON: " .. tostring(content)
+            return
+        end
 
-        StoragePolicy = {
-            Transactions = "UNBOUNDED_DURING_SESSION",
-            CriticalEvents = "UNBOUNDED_DURING_SESSION",
-            AuxiliaryEvents = "RING_BUFFER",
-            AuxiliaryEventLimit = MAX_AUX_EVENTS,
-            Note = "Only auxiliary history is trimmed. Consolidated transactions and critical purchase evidence are preserved for the full session.",
-        },
+        local filename = "Auto_Tycoon_Server_Response_Research_V2_3_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
+        local saved, copied = false, false
 
-        DataStats = {
-            TotalEventsObserved = State.DataStats.TotalEventsObserved,
-            AuxiliaryEventsStored = #State.Events,
-            AuxiliaryEventsDiscarded = State.DataStats.AuxiliaryEventsDiscarded,
-            CriticalEventsStored = #State.CriticalEvents,
-            TransactionsStored = #State.Transactions,
-            TransactionDataDiscarded = State.DataStats.TransactionDataDiscarded,
-        },
+        if type(writefile) == "function" then
+            saved = pcall(function() writefile(filename, content) end)
+        end
 
-        Transactions = State.Transactions,
-        CriticalEvents = State.CriticalEvents,
-        AutomationCandidates = buildAutomationCandidates(),
-        ProgressionGraph = buildProgressionGraph(),
-        Events = State.Events,
-        Errors = State.Errors,
-        ErrorRepeats = State.ErrorRepeats,
-        Health = State.Health,
-    }
+        if type(setclipboard) == "function" then
+            copied = pcall(function() setclipboard(content) end)
+        elseif type(toclipboard) == "function" then
+            copied = pcall(function() toclipboard(content) end)
+        end
 
-    local ok, encoded = pcall(function()
-        return HttpService:JSONEncode(payload)
+        UI.Status.Text = saved and ("Arquivo exportado: " .. filename)
+            or copied and "Relatorio copiado para a area de transferencia"
+            or "Relatorio pronto, mas writefile/clipboard indisponiveis"
     end)
-
-    if ok then
-        return encoded
-    end
-
-    return "JSON ERROR: " .. tostring(encoded)
 end
 
-local function exportReport()
-    local content = buildReport()
-    local filename =
-        "Tycoon_Purchase_Diagnostic_V2_4_2_" ..
-        os.date("%Y%m%d_%H%M%S") ..
-        ".txt"
+createGui()
+scanRemotes()
 
-    local saved = false
-    local copied = false
+addConnection(ReplicatedStorage.DescendantAdded, function(obj)
+    catalogRemote(obj)
+end)
 
-    if type(writefile) == "function" then
-        saved = pcall(function()
-            writefile(filename, content)
-        end)
-    end
-
-    if type(setclipboard) == "function" then
-        copied = pcall(function()
-            setclipboard(content)
-        end)
-    elseif type(toclipboard) == "function" then
-        copied = pcall(function()
-            toclipboard(content)
-        end)
-    end
-
-    if saved then
-        return true, "Relatorio salvo: " .. filename
-    end
-
-    if copied then
-        return true, "Relatorio copiado."
-    end
-
-    return false, "writefile/clipboard indisponivel."
+local tycoon = findTycoon()
+if tycoon then
+    bindTycoon(tycoon)
+else
+    pushEvent("TYCOON_NOT_FOUND", {})
 end
 
-addConnection(UI.ReadToggle.MouseButton1Click, function()
-    safeCall("READING_TOGGLE", function()
-        setReading(not State.Reading)
-    end)
+task.spawn(function()
+    while State.Running do
+        if not State.Tycoon or not State.Tycoon.Parent then
+            local newTycoon = findTycoon()
+            if newTycoon and newTycoon ~= State.Tycoon then
+                bindTycoon(newTycoon)
+            end
+        end
+
+        scanNumericCandidates()
+
+        local money = choosePrimary(State.MoneyCandidates, "money")
+        local collector = State.CollectorCandidates[1]
+        local rebirth = choosePrimary(State.RebirthCandidates, "rebirth")
+
+        local moneyValue = money and money.Value or nil
+        local collectorValue = collector and collector.Value or nil
+        local rebirthValue = rebirth and rebirth.Value or nil
+
+        if moneyValue ~= State.LastMoney then
+            local details = {Before=State.LastMoney, After=moneyValue, Source=money and money.Path or nil}
+            pushEvent("MONEY_CHANGED", details)
+            correlate("MONEY_CHANGED", details)
+            State.LastMoney = moneyValue
+        end
+
+        if collectorValue ~= State.LastCollector then
+            local details = {Before=State.LastCollector, After=collectorValue, Source=collector and collector.Path or nil}
+            pushEvent("COLLECTOR_CHANGED", details)
+            correlate("COLLECTOR_CHANGED", details)
+            State.LastCollector = collectorValue
+        end
+
+        if rebirthValue ~= State.LastRebirths then
+            local details = {Before=State.LastRebirths, After=rebirthValue, Source=rebirth and rebirth.Path or nil}
+            pushEvent("REBIRTH_CHANGED", details)
+            correlate("REBIRTH_CHANGED", details)
+            State.LastRebirths = rebirthValue
+        end
+
+        if UI.Status and UI.Status.Parent then
+            local remoteCount = 0
+            for _ in pairs(State.Remotes) do remoteCount += 1 end
+
+            if State.VerificationActive then
+                UI.Status.Text =
+                    "ATIVA | Aceitas: " .. tostring(State.ResponseCounters.Accepted) ..
+                    " | Recusadas: " .. tostring(State.ResponseCounters.Rejected) ..
+                    " | Money: " .. tostring(State.LastMoney)
+            else
+                UI.Status.Text =
+                    "PAUSADA | Aceitas: " .. tostring(State.ResponseCounters.Accepted) ..
+                    " | Recusadas: " .. tostring(State.ResponseCounters.Rejected) ..
+                    " | Nao resolvidas: " .. tostring(State.ResponseCounters.Unresolved)
+            end
+        end
+
+        if UI.Log and UI.Log.Parent then
+            if State.VerificationActive then
+                local lines = {}
+                local first = math.max(1, #State.Events - 8)
+                for i = #State.Events, first, -1 do
+                    local e = State.Events[i]
+                    table.insert(lines, "[" .. tostring(e.Time) .. "] " .. tostring(e.Kind))
+                end
+                UI.Log.Text = #lines > 0 and table.concat(lines, "\n") or "Capturando..."
+            else
+                UI.Log.Text =
+                    "Verificacao pausada.\n" ..
+                    "Toque em Iniciar verificacao antes das compras.\n" ..
+                    "Ao terminar, toque em Parar verificacao e exporte o relatorio.\n" ..
+                    "Principal: ButtonPurchased=aceito | ButtonCannotPurchase=recusado."
+            end
+        end
+
+        task.wait(SAMPLE_INTERVAL)
+    end
 end)
 
-addConnection(UI.Export.MouseButton1Click, function()
-    safeCall("EXPORT", function()
-        local ok, message = exportReport()
-        UI.Status.Text = message
-
-        pushEvent(
-            "SYSTEM",
-            ok and "EXPORT_SUCCESS" or "EXPORT_UNAVAILABLE",
-            {Message = message}
-        )
-    end)
-end)
-
--- ============================================================
--- ENGINE START
--- ============================================================
-
-safeCall("INITIAL_STATS", function()
-    refreshStatsObjects()
-    State.LastMoney = readValue(State.MoneyObject)
-    State.LastRebirths = readValue(State.RebirthObject)
-end)
-
-safeCall("INITIAL_TYCOON", function()
-    reconsiderTycoon()
-
-    local floor, floorEvidence = detectMainFloor()
-    setMainFloor(floor, floorEvidence)
-
-    local zone, zoneEvidence = detectZoneByPosition()
-    setZone(zone, zoneEvidence)
-end)
-
-State.Health.Bootstrap = "OK"
-State.Health.Engine = "ACTIVE"
-State.Health.Reading = "PAUSED"
-
-pushEvent("SYSTEM", "ENGINE_STARTED", {
+pushEvent("SERVER_RESPONSE_RESEARCH_READY", {
     Version = VERSION,
+    Perspective = "server response as observed by client",
+    VerificationDefault = "PAUSED",
 })
-
-task.spawn(function()
-    while State.Running do
-        safeCall("STAT_LOOP", function()
-            refreshStatsObjects()
-
-            local money = readValue(State.MoneyObject)
-            local rebirths = readValue(State.RebirthObject)
-
-            if State.MoneyObject and money ~= nil then
-                State.Health.Money = "ACTIVE"
-            else
-                State.Health.Money = "SEARCHING"
-            end
-
-            if State.RebirthObject and rebirths ~= nil then
-                State.Health.Rebirths = "ACTIVE"
-            else
-                State.Health.Rebirths = "SEARCHING"
-            end
-
-            if State.Reading
-            and State.LastMoney ~= nil
-            and money ~= nil
-            and money ~= State.LastMoney then
-                local delta = money - State.LastMoney
-
-                pushEvent(
-                    delta < 0 and "MONEY_SPEND" or "MONEY_INCOME",
-                    "Money",
-                    {
-                        OldValue = State.LastMoney,
-                        NewValue = money,
-                        Delta = delta,
-                        Direction = delta < 0 and "SPEND" or "INCOME",
-                    }
-                )
-
-                correlateStatChanges(
-                    State.LastMoney,
-                    money,
-                    State.LastRebirths,
-                    rebirths
-                )
-            end
-
-            if State.Reading
-            and State.LastRebirths ~= nil
-            and rebirths ~= nil
-            and rebirths ~= State.LastRebirths then
-                pushEvent("REBIRTH_CHANGE", "Rebirths", {
-                    OldValue = State.LastRebirths,
-                    NewValue = rebirths,
-                    Delta = rebirths - State.LastRebirths,
-                })
-
-                correlateStatChanges(
-                    State.LastMoney,
-                    money,
-                    State.LastRebirths,
-                    rebirths
-                )
-            end
-
-            if money ~= nil then
-                State.LastMoney = money
-            end
-
-            if rebirths ~= nil then
-                State.LastRebirths = rebirths
-            end
-        end)
-
-        task.wait(MONEY_INTERVAL)
-    end
-end)
-
-task.spawn(function()
-    while State.Running do
-        safeCall("TYCOON_LOOP", function()
-            reconsiderTycoon()
-
-            local floor, floorEvidence = detectMainFloor()
-            setMainFloor(floor, floorEvidence)
-
-            local zone, zoneEvidence = detectZoneByPosition()
-            setZone(zone, zoneEvidence)
-        end)
-
-        task.wait(TYCOON_INTERVAL)
-    end
-end)
-
-task.spawn(function()
-    while State.Running do
-        safeCall("UI_LOOP", function()
-            refreshUI()
-        end)
-
-        task.wait(0.5)
-    end
-end)
-
-UI.Status.Text = "V2.4.2 pronta. Leitura PAUSADA. GUI=" .. tostring(UI.ParentKind)
-safeCall("UI_INITIAL_REFRESH", function()
-    refreshUI()
-end)
