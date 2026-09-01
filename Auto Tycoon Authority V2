@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V2.1.1
+PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V2.2.1
 DESTINO: LocalScript / ambiente de teste do cliente
 
 OBJETIVO
@@ -24,11 +24,12 @@ local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 
-local VERSION = "SERVER-RESPONSE-RESEARCH-2.1"
-local GUI_NAME = "PsicoTycoonServerResponseResearchV2_1"
+local VERSION = "SERVER-RESPONSE-RESEARCH-2.2"
+local GUI_NAME = "PsicoTycoonServerResponseResearchV2_2"
 local MAX_EVENTS = 3500
 local SAMPLE_INTERVAL = 0.20
 local CORRELATION_WINDOW = 4.0
+local PURCHASE_RESPONSE_WINDOW = 1.0
 
 local Player = Players.LocalPlayer
 if not Player then
@@ -67,6 +68,16 @@ local State = {
         Accepted = 0,
         Rejected = 0,
         Unresolved = 0,
+    },
+
+    LastRemovedButton = nil,
+    PrimaryTycoonMoneySignals = {
+        SuccessRemote = "TycoonService.ButtonPurchased",
+        RejectRemote = "TycoonService.ButtonCannotPurchase",
+        Direction = "SERVER_TO_CLIENT",
+        ClientRequestPayloadObserved = false,
+        ClientRequestMechanismObserved = false,
+        Note = "This client-side observer confirms server responses, not the exact client-to-server purchase request payload.",
     },
 }
 
@@ -362,7 +373,19 @@ local function nearestButtonInfo()
     return best
 end
 
-local function finalizePendingResponse(status, remoteName, remoteElapsed)
+local finalizePendingResponse
+
+
+local function expirePendingResponse(nowElapsed)
+    local pending = State.PendingPurchaseResponse
+    if not pending then return end
+    local started = pending.StartedElapsed or nowElapsed
+    if (nowElapsed - started) > PURCHASE_RESPONSE_WINDOW then
+        finalizePendingResponse("UNRESOLVED", "TIMEOUT", nowElapsed)
+    end
+end
+
+finalizePendingResponse = function(status, remoteName, remoteElapsed)
     if not State.VerificationActive then return end
 
     local pending = State.PendingPurchaseResponse or {
@@ -374,10 +397,36 @@ local function finalizePendingResponse(status, remoteName, remoteElapsed)
 
     pending.Status = status
     pending.RemoteName = remoteName
+    pending.SignalDirection = "SERVER_TO_CLIENT"
+    pending.RequirementResult =
+        status == "ACCEPTED" and "REQUIREMENTS_CONFIRMED_BY_SERVER_RESPONSE" or
+        status == "REJECTED" and "REQUIREMENTS_REJECTED_BY_SERVER_RESPONSE" or
+        "NO_TERMINAL_SERVER_RESPONSE"
+
     pending.ResponseElapsed = remoteElapsed or elapsed()
     pending.ResponseUnix = os.time()
     pending.ResponseLatency = pending.ResponseElapsed - (pending.StartedElapsed or pending.ResponseElapsed)
     pending.EconomyAfter = snapshotEconomy()
+
+    if pending.CandidateButton then
+        pending.TargetName = pending.CandidateButton.Name
+        pending.TargetPath = pending.CandidateButton.Path
+        pending.TargetInference = pending.TargetInference or "BUTTON_REMOVED"
+    elseif pending.NearbyButton then
+        pending.TargetName = pending.NearbyButton.Name
+        pending.TargetPath = pending.NearbyButton.Path
+        pending.TargetInference = pending.TargetInference or "NEARBY_BUTTON_FALLBACK"
+    end
+
+    if status == "REJECTED" and not pending.CandidateButton then
+        local nearby = nearestButtonInfo()
+        if nearby then
+            pending.NearbyButton = nearby
+            pending.TargetName = nearby.Name
+            pending.TargetPath = nearby.Path
+            pending.TargetInference = "NEARBY_BUTTON_AT_REJECTION"
+        end
+    end
 
     if status == "ACCEPTED" then
         State.ResponseCounters.Accepted += 1
@@ -395,6 +444,12 @@ local function finalizePendingResponse(status, remoteName, remoteElapsed)
         Id = pending.Id,
         RemoteName = remoteName,
         ResponseLatency = pending.ResponseLatency,
+        TargetName = pending.TargetName,
+        TargetPath = pending.TargetPath,
+        TargetInference = pending.TargetInference,
+        RequirementResult = pending.RequirementResult,
+        SignalDirection = pending.SignalDirection,
+        CandidateButton = pending.CandidateButton,
         NearbyButton = pending.NearbyButton,
         EconomyBefore = pending.EconomyBefore,
         EconomyAfter = pending.EconomyAfter,
@@ -404,12 +459,43 @@ end
 local function notePurchaseStructure(kind, details)
     if not State.VerificationActive then return end
 
-    if not State.PendingPurchaseResponse then
+    local nowElapsed = elapsed()
+    if State.PendingPurchaseResponse then
+        local started = State.PendingPurchaseResponse.StartedElapsed or nowElapsed
+        if (nowElapsed - started) > PURCHASE_RESPONSE_WINDOW then
+            finalizePendingResponse("UNRESOLVED", "TIMEOUT", nowElapsed)
+        end
+    end
+
+    if kind == "BUTTON_REMOVED" then
+        -- Strongest target identity for an accepted purchase:
+        -- capture the button immediately, before it disappears from Buttons.
+        State.LastRemovedButton = {
+            Details = details,
+            Elapsed = nowElapsed,
+            Unix = os.time(),
+        }
+
+        -- A new removed button starts a fresh response correlation.
+        if State.PendingPurchaseResponse then
+            finalizePendingResponse("UNRESOLVED", "REPLACED_BY_NEW_BUTTON_REMOVAL", nowElapsed)
+        end
+
         State.PendingPurchaseResponse = {
             StartedUnix = os.time(),
-            StartedElapsed = elapsed(),
+            StartedElapsed = nowElapsed,
+            EconomyBefore = snapshotEconomy(),
+            CandidateButton = details,
+            TargetInference = "BUTTON_REMOVED",
+            StructuralEvidence = {},
+        }
+    elseif not State.PendingPurchaseResponse then
+        State.PendingPurchaseResponse = {
+            StartedUnix = os.time(),
+            StartedElapsed = nowElapsed,
             EconomyBefore = snapshotEconomy(),
             NearbyButton = nearestButtonInfo(),
+            TargetInference = "NEARBY_BUTTON_FALLBACK",
             StructuralEvidence = {},
         }
     end
@@ -417,7 +503,7 @@ local function notePurchaseStructure(kind, details)
     State.PendingPurchaseResponse.StructuralEvidence = State.PendingPurchaseResponse.StructuralEvidence or {}
     table.insert(State.PendingPurchaseResponse.StructuralEvidence, {
         Kind = kind,
-        Elapsed = elapsed(),
+        Elapsed = nowElapsed,
         Details = details,
     })
 
@@ -425,6 +511,11 @@ local function notePurchaseStructure(kind, details)
         State.PendingPurchaseResponse.ButtonRemoved = details
     elseif kind == "PURCHASE_ADDED" then
         State.PendingPurchaseResponse.PurchaseAdded = details
+
+        local candidate = State.PendingPurchaseResponse.CandidateButton
+        if candidate and candidate.Name and details and details.Name == candidate.Name then
+            State.PendingPurchaseResponse.TargetConfirmedByPurchaseAdded = true
+        end
     end
 end
 
@@ -472,17 +563,43 @@ local function catalogRemote(obj)
             pushEvent("REMOTE_ON_CLIENT_EVENT", inbound)
 
             if obj.Name == "ButtonPurchased" then
-                finalizePendingResponse("ACCEPTED", obj.Name, inbound.Elapsed)
-            elseif obj.Name == "ButtonCannotPurchase" then
-                if not State.PendingPurchaseResponse then
-                    State.PendingPurchaseResponse = {
-                        StartedUnix = os.time(),
-                        StartedElapsed = inbound.Elapsed,
-                        EconomyBefore = snapshotEconomy(),
-                        NearbyButton = nearestButtonInfo(),
-                        StructuralEvidence = {},
-                    }
+                expirePendingResponse(inbound.Elapsed)
+
+                -- If BUTTON_REMOVED happened immediately before this signal,
+                -- it is the strongest observable target identity.
+                local removed = State.LastRemovedButton
+                if removed and (inbound.Elapsed - removed.Elapsed) <= PURCHASE_RESPONSE_WINDOW then
+                    if not State.PendingPurchaseResponse then
+                        State.PendingPurchaseResponse = {
+                            StartedUnix = removed.Unix,
+                            StartedElapsed = removed.Elapsed,
+                            EconomyBefore = snapshotEconomy(),
+                            CandidateButton = removed.Details,
+                            ButtonRemoved = removed.Details,
+                            TargetInference = "BUTTON_REMOVED",
+                            StructuralEvidence = {},
+                        }
+                    elseif not State.PendingPurchaseResponse.CandidateButton then
+                        State.PendingPurchaseResponse.CandidateButton = removed.Details
+                        State.PendingPurchaseResponse.ButtonRemoved = removed.Details
+                        State.PendingPurchaseResponse.TargetInference = "BUTTON_REMOVED"
+                    end
                 end
+
+                finalizePendingResponse("ACCEPTED", obj.Name, inbound.Elapsed)
+
+            elseif obj.Name == "ButtonCannotPurchase" then
+                -- Rejection normally leaves the target button in place.
+                -- Use proximity only at the instant of the rejection and never
+                -- carry a previous successful purchase into this record.
+                State.PendingPurchaseResponse = {
+                    StartedUnix = os.time(),
+                    StartedElapsed = inbound.Elapsed,
+                    EconomyBefore = snapshotEconomy(),
+                    NearbyButton = nearestButtonInfo(),
+                    TargetInference = "NEARBY_BUTTON_AT_REJECTION",
+                    StructuralEvidence = {},
+                }
                 finalizePendingResponse("REJECTED", obj.Name, inbound.Elapsed)
             end
         end)
@@ -636,6 +753,7 @@ local function beginVerification()
     State.Events = {}
     State.PurchaseResponses = {}
     State.PendingPurchaseResponse = nil
+    State.LastRemovedButton = nil
     State.ResponseCounters = {
         Accepted = 0,
         Rejected = 0,
@@ -757,7 +875,7 @@ local function createGui()
     title.Position = UDim2.new(0, 12, 0, 0)
     title.BackgroundTransparency = 1
     title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V2.1"
+    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V2.2"
     title.TextColor3 = Color3.fromRGB(83,226,169)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 11
@@ -827,7 +945,7 @@ local function createGui()
     export.TextColor3 = Color3.fromRGB(238,242,250)
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
-    export.Text = "Exportar SERVER RESPONSE V2.1 (.txt)"
+    export.Text = "Exportar SERVER RESPONSE V2.2 (.txt)"
     export.Parent = main
     round(export, 8)
 
@@ -916,6 +1034,7 @@ local function createGui()
                 CapturedCorrelations = #State.Correlations,
                 PurchaseResponses = State.PurchaseResponses,
                 ResponseCounters = State.ResponseCounters,
+                PrimaryTycoonMoneySignals = State.PrimaryTycoonMoneySignals,
             },
             Policy = {
                 Perspective = "server response as observed by client",
@@ -926,6 +1045,8 @@ local function createGui()
                 RebirthMutation = false,
                 UnknownRemoteInvocation = false,
                 ServerAuthorizationForgery = false,
+                OutboundPurchaseRequestCaptured = false,
+                OutboundPurchaseRequestPayloadKnown = false,
                 Notes = "Inbound RemoteEvent activity and replicated state changes are observational evidence, not internal server state.",
             },
         }
@@ -936,7 +1057,7 @@ local function createGui()
             return
         end
 
-        local filename = "Auto_Tycoon_Server_Response_Research_V2_1_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
+        local filename = "Auto_Tycoon_Server_Response_Research_V2_2_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
         local saved, copied = false, false
 
         if type(writefile) == "function" then
@@ -1039,7 +1160,8 @@ task.spawn(function()
                 UI.Log.Text =
                     "Verificacao pausada.\n" ..
                     "Toque em Iniciar verificacao antes das compras.\n" ..
-                    "Ao terminar, toque em Parar verificacao e exporte o relatorio."
+                    "Ao terminar, toque em Parar verificacao e exporte o relatorio.\n" ..
+                    "Principal: ButtonPurchased=aceito | ButtonCannotPurchase=recusado."
             end
         end
 
