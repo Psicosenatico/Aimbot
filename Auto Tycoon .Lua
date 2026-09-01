@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.6.1 + TOTEM COLLECT - STARTUP FIX
+PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.6.2 + CONTINUOUS TOTEM COLLECT
 COMPATIBILITY / STABILITY BUILD
 
 Purchase automation + diagnostics - authorized teleport test build.
@@ -9,6 +9,8 @@ Does not alter Money/Rebirths or fake Marketplace receipts.
 BUNKER transition remains the game's normal transition instead of long-distance teleport.
 Auto-collect in this build uses the character's physical collector/totem interaction.
 The character is moved directly to the local Tycoon collector; success is confirmed only if the observed wallet Money becomes greater than before.
+When all current purchase targets are blocked by insufficient funds, Collector is rechecked continuously; every time it reaches at least 1000, collection is attempted again.
+As soon as Money is sufficient for an available purchase, collection pauses and the purchase queue resumes.
 Known ButtonPurchased/ButtonCannotPurchase server-to-client responses are still observed to avoid fixed multi-second waits.
 
 Purchase classes:
@@ -41,8 +43,8 @@ local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "AUTO-TP-1.6.1"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorTotemCollectV1_6_1"
+local VERSION = "AUTO-TP-1.6.2"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorTotemCollectV1_6_2"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -124,6 +126,8 @@ local State = {
     TotemCollectSuccessful = 0,
     TotemCollectFailed = 0,
     LastTotemCollectClock = 0,
+    IdleCollectChecks = 0,
+    IdleCollectTriggers = 0,
     AutomationLastRebirth = nil,
     AutomationRunId = 0,
     AutomationSuccessful = 0,
@@ -665,7 +669,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.6.1 - totem collect + startup fix"
+    version.Text = "AUTO V1.6.2 - continuous totem collect"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -832,7 +836,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.6.1 (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.6.2 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -914,14 +918,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Automator V1.6.1] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.6.2] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Automator V1.6.1] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator V1.6.2] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -2468,6 +2472,8 @@ local AUTO_POST_RESULT_WAIT = 0.08
 local AUTO_ARRIVE_DISTANCE = 5.5
 local AUTO_COLLECT_MIN = 1000
 local AUTO_COLLECT_CONFIRM_TIMEOUT = 4
+local AUTO_COLLECT_RECHECK_INTERVAL = 0.30
+local AUTO_COLLECT_MIN_GAP = 0.75
 
 -- Forward declaration used by the collector routine.
 local autoRefreshFundsBlocks
@@ -2939,9 +2945,13 @@ local function autoCandidateScore(record)
     -- Rebirth purchases do not consume Money and should not be starved by
     -- repeatedly rejected ordinary-money buttons.
     if record.Type == "REBIRTH" then
-        score = score - 30
+        score = score - 40
     elseif record.Type == "TYCOON_MONEY" then
-        score = score - 10
+        if price ~= nil and State.LastMoney ~= nil and State.LastMoney >= price then
+            score = score - 30
+        else
+            score = score - 5
+        end
     end
 
     if required then score = score + required * 0.001 end
@@ -2970,6 +2980,128 @@ autoRefreshFundsBlocks = function()
             end
         end
     end
+end
+
+
+local function autoBlockedFundsSummary()
+    local count = 0
+    local cheapestPrice = nil
+    local cheapestName = nil
+
+    for key, block in pairs(State.AutomationBlockedFunds) do
+        if block then
+            local price = tonumber(block.Price)
+            count = count + 1
+
+            if price ~= nil and (cheapestPrice == nil or price < cheapestPrice) then
+                cheapestPrice = price
+                cheapestName = block.Name
+            end
+        end
+    end
+
+    return count, cheapestPrice, cheapestName
+end
+
+local function autoShouldIdleCollect()
+    autoRefreshFundsBlocks()
+
+    local blockedCount, cheapestBlockedPrice, cheapestBlockedName = autoBlockedFundsSummary()
+    if blockedCount <= 0 then
+        return false, "NO_BLOCKED_FUNDS_PURCHASES"
+    end
+
+    local money = State.LastMoney
+    if money == nil then
+        return false, "MONEY_UNAVAILABLE"
+    end
+
+    -- If any blocked purchase is now affordable, let normal candidate selection buy it.
+    if cheapestBlockedPrice ~= nil and money >= cheapestBlockedPrice then
+        return false, "PURCHASE_NOW_AFFORDABLE"
+    end
+
+    local collectorAmount, collectorPath = autoCollectorAmount()
+    State.IdleCollectChecks = State.IdleCollectChecks + 1
+
+    if collectorAmount == nil then
+        return false, "COLLECTOR_UNAVAILABLE", {
+            BlockedCount = blockedCount,
+            CheapestBlockedPrice = cheapestBlockedPrice,
+            CheapestBlockedName = cheapestBlockedName,
+            Money = money,
+        }
+    end
+
+    if collectorAmount < AUTO_COLLECT_MIN then
+        return false, "COLLECTOR_BELOW_THRESHOLD", {
+            BlockedCount = blockedCount,
+            CheapestBlockedPrice = cheapestBlockedPrice,
+            CheapestBlockedName = cheapestBlockedName,
+            Money = money,
+            CollectorAmount = collectorAmount,
+            CollectorPath = collectorPath,
+        }
+    end
+
+    if os.clock() - (State.LastTotemCollectClock or 0) < AUTO_COLLECT_MIN_GAP then
+        return false, "COLLECT_GAP_ACTIVE"
+    end
+
+    return true, "BLOCKED_PURCHASES_AND_COLLECTOR_READY", {
+        BlockedCount = blockedCount,
+        CheapestBlockedPrice = cheapestBlockedPrice,
+        CheapestBlockedName = cheapestBlockedName,
+        Money = money,
+        CollectorAmount = collectorAmount,
+        CollectorPath = collectorPath,
+    }
+end
+
+local function autoTryContinuousIdleCollect()
+    local shouldCollect, reason, details = autoShouldIdleCollect()
+
+    if not shouldCollect then
+        return false, reason
+    end
+
+    State.IdleCollectTriggers = State.IdleCollectTriggers + 1
+
+    autoRecord("CONTINUOUS_COLLECT_TRIGGERED", {
+        Reason = reason,
+        BlockedCount = details and details.BlockedCount,
+        CheapestBlockedPrice = details and details.CheapestBlockedPrice,
+        CheapestBlockedName = details and details.CheapestBlockedName,
+        Money = details and details.Money,
+        CollectorAmount = details and details.CollectorAmount,
+        CollectorPath = details and details.CollectorPath,
+        Threshold = AUTO_COLLECT_MIN,
+    })
+
+    local collected, collectReason = autoTeleportToCollectorAndConfirm()
+
+    if collected then
+        autoRefreshFundsBlocks()
+
+        local _, cheapestAfter, cheapestNameAfter = autoBlockedFundsSummary()
+        autoRecord("CONTINUOUS_COLLECT_CYCLE_COMPLETE", {
+            Result = collectReason,
+            Money = State.LastMoney,
+            CheapestBlockedPrice = cheapestAfter,
+            CheapestBlockedName = cheapestNameAfter,
+            NextAction = cheapestAfter and State.LastMoney and State.LastMoney >= cheapestAfter
+                and "RESUME_PURCHASES"
+                or "WAIT_FOR_COLLECTOR_1000",
+        })
+
+        return true, collectReason
+    end
+
+    autoRecord("CONTINUOUS_COLLECT_CYCLE_FAILED", {
+        Reason = collectReason,
+    })
+
+    return false, collectReason
 end
 
 local function autoSelectCandidate()
@@ -3253,7 +3385,9 @@ local function setAutomation(enabled)
         State.Health.Automation = "ACTIVE"
         State.AutomationTarget = nil
         State.AutomationCooldowns = {}
-        State.AutomationBlockedFunds = {}
+        -- Preserve insufficient-funds memory across OFF/ON toggles.
+        -- Rebirth reset remains the place that clears this table.
+        autoRefreshFundsBlocks()
         State.AutomationServerSignal = nil
         State.AutomationLastRebirth = State.LastRebirths
 
@@ -3263,7 +3397,7 @@ local function setAutomation(enabled)
             Rebirths = State.LastRebirths,
             Floor = State.MainFloor,
             Zone = State.CurrentZone,
-            Policy = "Rejected insufficient-money buttons stay blocked; collector >=1000 teleports character to the local Tycoon collector; collection is confirmed only when observed wallet Money increases; blocked buttons are released only when affordable.",
+            Policy = "Continuous cycle: rejected insufficient-money buttons remain blocked; when no purchase can be made, Collector is checked continuously and collected at >=1000; purchases resume immediately once Money is enough for an available target.",
         })
     else
         autoRecord("AUTOMATION_STOPPED", {
@@ -3314,9 +3448,17 @@ task.spawn(function()
 
                 local target = autoSelectCandidate()
                 if not target then
-                    State.AutomationState = "WAITING"
-                    State.Health.Automation = "WAITING"
-                    task.wait(AUTO_IDLE_WAIT)
+                    State.AutomationState = "WAITING_FOR_FUNDS"
+                    State.Health.Automation = "WAITING_FOR_FUNDS"
+
+                    local collected = autoTryContinuousIdleCollect()
+                    if collected then
+                        State.AutomationState = "SCANNING"
+                        State.Health.Automation = "ACTIVE"
+                        task.wait(AUTO_POST_RESULT_WAIT)
+                    else
+                        task.wait(AUTO_COLLECT_RECHECK_INTERVAL)
+                    end
                     return
                 end
 
@@ -3434,6 +3576,8 @@ local function buildReport()
             TotemCollectAttempts = State.TotemCollectAttempts,
             TotemCollectSuccessful = State.TotemCollectSuccessful,
             TotemCollectFailed = State.TotemCollectFailed,
+            IdleCollectChecks = State.IdleCollectChecks,
+            IdleCollectTriggers = State.IdleCollectTriggers,
             FundsBlocked = State.AutomationBlockedFunds,
             Attempts = State.AutomationAttempts,
             RebirthResets = State.AutomationResets,
@@ -3442,6 +3586,9 @@ local function buildReport()
                 AutoCollectTrigger = "AFTER_REJECTED_TYCOON_MONEY_WHEN_LOCAL_MONEY_BELOW_PRICE_AND_COLLECTOR_AT_LEAST_1000",
                 AutoCollectConfirmation = "REAL_WALLET_MONEY_MUST_INCREASE",
                 InsufficientFundsMemory = "KEEP_BLOCKED_UNTIL_OBSERVED_MONEY_AT_LEAST_PRICE",
+                ContinuousCollectorPolling = true,
+                ContinuousCollectorThreshold = 1000,
+                CollectorPollingOnlyWhenNoPurchaseCandidate = true,
                 AutoCollectMovement = "DIRECT_LOCAL_CHARACTER_TELEPORT_TO_COLLECTOR",
                 AutoCollectEndpoint = "PHYSICAL_TOTEM_TOUCH_BY_CHARACTER",
                 AutoCollectDirectRemoteInvocation = false,
@@ -3499,7 +3646,7 @@ end
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_6_1_TotemCollect_" ..
+        "Tycoon_Purchase_Automator_V1_6_2_ContinuousTotemCollect_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
@@ -3688,7 +3835,7 @@ task.spawn(function()
     end
 end)
 
-UI.Status.Text = "AUTO V1.6.1 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "AUTO V1.6.2 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
 safeCall("UI_INITIAL_REFRESH", function()
     refreshUI()
 end)
