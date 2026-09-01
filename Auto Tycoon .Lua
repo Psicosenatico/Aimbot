@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.7.5 + TWO-STEP AUTO REBIRTH
+PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.7.5.1 + BOOTSTRAP-SAFE TWO-STEP AUTO REBIRTH
 COMPATIBILITY / STABILITY BUILD
 
 Purchase automation + diagnostics - authorized teleport test build.
@@ -13,9 +13,11 @@ When all current purchase targets are blocked by insufficient funds, Collector i
 As soon as Money is sufficient for an available purchase, collection pauses and the purchase queue resumes.
 Known ButtonPurchased/ButtonCannotPurchase server-to-client responses are still observed to avoid fixed multi-second waits.
 Auto Rebirth is tied to the same automation toggle and follows the observed two-step UI flow:
-first open the Rebirth panel from the HUD, then press the normal confirmation button inside
-RebirthGui. It never invokes an unknown Rebirth remote directly and confirms success only
-after the observed leaderstats Rebirths value increases.
+(1) open the Rebirth panel from the normal HUD button; (2) press the normal Rebirth confirmation
+inside RebirthGui. It never invokes an unknown Rebirth remote directly and confirms success
+only after the observed leaderstats Rebirths value increases.
+This V1.7.5.1 is rebuilt from the known-working V1.7.4 bootstrap and deliberately adds no new
+top-level helper locals for the two-step flow; all new helpers are scoped inside autoAttemptRebirth.
 
 Purchase classes:
 - TYCOON_MONEY
@@ -40,9 +42,8 @@ Automation policy:
 - ROBUX_ONLY: ignored
 - UNKNOWN: ignored
 - AUTO REBIRTH: after the eligible purchase queue is exhausted, no funds-blocked purchase
-  remains, and SetCanRebirth/UI readiness agree, execute the normal two-step interface flow:
-  (1) open the Rebirth panel from the HUD; (2) press the normal Rebirth confirmation button.
-  Success still requires observed Rebirths N -> N+1 before reset/rescan.
+  remains, and Rebirth is confirmed ready, open the HUD Rebirth panel first, then press the
+  normal confirmation button inside it. Success still requires Rebirths N -> N+1.
 ]]
 
 local Players = game:GetService("Players")
@@ -57,8 +58,8 @@ pcall(function()
     VirtualInputManager = game:GetService("VirtualInputManager")
 end)
 
-local VERSION = "AUTO-TP-1.7.5"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_5"
+local VERSION = "AUTO-TP-1.7.5.1"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_5_1"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -164,15 +165,6 @@ local State = {
     AutoRebirthFailed = 0,
     AutoRebirthLastAttemptClock = 0,
     AutoRebirthLastMethod = nil,
-    AutoRebirthPhase = "IDLE",
-    AutoRebirthOpenerPath = nil,
-    AutoRebirthOpenerEvidence = nil,
-    AutoRebirthConfirmPath = nil,
-    AutoRebirthPanelOpen = false,
-    AutoRebirthPanelOpenTransitions = 0,
-    AutoRebirthLastPanelState = false,
-    AutoRebirthInputBackoffUntil = 0,
-    AutoRebirthStepHistory = {},
 
     AutoSaveCount = 0,
     AutoSaveLastUnix = nil,
@@ -727,7 +719,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.7.5 - auto rebirth em 2 etapas"
+    version.Text = "AUTO V1.7.5.1 - bootstrap-safe 2-step rebirth"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -894,7 +886,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.7.5 (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.7.5.1 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -982,14 +974,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Automator V1.7.5] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.7.5.1] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Automator V1.7.3] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator V1.7.5.1] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -2582,10 +2574,7 @@ local BUNKER_ZONE_TIMEOUT = 5
 local BUNKER_RESCAN_WAIT = 0.45
 local BUNKER_PURCHASE_SETTLE = 0.30
 local AUTO_REBIRTH_CONFIRM_TIMEOUT = 5
-local AUTO_REBIRTH_RETRY_COOLDOWN = 2.5
-local AUTO_REBIRTH_PANEL_OPEN_TIMEOUT = 2.5
-local AUTO_REBIRTH_STEP_CONFIRM_TIMEOUT = 1.25
-local AUTO_REBIRTH_FAILURE_BACKOFF = 8
+local AUTO_REBIRTH_RETRY_COOLDOWN = 8
 local AUTOSAVE_INTERVAL = 15
 
 -- Forward declaration used by the collector routine.
@@ -3645,8 +3634,66 @@ local function autoAttemptPurchase(record)
 end
 
 
-local function autoObjectEffectiveVisible(obj)
-    if not obj or not obj.Parent or not State.Player then
+local function autoFindRebirthButton()
+    local playerGui = State.Player and State.Player:FindFirstChild("PlayerGui")
+    if not playerGui then
+        return nil
+    end
+
+    local rebirthGui = playerGui:FindFirstChild("RebirthGui")
+    if not rebirthGui then
+        return nil
+    end
+
+    local frame = rebirthGui:FindFirstChild("Frame")
+    local buttons = frame and frame:FindFirstChild("Buttons")
+    local direct = buttons and buttons:FindFirstChild("Rebirth")
+
+    if direct and direct:IsA("GuiButton") then
+        return direct
+    end
+
+    for _, obj in ipairs(rebirthGui:GetDescendants()) do
+        if obj:IsA("GuiButton")
+        and normalize(obj.Name) == "rebirth" then
+            return obj
+        end
+    end
+
+    return nil
+end
+
+local function autoRebirthButtonText(button)
+    if not button then
+        return ""
+    end
+
+    local best = ""
+
+    local okText, directText = pcall(function()
+        return button.Text
+    end)
+    if okText and type(directText) == "string" and #directText > #best then
+        best = directText
+    end
+
+    for _, descendant in ipairs(button:GetDescendants()) do
+        if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+            local ok, value = pcall(function()
+                return descendant.Text
+            end)
+
+            if ok and type(value) == "string" and #value > #best then
+                best = value
+            end
+        end
+    end
+
+    return best
+end
+
+local function autoGuiActuallyVisible(button)
+    if not button or not button.Parent or not State.Player then
         return false
     end
 
@@ -3655,7 +3702,8 @@ local function autoObjectEffectiveVisible(obj)
         return false
     end
 
-    local current = obj
+    local current = button
+
     while current do
         if current:IsA("GuiObject") then
             local ok, visible = pcall(function()
@@ -3676,563 +3724,101 @@ local function autoObjectEffectiveVisible(obj)
         if current == playerGui then
             break
         end
+
         current = current.Parent
     end
 
     return true
 end
 
-local function autoGuiObjectOnScreen(obj)
-    if not obj or not obj:IsA("GuiObject") then
-        return false
-    end
-
-    local ok, visible = pcall(function()
-        local pos = obj.AbsolutePosition
-        local size = obj.AbsoluteSize
-        local camera = workspace.CurrentCamera
-        local viewport = camera and camera.ViewportSize or Vector2.new(0, 0)
-
-        if size.X <= 1 or size.Y <= 1 then
-            return false
-        end
-
-        if viewport.X <= 1 or viewport.Y <= 1 then
-            return true
-        end
-
-        return pos.X + size.X > 0
-            and pos.Y + size.Y > 0
-            and pos.X < viewport.X
-            and pos.Y < viewport.Y
-    end)
-
-    return ok and visible == true
-end
-
-local function autoRebirthGuiObjects()
-    local playerGui = State.Player and State.Player:FindFirstChild("PlayerGui")
-    if not playerGui then
-        return nil, nil, nil, nil
-    end
-
-    local rebirthGui = playerGui:FindFirstChild("RebirthGui")
-    local frame = rebirthGui and rebirthGui:FindFirstChild("Frame")
-    local buttons = frame and frame:FindFirstChild("Buttons")
-    local confirm = buttons and buttons:FindFirstChild("Rebirth")
-
-    return rebirthGui, frame, buttons, confirm
-end
-
-local function autoRebirthPanelIsOpen()
-    local rebirthGui, frame = autoRebirthGuiObjects()
-    if not rebirthGui or not frame then
-        State.AutoRebirthPanelOpen = false
-        return false, "REBIRTH_PANEL_NOT_FOUND"
-    end
-
-    local enabled = true
-    if rebirthGui:IsA("ScreenGui") then
-        local ok, value = pcall(function()
-            return rebirthGui.Enabled
-        end)
-        if ok then
-            enabled = value == true
-        end
-    end
-
-    local frameVisible = false
-    if frame:IsA("GuiObject") then
-        local ok, value = pcall(function()
-            return frame.Visible
-        end)
-        if ok then
-            frameVisible = value == true
-        end
-    end
-
-    local open = enabled
-        and frameVisible
-        and autoObjectEffectiveVisible(frame)
-        and autoGuiObjectOnScreen(frame)
-
-    if open ~= State.AutoRebirthLastPanelState then
-        State.AutoRebirthLastPanelState = open
-        State.AutoRebirthPanelOpenTransitions = State.AutoRebirthPanelOpenTransitions + 1
-        autoRecord("AUTO_REBIRTH_PANEL_STATE_CHANGED", {
-            Open = open,
-            ScreenGuiEnabled = enabled,
-            FrameVisible = frameVisible,
-            FramePath = safeFullName(frame),
-            TransitionIndex = State.AutoRebirthPanelOpenTransitions,
-        })
-    end
-
-    State.AutoRebirthPanelOpen = open
-    return open, open and "REBIRTH_PANEL_OPEN" or "REBIRTH_PANEL_CLOSED"
-end
-
-local function autoRebirthShortRelevantText(value)
-    local raw = tostring(value or "")
-    local norm = normalize(raw)
-    if norm == "" or #raw > 48 then
-        return false
-    end
-
-    return norm == "rebirth"
-        or norm == "rebirths"
-        or norm == "renascimento"
-        or norm == "renascimentos"
-        or norm == "renascer"
-        or norm == "prestige"
-        or norm == "prestigio"
-        or norm == "prestígio"
-end
-
-local function autoRebirthButtonLabel(button)
+local function autoGetRebirthReadiness()
+    local button = autoFindRebirthButton()
     if not button then
-        return ""
+        return false, "REBIRTH_BUTTON_NOT_FOUND", nil, nil
     end
 
-    local best = ""
-    local okText, ownText = pcall(function()
-        return button.Text
-    end)
-    if okText and type(ownText) == "string" and #ownText > #best then
-        best = ownText
-    end
+    local interactable = false
+    local active = false
 
-    local scanned = 0
-    for _, descendant in ipairs(button:GetDescendants()) do
-        scanned = scanned + 1
-        if scanned > 80 then
-            break
-        end
-
-        if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
-            local ok, value = pcall(function()
-                return descendant.Text
-            end)
-            if ok and type(value) == "string" and #value > #best then
-                best = value
-            end
-        end
-    end
-
-    return best
-end
-
-local function autoFindRebirthConfirmButton()
-    local _, _, _, confirm = autoRebirthGuiObjects()
-    if confirm and confirm:IsA("GuiButton") then
-        State.AutoRebirthConfirmPath = safeFullName(confirm)
-        return confirm
-    end
-
-    return nil
-end
-
-local function autoRebirthOpenerScore(button, rebirthGui)
-    if not button or not button:IsA("GuiButton") then
-        return -math.huge, nil
-    end
-
-    if rebirthGui and button:IsDescendantOf(rebirthGui) then
-        return -math.huge, nil
-    end
-
-    local nameNorm = normalize(button.Name)
-    if string.find(nameNorm, "instant", 1, true) then
-        return -math.huge, nil
-    end
-
-    local score = 0
-    local evidence = {}
-
-    if nameNorm == "rebirth" or nameNorm == "rebirthbutton" or nameNorm == "rebirthmenu" then
-        score = score + 140
-        table.insert(evidence, "EXACT_NAME_REBIRTH")
-    elseif string.find(nameNorm, "rebirth", 1, true) then
-        score = score + 110
-        table.insert(evidence, "NAME_CONTAINS_REBIRTH")
-    elseif string.find(nameNorm, "renascimento", 1, true) or string.find(nameNorm, "renascer", 1, true) then
-        score = score + 110
-        table.insert(evidence, "NAME_CONTAINS_PORTUGUESE_REBIRTH")
-    end
-
-    local label = autoRebirthButtonLabel(button)
-    if autoRebirthShortRelevantText(label) then
-        score = score + 120
-        table.insert(evidence, "SHORT_REBIRTH_LABEL=" .. tostring(label))
-    end
-
-    if autoObjectEffectiveVisible(button) then
-        score = score + 20
-        table.insert(evidence, "EFFECTIVELY_VISIBLE")
-    end
-    if autoGuiObjectOnScreen(button) then
-        score = score + 15
-        table.insert(evidence, "ON_SCREEN")
-    end
-
-    return score, evidence
-end
-
-local function autoFindRebirthOpenerButton()
-    local playerGui = State.Player and State.Player:FindFirstChild("PlayerGui")
-    if not playerGui then
-        return nil, "PLAYER_GUI_NOT_FOUND"
-    end
-
-    local rebirthGui = playerGui:FindFirstChild("RebirthGui")
-    local bestButton = nil
-    local bestScore = -math.huge
-    local bestEvidence = nil
-
-    local all = playerGui:GetDescendants()
-    local maxScan = math.min(#all, 4000)
-
-    -- Primary strategy: the opener itself has a Rebirth-related name or short label.
-    for i = 1, maxScan do
-        local obj = all[i]
-        if obj:IsA("GuiButton") then
-            local score, evidence = autoRebirthOpenerScore(obj, rebirthGui)
-            if score > bestScore then
-                bestScore = score
-                bestButton = obj
-                bestEvidence = evidence
-            end
-        end
-    end
-
-    -- Secondary strategy for HUDs where the text label is a sibling of an ImageButton.
-    -- Only exact/short Rebirth labels are used, and candidate buttons must be spatially close.
-    if bestScore < 100 then
-        for i = 1, maxScan do
-            local label = all[i]
-            if label:IsA("TextLabel") or label:IsA("TextButton") then
-                local okText, labelText = pcall(function()
-                    return label.Text
-                end)
-
-                if okText and autoRebirthShortRelevantText(labelText) then
-                    local ancestor = label.Parent
-                    local depth = 0
-                    while ancestor and ancestor ~= playerGui and depth < 3 do
-                        if ancestor:IsA("GuiButton") and (not rebirthGui or not ancestor:IsDescendantOf(rebirthGui)) then
-                            local score, evidence = autoRebirthOpenerScore(ancestor, rebirthGui)
-                            score = score + 160
-                            table.insert(evidence, "ANCESTOR_OF_REBIRTH_LABEL")
-                            if score > bestScore then
-                                bestScore, bestButton, bestEvidence = score, ancestor, evidence
-                            end
-                            break
-                        end
-                        ancestor = ancestor.Parent
-                        depth = depth + 1
-                    end
-
-                    if label.Parent then
-                        local okLabelGeom, labelCenter = pcall(function()
-                            return label.AbsolutePosition + label.AbsoluteSize * 0.5
-                        end)
-                        if okLabelGeom then
-                            for _, sibling in ipairs(label.Parent:GetChildren()) do
-                                if sibling:IsA("GuiButton")
-                                and sibling ~= label
-                                and (not rebirthGui or not sibling:IsDescendantOf(rebirthGui)) then
-                                    local okButtonGeom, buttonCenter = pcall(function()
-                                        return sibling.AbsolutePosition + sibling.AbsoluteSize * 0.5
-                                    end)
-                                    if okButtonGeom then
-                                        local distance = (buttonCenter - labelCenter).Magnitude
-                                        if distance <= 150 then
-                                            local score, evidence = autoRebirthOpenerScore(sibling, rebirthGui)
-                                            score = score + math.max(0, 150 - distance)
-                                            table.insert(evidence, "NEAR_REBIRTH_LABEL_DISTANCE=" .. tostring(math.floor(distance)))
-                                            if score > bestScore then
-                                                bestScore, bestButton, bestEvidence = score, sibling, evidence
-                                            end
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    if not bestButton or bestScore < 80 then
-        return nil, "NO_CONFIDENT_HUD_REBIRTH_OPENER"
-    end
-
-    State.AutoRebirthOpenerPath = safeFullName(bestButton)
-    State.AutoRebirthOpenerEvidence = bestEvidence
-
-    return bestButton, table.concat(bestEvidence or {}, ";") .. ";score=" .. tostring(math.floor(bestScore))
-end
-
-local function autoGuiButtonInteractable(button)
-    if not button or not button:IsA("GuiButton") then
-        return false
-    end
-
-    local interactable = true
-    local active = true
-
-    local okInteractable, valueInteractable = pcall(function()
+    local okInteractable, interactableValue = pcall(function()
         return button.Interactable
     end)
     if okInteractable then
-        interactable = valueInteractable == true
+        interactable = interactableValue == true
     end
 
-    local okActive, valueActive = pcall(function()
+    local okActive, activeValue = pcall(function()
         return button.Active
     end)
     if okActive then
-        active = valueActive == true
+        active = activeValue == true
     end
 
-    return interactable and active
-end
-
-local function autoGetRebirthReadiness()
-    local button = autoFindRebirthConfirmButton()
-    if not button then
-        return false, "REBIRTH_CONFIRM_BUTTON_NOT_FOUND", nil, nil
-    end
-
-    local buttonText = autoRebirthButtonLabel(button)
-    local textNorm = normalize(buttonText)
+    local textValue = autoRebirthButtonText(button)
+    local textNorm = normalize(textValue)
     local saysButtonsLeft =
         string.find(textNorm, "buttonsleft", 1, true) ~= nil
         or string.find(textNorm, "buttonleft", 1, true) ~= nil
 
-    local uiReady = autoGuiButtonInteractable(button) and not saysButtonsLeft
+    local uiReady = interactable and active and not saysButtonsLeft
 
     if uiReady then
         return true,
-            State.AutoRebirthServerReady and "SERVER_TRUE_AND_CONFIRM_INTERACTABLE" or "CONFIRM_INTERACTABLE_READY",
+            State.AutoRebirthServerReady and "SERVER_TRUE_AND_UI_INTERACTABLE" or "UI_INTERACTABLE_READY",
             button,
-            buttonText
+            textValue
     end
 
-    return false, "CONFIRM_UI_NOT_READY", button, buttonText
+    return false, "UI_NOT_READY", button, textValue
 end
 
-local function autoVirtualClickGuiButton(button)
-    if not VirtualInputManager then
-        return false, "VIRTUAL_INPUT_UNAVAILABLE"
-    end
-    if not autoObjectEffectiveVisible(button) or not autoGuiObjectOnScreen(button) then
-        return false, "BUTTON_NOT_EFFECTIVELY_VISIBLE"
+local function autoActivateRebirthButton(button)
+    if not button or not button.Parent then
+        return false, "REBIRTH_BUTTON_UNAVAILABLE"
     end
 
-    local ok, err = pcall(function()
-        local pos = button.AbsolutePosition
-        local size = button.AbsoluteSize
-        local x = math.floor(pos.X + size.X * 0.5)
-        local y = math.floor(pos.Y + size.Y * 0.5)
+    if VirtualInputManager and autoGuiActuallyVisible(button) then
+        local ok, err = pcall(function()
+            local pos = button.AbsolutePosition
+            local size = button.AbsoluteSize
+            local x = math.floor(pos.X + size.X * 0.5)
+            local y = math.floor(pos.Y + size.Y * 0.5)
 
-        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
-        task.wait(0.06)
-        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
-    end)
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+            task.wait(0.06)
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        end)
 
-    if ok then
-        return true, "VIRTUAL_INPUT_GUI_CLICK"
-    end
-    return false, "VIRTUAL_INPUT_FAILED:" .. tostring(err)
-end
-
-local function autoFireGuiSignal(button, signalName)
-    if type(firesignal) ~= "function" then
-        return false, "FIRESIGNAL_UNAVAILABLE"
-    end
-
-    local signal = nil
-    local okSignal = pcall(function()
-        signal = button[signalName]
-    end)
-    if not okSignal or not signal then
-        return false, "SIGNAL_NOT_AVAILABLE:" .. tostring(signalName)
-    end
-
-    local ok, err = pcall(function()
-        if signalName == "Activated" then
-            firesignal(signal, nil, 1)
-        else
-            firesignal(signal)
+        if ok then
+            return true, "VIRTUAL_INPUT_GUI_CLICK"
         end
-    end)
 
-    if ok then
-        return true, "FIRESIGNAL_" .. string.upper(signalName)
-    end
-    return false, "FIRESIGNAL_FAILED_" .. tostring(signalName) .. ":" .. tostring(err)
-end
-
-local function autoWaitForPanelOpen(timeoutSeconds)
-    local started = os.clock()
-    while State.Running and State.AutomationEnabled and os.clock() - started <= timeoutSeconds do
-        local open = autoRebirthPanelIsOpen()
-        if open then
-            return true
-        end
-        task.wait(0.05)
-    end
-    return false
-end
-
-local function autoOpenRebirthPanel(attemptId)
-    local alreadyOpen = autoRebirthPanelIsOpen()
-    if alreadyOpen then
-        return true, "PANEL_ALREADY_OPEN", nil
-    end
-
-    local opener, evidence = autoFindRebirthOpenerButton()
-    if not opener then
-        autoRecord("AUTO_REBIRTH_OPENER_NOT_FOUND", {
-            AttemptId = attemptId,
-            Evidence = evidence,
+        autoRecord("AUTO_REBIRTH_INPUT_WARNING", {
+            Method = "VIRTUAL_INPUT_GUI_CLICK",
+            Error = tostring(err),
+            FallbackAvailable = type(firesignal) == "function",
         })
-        return false, evidence, nil
     end
 
-    autoRecord("AUTO_REBIRTH_OPENER_SELECTED", {
-        AttemptId = attemptId,
-        Path = safeFullName(opener),
-        Name = opener.Name,
-        Label = autoRebirthButtonLabel(opener),
-        Evidence = evidence,
-    })
+    if type(firesignal) == "function" then
+        local ok, err = pcall(function()
+            firesignal(button.Activated, nil, 1)
+        end)
 
-    local methods = {
-        {Kind = "SIGNAL", Value = "MouseButton1Click"},
-        {Kind = "VIRTUAL", Value = "VirtualInput"},
-        {Kind = "SIGNAL", Value = "Activated"},
-    }
-
-    for index, method in ipairs(methods) do
-        local sent, methodName
-        if method.Kind == "SIGNAL" then
-            sent, methodName = autoFireGuiSignal(opener, method.Value)
-        else
-            sent, methodName = autoVirtualClickGuiButton(opener)
+        if ok then
+            return true, "GUI_ACTIVATED_SIGNAL_FALLBACK"
         end
 
-        autoRecord("AUTO_REBIRTH_OPEN_INPUT", {
-            AttemptId = attemptId,
-            MethodIndex = index,
-            Method = methodName,
-            InputSent = sent,
-            OpenerPath = safeFullName(opener),
-        })
-
-        if sent and autoWaitForPanelOpen(AUTO_REBIRTH_PANEL_OPEN_TIMEOUT) then
-            State.AutoRebirthPhase = "PANEL_OPEN"
-            table.insert(State.AutoRebirthStepHistory, {
-                Unix = os.time(),
-                Elapsed = elapsed(),
-                AttemptId = attemptId,
-                Step = "OPEN_PANEL",
-                Result = "CONFIRMED",
-                Method = methodName,
-                Path = safeFullName(opener),
-            })
-            return true, methodName, opener
-        end
+        return false, "GUI_ACTIVATED_SIGNAL_FAILED:" .. tostring(err)
     end
 
-    return false, "REBIRTH_PANEL_DID_NOT_OPEN", opener
-end
-
-local function autoWaitForRebirthIncrement(before, timeoutSeconds)
-    local started = os.clock()
-    while State.Running and State.AutomationEnabled and os.clock() - started <= timeoutSeconds do
-        local current = State.LastRebirths
-        if current ~= nil and current > before then
-            return true, current
-        end
-        task.wait(0.05)
-    end
-    return false, State.LastRebirths
-end
-
-local function autoPressRebirthConfirmation(attemptId, before)
-    local ready, readinessReason, button, buttonText = autoGetRebirthReadiness()
-    if not ready then
-        return false, readinessReason, State.LastRebirths, nil
-    end
-
-    if not autoRebirthPanelIsOpen() then
-        return false, "REBIRTH_PANEL_NOT_OPEN_FOR_CONFIRM", State.LastRebirths, nil
-    end
-
-    local methods = {
-        {Kind = "SIGNAL", Value = "MouseButton1Click"},
-        {Kind = "VIRTUAL", Value = "VirtualInput"},
-        {Kind = "SIGNAL", Value = "Activated"},
-    }
-
-    for index, method in ipairs(methods) do
-        if not autoRebirthPanelIsOpen() then
-            local reopened, reopenMethod = autoOpenRebirthPanel(attemptId)
-            if not reopened then
-                return false, "PANEL_CLOSED_AND_REOPEN_FAILED:" .. tostring(reopenMethod), State.LastRebirths, nil
-            end
-            button = autoFindRebirthConfirmButton()
-            if not button then
-                return false, "CONFIRM_BUTTON_LOST_AFTER_REOPEN", State.LastRebirths, nil
-            end
-        end
-
-        local sent, methodName
-        if method.Kind == "SIGNAL" then
-            sent, methodName = autoFireGuiSignal(button, method.Value)
-        else
-            sent, methodName = autoVirtualClickGuiButton(button)
-        end
-
-        autoRecord("AUTO_REBIRTH_CONFIRM_INPUT", {
-            AttemptId = attemptId,
-            MethodIndex = index,
-            Method = methodName,
-            InputSent = sent,
-            ConfirmPath = safeFullName(button),
-            ButtonText = buttonText,
-            RebirthsBefore = before,
-        })
-
-        if sent then
-            local confirmed, after = autoWaitForRebirthIncrement(before, AUTO_REBIRTH_CONFIRM_TIMEOUT)
-            if confirmed then
-                table.insert(State.AutoRebirthStepHistory, {
-                    Unix = os.time(),
-                    Elapsed = elapsed(),
-                    AttemptId = attemptId,
-                    Step = "CONFIRM_REBIRTH",
-                    Result = "CONFIRMED",
-                    Method = methodName,
-                    Path = safeFullName(button),
-                    RebirthsBefore = before,
-                    RebirthsAfter = after,
-                })
-                return true, methodName, after, button
-            end
-        end
-    end
-
-    return false, "ALL_CONFIRM_INPUT_METHODS_EXHAUSTED", State.LastRebirths, button
+    return false, "NO_SUPPORTED_GUI_INPUT_METHOD"
 end
 
 local function autoBlockedFundsCount()
     local count = 0
     for _ in pairs(State.AutomationBlockedFunds) do
-        count = count + 1
+        count += 1
     end
     return count
 end
@@ -4240,17 +3826,14 @@ end
 local function autoAttemptRebirth()
     local now = os.clock()
 
-    if now < (State.AutoRebirthInputBackoffUntil or 0) then
-        return false, "REBIRTH_INPUT_BACKOFF"
-    end
-
     if now - (State.AutoRebirthLastAttemptClock or 0) < AUTO_REBIRTH_RETRY_COOLDOWN then
         return false, "REBIRTH_RETRY_COOLDOWN"
     end
 
     autoRefreshFundsBlocks()
 
-    if autoBlockedFundsCount() > 0 then
+    local blockedFunds = autoBlockedFundsCount()
+    if blockedFunds > 0 then
         return false, "FUNDS_BLOCKED_PURCHASES_REMAIN"
     end
 
@@ -4268,8 +3851,280 @@ local function autoAttemptRebirth()
         return false, "REBIRTH_STAT_UNAVAILABLE"
     end
 
+    -- All helpers below are intentionally local to THIS function. This keeps
+    -- the main script's top-level local count at the V1.7.4 baseline instead
+    -- of adding another group of top-level helper closures before execution.
+    local function panelIsOpen()
+        local playerGui = State.Player and State.Player:FindFirstChild("PlayerGui")
+        local rebirthGui = playerGui and playerGui:FindFirstChild("RebirthGui")
+        local frame = rebirthGui and rebirthGui:FindFirstChild("Frame")
+
+        if not rebirthGui or not frame or not frame:IsA("GuiObject") then
+            return false, rebirthGui, frame
+        end
+
+        local enabled = true
+        if rebirthGui:IsA("ScreenGui") then
+            local okEnabled, enabledValue = pcall(function()
+                return rebirthGui.Enabled
+            end)
+            if okEnabled then
+                enabled = enabledValue == true
+            end
+        end
+
+        local frameVisible = false
+        local okVisible, visibleValue = pcall(function()
+            return frame.Visible
+        end)
+        if okVisible then
+            frameVisible = visibleValue == true
+        end
+
+        return enabled and frameVisible and autoGuiActuallyVisible(frame), rebirthGui, frame
+    end
+
+    local function shortRebirthLabel(value)
+        local raw = tostring(value or "")
+        if #raw > 64 then
+            return false
+        end
+
+        local norm = normalize(raw)
+        return norm == "rebirth"
+            or norm == "rebirths"
+            or norm == "renascimento"
+            or norm == "renascimentos"
+            or norm == "renascer"
+            or norm == "prestige"
+            or norm == "prestigio"
+            or norm == "prestígio"
+    end
+
+    local function virtualClick(button)
+        if not button or not button.Parent then
+            return false, "BUTTON_UNAVAILABLE"
+        end
+        if not VirtualInputManager then
+            return false, "VIRTUAL_INPUT_UNAVAILABLE"
+        end
+        if not autoGuiActuallyVisible(button) then
+            return false, "BUTTON_NOT_EFFECTIVELY_VISIBLE"
+        end
+
+        local ok, err = pcall(function()
+            local pos = button.AbsolutePosition
+            local size = button.AbsoluteSize
+            local x = math.floor(pos.X + size.X * 0.5)
+            local y = math.floor(pos.Y + size.Y * 0.5)
+
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+            task.wait(0.06)
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        end)
+
+        if ok then
+            return true, "VIRTUAL_INPUT_GUI_CLICK"
+        end
+
+        return false, "VIRTUAL_INPUT_FAILED:" .. tostring(err)
+    end
+
+    local function fireSignal(button, signalName)
+        if not button or not button.Parent then
+            return false, "BUTTON_UNAVAILABLE"
+        end
+        if type(firesignal) ~= "function" then
+            return false, "FIRESIGNAL_UNAVAILABLE"
+        end
+
+        local signal = nil
+        local okSignal = pcall(function()
+            signal = button[signalName]
+        end)
+        if not okSignal or not signal then
+            return false, "SIGNAL_NOT_AVAILABLE:" .. tostring(signalName)
+        end
+
+        local ok, err = pcall(function()
+            if signalName == "Activated" then
+                firesignal(signal, nil, 1)
+            else
+                firesignal(signal)
+            end
+        end)
+
+        if ok then
+            return true, "FIRESIGNAL_" .. string.upper(signalName)
+        end
+
+        return false, "FIRESIGNAL_FAILED_" .. tostring(signalName) .. ":" .. tostring(err)
+    end
+
+    local function tryButtonInput(button, stage, waitPredicate)
+        local methods = {
+            {Kind = "SIGNAL", Name = "MouseButton1Click"},
+            {Kind = "VIRTUAL", Name = "VirtualInput"},
+            {Kind = "SIGNAL", Name = "Activated"},
+        }
+
+        for index, method in ipairs(methods) do
+            local sent, methodName
+            if method.Kind == "VIRTUAL" then
+                sent, methodName = virtualClick(button)
+            else
+                sent, methodName = fireSignal(button, method.Name)
+            end
+
+            autoRecord("AUTO_REBIRTH_UI_INPUT", {
+                AttemptId = #State.AutoRebirthAttempts + 1,
+                Stage = stage,
+                MethodIndex = index,
+                Method = methodName,
+                InputSent = sent,
+                Path = safeFullName(button),
+            })
+
+            if sent then
+                local started = os.clock()
+                while State.Running
+                and State.AutomationEnabled
+                and os.clock() - started <= 1.6 do
+                    local okPredicate, result = pcall(waitPredicate)
+                    if okPredicate and result then
+                        return true, methodName
+                    end
+                    task.wait(0.05)
+                end
+            end
+        end
+
+        return false, "ALL_" .. tostring(stage) .. "_INPUT_METHODS_FAILED"
+    end
+
+    local function openerScore(button, rebirthGui)
+        if not button or not button:IsA("GuiButton") then
+            return -math.huge, nil
+        end
+        if rebirthGui and button:IsDescendantOf(rebirthGui) then
+            return -math.huge, nil
+        end
+        if not autoGuiActuallyVisible(button) then
+            return -math.huge, nil
+        end
+
+        local nameNorm = normalize(button.Name)
+        if string.find(nameNorm, "instant", 1, true) then
+            return -math.huge, nil
+        end
+
+        local score = 0
+        local evidence = {}
+
+        if nameNorm == "rebirth" or nameNorm == "rebirthbutton" or nameNorm == "rebirthmenu" then
+            score = score + 160
+            table.insert(evidence, "EXACT_REBIRTH_NAME")
+        elseif string.find(nameNorm, "rebirth", 1, true) then
+            score = score + 125
+            table.insert(evidence, "NAME_CONTAINS_REBIRTH")
+        elseif string.find(nameNorm, "renascimento", 1, true)
+        or string.find(nameNorm, "renascer", 1, true) then
+            score = score + 125
+            table.insert(evidence, "NAME_CONTAINS_RENASCIMENTO")
+        end
+
+        local label = autoRebirthButtonText(button)
+        if shortRebirthLabel(label) then
+            score = score + 150
+            table.insert(evidence, "BUTTON_LABEL=" .. tostring(label))
+        end
+
+        return score, evidence
+    end
+
+    local function findHudOpener()
+        local playerGui = State.Player and State.Player:FindFirstChild("PlayerGui")
+        if not playerGui then
+            return nil, "PLAYER_GUI_NOT_FOUND"
+        end
+
+        local rebirthGui = playerGui:FindFirstChild("RebirthGui")
+        local all = playerGui:GetDescendants()
+        local maxScan = math.min(#all, 4000)
+        local bestButton = nil
+        local bestScore = -math.huge
+        local bestEvidence = nil
+
+        -- First pass: identify a visible GuiButton outside RebirthGui by its
+        -- own name/descendant text.
+        for index = 1, maxScan do
+            local obj = all[index]
+            if obj:IsA("GuiButton") then
+                local score, evidence = openerScore(obj, rebirthGui)
+                if score > bestScore then
+                    bestScore = score
+                    bestButton = obj
+                    bestEvidence = evidence
+                end
+            end
+        end
+
+        -- Second pass: the HUD screenshot shows RENASCIMENTO as a label below
+        -- the icon. If that label is a sibling instead of a child of the
+        -- ImageButton, choose the closest visible GuiButton outside RebirthGui.
+        if bestScore < 100 then
+            for index = 1, maxScan do
+                local label = all[index]
+                if label:IsA("TextLabel") or label:IsA("TextButton") then
+                    local okText, labelText = pcall(function()
+                        return label.Text
+                    end)
+
+                    if okText and shortRebirthLabel(labelText) and autoGuiActuallyVisible(label) then
+                        local okLabelGeometry, labelCenter = pcall(function()
+                            return label.AbsolutePosition + label.AbsoluteSize * 0.5
+                        end)
+
+                        if okLabelGeometry then
+                            for buttonIndex = 1, maxScan do
+                                local candidate = all[buttonIndex]
+                                if candidate:IsA("GuiButton")
+                                and (not rebirthGui or not candidate:IsDescendantOf(rebirthGui))
+                                and autoGuiActuallyVisible(candidate) then
+                                    local okButtonGeometry, buttonCenter = pcall(function()
+                                        return candidate.AbsolutePosition + candidate.AbsoluteSize * 0.5
+                                    end)
+
+                                    if okButtonGeometry then
+                                        local distance = (buttonCenter - labelCenter).Magnitude
+                                        if distance <= 170 then
+                                            local score, evidence = openerScore(candidate, rebirthGui)
+                                            score = score + math.max(0, 190 - distance)
+                                            table.insert(evidence, "NEAR_LABEL=" .. tostring(math.floor(distance)))
+                                            if score > bestScore then
+                                                bestScore = score
+                                                bestButton = candidate
+                                                bestEvidence = evidence
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        if not bestButton or bestScore < 80 then
+            return nil, "NO_CONFIDENT_HUD_REBIRTH_OPENER"
+        end
+
+        return bestButton,
+            table.concat(bestEvidence or {}, ";") .. ";score=" .. tostring(math.floor(bestScore))
+    end
+
     State.AutoRebirthLastAttemptClock = now
-    State.AutoRebirthPhase = "OPENING_PANEL"
     State.AutomationState = "REBIRTHING"
     State.Health.Automation = "REBIRTHING"
 
@@ -4297,49 +4152,87 @@ local function autoAttemptRebirth()
         ReadinessReason = readinessReason,
         ServerReady = State.AutoRebirthServerReady,
         ServerSignalValue = State.AutoRebirthLastSignalValue,
-        Flow = "HUD_OPENER_THEN_REBIRTH_CONFIRMATION",
+        Flow = attempt.Flow,
         Policy = "NORMAL_TWO_STEP_REBIRTH_UI_ONLY_NO_DIRECT_REBIRTH_REMOTE",
     })
 
-    local opened, openMethod, opener = autoOpenRebirthPanel(attempt.Id)
-    attempt.OpenerPath = opener and safeFullName(opener) or State.AutoRebirthOpenerPath
-    attempt.OpenMethod = openMethod
-    attempt.PanelOpened = opened
+    local panelOpen = panelIsOpen()
+    local openMethod = "PANEL_ALREADY_OPEN"
 
-    if not opened then
-        attempt.Result = "PANEL_OPEN_FAILED"
+    if not panelOpen then
+        local opener, openerEvidence = findHudOpener()
+        attempt.OpenerPath = opener and safeFullName(opener) or nil
+        attempt.OpenerEvidence = openerEvidence
+
+        autoRecord("AUTO_REBIRTH_OPENER_SELECTED", {
+            AttemptId = attempt.Id,
+            Path = attempt.OpenerPath,
+            Evidence = openerEvidence,
+            Found = opener ~= nil,
+        })
+
+        if not opener then
+            attempt.Result = "HUD_OPENER_NOT_FOUND"
+            attempt.FinishedUnix = os.time()
+            attempt.FinishedElapsed = elapsed()
+            State.AutoRebirthFailed = State.AutoRebirthFailed + 1
+            return false, "HUD_OPENER_NOT_FOUND"
+        end
+
+        local opened, usedMethod = tryButtonInput(opener, "OPEN_PANEL", function()
+            return panelIsOpen()
+        end)
+        openMethod = usedMethod
+
+        if not opened then
+            attempt.Result = "PANEL_OPEN_NOT_CONFIRMED"
+            attempt.OpenMethod = usedMethod
+            attempt.FinishedUnix = os.time()
+            attempt.FinishedElapsed = elapsed()
+            State.AutoRebirthFailed = State.AutoRebirthFailed + 1
+
+            autoRecord("AUTO_REBIRTH_PANEL_OPEN_FAILED", {
+                AttemptId = attempt.Id,
+                OpenerPath = attempt.OpenerPath,
+                Method = usedMethod,
+            })
+
+            return false, "PANEL_OPEN_NOT_CONFIRMED"
+        end
+    end
+
+    attempt.OpenMethod = openMethod
+
+    -- Reacquire the in-panel confirmation after the panel is really open.
+    confirmButton = autoFindRebirthButton()
+    ready, readinessReason, confirmButton, confirmText = autoGetRebirthReadiness()
+
+    if not ready or not confirmButton or not autoGuiActuallyVisible(confirmButton) then
+        attempt.Result = "CONFIRM_NOT_READY_AFTER_PANEL_OPEN"
+        attempt.ConfirmReadinessReason = readinessReason
         attempt.FinishedUnix = os.time()
         attempt.FinishedElapsed = elapsed()
         State.AutoRebirthFailed = State.AutoRebirthFailed + 1
-        State.AutoRebirthPhase = "BACKOFF"
-        State.AutoRebirthInputBackoffUntil = os.clock() + AUTO_REBIRTH_FAILURE_BACKOFF
-
-        autoRecord("AUTO_REBIRTH_PANEL_OPEN_FAILED", {
-            AttemptId = attempt.Id,
-            Reason = openMethod,
-            OpenerPath = attempt.OpenerPath,
-            BackoffSeconds = AUTO_REBIRTH_FAILURE_BACKOFF,
-        })
-
-        return false, "REBIRTH_PANEL_OPEN_FAILED"
+        return false, "CONFIRM_NOT_READY_AFTER_PANEL_OPEN"
     end
 
-    State.AutoRebirthPhase = "CONFIRMING"
-    task.wait(0.12)
+    attempt.ConfirmButtonPath = safeFullName(confirmButton)
+    attempt.ConfirmButtonText = confirmText
 
-    local confirmed, confirmMethod, after, button = autoPressRebirthConfirmation(attempt.Id, before)
-    attempt.ConfirmMethod = confirmMethod
-    attempt.ConfirmButtonPath = button and safeFullName(button) or attempt.ConfirmButtonPath
+    local confirmed, confirmMethod = tryButtonInput(confirmButton, "CONFIRM_REBIRTH", function()
+        return State.LastRebirths ~= nil and State.LastRebirths > before
+    end)
+
     State.AutoRebirthLastMethod = tostring(openMethod) .. " -> " .. tostring(confirmMethod)
+    attempt.ConfirmMethod = confirmMethod
 
     if confirmed then
+        local after = State.LastRebirths
         attempt.Result = "REBIRTH_INCREMENT_CONFIRMED"
         attempt.RebirthsAfter = after
         attempt.FinishedUnix = os.time()
         attempt.FinishedElapsed = elapsed()
         State.AutoRebirthSuccessful = State.AutoRebirthSuccessful + 1
-        State.AutoRebirthPhase = "CONFIRMED"
-        State.AutoRebirthInputBackoffUntil = 0
 
         autoRecord("AUTO_REBIRTH_CONFIRMED", {
             AttemptId = attempt.Id,
@@ -4354,21 +4247,19 @@ local function autoAttemptRebirth()
     end
 
     attempt.Result = "REBIRTH_INCREMENT_NOT_OBSERVED"
-    attempt.RebirthsAfter = after
+    attempt.RebirthsAfter = State.LastRebirths
     attempt.FinishedUnix = os.time()
     attempt.FinishedElapsed = elapsed()
     State.AutoRebirthFailed = State.AutoRebirthFailed + 1
-    State.AutoRebirthPhase = "BACKOFF"
-    State.AutoRebirthInputBackoffUntil = os.clock() + AUTO_REBIRTH_FAILURE_BACKOFF
 
     autoRecord("AUTO_REBIRTH_NOT_CONFIRMED", {
         AttemptId = attempt.Id,
         OpenMethod = openMethod,
         ConfirmMethod = confirmMethod,
         RebirthsBefore = before,
-        RebirthsObserved = after,
-        BackoffSeconds = AUTO_REBIRTH_FAILURE_BACKOFF,
-        Note = "Two-step GUI flow was attempted. No local Rebirth mutation is performed; success requires observed server-authorized stat increase.",
+        RebirthsObserved = State.LastRebirths,
+        RetryCooldownSeconds = AUTO_REBIRTH_RETRY_COOLDOWN,
+        Note = "Two-step GUI flow attempted; no local Rebirth mutation is performed.",
     })
 
     return false, "REBIRTH_INCREMENT_NOT_OBSERVED"
@@ -4391,10 +4282,6 @@ local function autoHandleRebirth(oldValue, newValue)
     State.AutoRebirthServerReady = false
     State.AutoRebirthButtonsLeft = nil
     State.AutoRebirthLastSignalValue = nil
-    State.AutoRebirthPhase = "RESETTING"
-    State.AutoRebirthPanelOpen = false
-    State.AutoRebirthLastPanelState = false
-    State.AutoRebirthInputBackoffUntil = 0
 
     local reset = {
         Id = #State.AutomationResets + 1,
@@ -4462,7 +4349,7 @@ local function setAutomation(enabled)
             Rebirths = State.LastRebirths,
             Floor = State.MainFloor,
             Zone = State.CurrentZone,
-            Policy = "Continuous cycle: purchases + Bunker session lock + collector recovery; when the eligible purchase queue is exhausted and Rebirth is ready, Auto Rebirth opens the HUD Rebirth panel first, presses the normal in-panel confirmation second, then waits for Rebirths to increase before reset/rescan.",
+            Policy = "Continuous cycle: purchases + Bunker session lock + collector recovery; when the eligible purchase queue is exhausted and Rebirth is ready, Auto Rebirth opens the HUD Rebirth panel first, confirms inside RebirthGui second, then waits for Rebirths to increase before reset/rescan.",
         })
     else
         autoRecord("AUTOMATION_STOPPED", {
@@ -4566,10 +4453,7 @@ task.spawn(function()
                     if rebirthReason ~= "UI_NOT_READY"
                     and rebirthReason ~= "REBIRTH_BUTTON_NOT_FOUND"
                     and rebirthReason ~= "REBIRTH_RETRY_COOLDOWN"
-                    and rebirthReason ~= "FUNDS_BLOCKED_PURCHASES_REMAIN"
-                    and rebirthReason ~= "REBIRTH_INPUT_BACKOFF"
-                    and rebirthReason ~= "CONFIRM_UI_NOT_READY"
-                    and rebirthReason ~= "REBIRTH_CONFIRM_BUTTON_NOT_FOUND" then
+                    and rebirthReason ~= "FUNDS_BLOCKED_PURCHASES_REMAIN" then
                         autoRecord("AUTO_REBIRTH_DEFERRED", {
                             Reason = rebirthReason,
                             Rebirths = State.LastRebirths,
@@ -4729,19 +4613,11 @@ local function buildReport()
                 LastSignalElapsed = State.AutoRebirthLastSignalElapsed,
                 LastSignalValue = State.AutoRebirthLastSignalValue,
                 LastInputMethod = State.AutoRebirthLastMethod,
-                Phase = State.AutoRebirthPhase,
-                OpenerPath = State.AutoRebirthOpenerPath,
-                OpenerEvidence = State.AutoRebirthOpenerEvidence,
-                ConfirmPath = State.AutoRebirthConfirmPath,
-                PanelOpen = State.AutoRebirthPanelOpen,
-                PanelOpenTransitions = State.AutoRebirthPanelOpenTransitions,
-                InputBackoffUntilClock = State.AutoRebirthInputBackoffUntil,
-                StepHistory = State.AutoRebirthStepHistory,
                 Successful = State.AutoRebirthSuccessful,
                 Failed = State.AutoRebirthFailed,
                 Attempts = State.AutoRebirthAttempts,
                 TriggerPolicy = "PURCHASE_QUEUE_EXHAUSTED_AND_NO_FUNDS_BLOCK_AND_NO_BUNKER_SESSION_AND_REBIRTH_READY",
-                InteractionPolicy = "TWO_STEP_NORMAL_UI: HUD_OPENER_THEN_REBIRTHGUI_CONFIRM",
+                InteractionPolicy = "TWO_STEP_NORMAL_UI_HUD_OPENER_THEN_REBIRTHGUI_CONFIRM",
                 ConfirmationPolicy = "OBSERVED_LEADERSTATS_REBIRTH_INCREMENT",
                 DirectRebirthRemoteInvocation = false,
             },
@@ -4767,11 +4643,9 @@ local function buildReport()
                 BunkerExitPolicy = "RESCAN_BUNKER_BEFORE_EXIT",
                 AutoRebirth = true,
                 AutoRebirthSameToggleAsPurchases = true,
-                AutoRebirthTarget = "TWO_STEP_DYNAMIC_HUD_OPENER_THEN_PlayerGui.RebirthGui.Frame.Buttons.Rebirth",
-                AutoRebirthRequiresPanelOpen = true,
+                AutoRebirthTarget = "DYNAMIC_HUD_OPENER_THEN_PlayerGui.RebirthGui.Frame.Buttons.Rebirth",
                 AutoRebirthRequiresInteractable = true,
                 AutoRebirthDirectRemoteInvocation = false,
-                AutoRebirthUnknownRemoteInvocation = false,
                 AutoRebirthConfirmation = "OBSERVED_REBIRTHS_INCREMENT",
                 DirectTeleport = true,
                 DirectTeleportScope = "MAIN_TYCOON_PURCHASE_BUTTONS_TEST_ONLY",
@@ -4848,11 +4722,11 @@ local function autoSaveNow(reason, timestamped)
         return false, "WRITEFILE_UNAVAILABLE"
     end
 
-    local filename = "Tycoon_Purchase_Automator_V1_7_5_AutoSave_Latest.txt"
+    local filename = "Tycoon_Purchase_Automator_V1_7_5_1_AutoSave_Latest.txt"
 
     if timestamped then
         filename =
-            "Tycoon_Purchase_Automator_V1_7_5_AutoSave_" ..
+            "Tycoon_Purchase_Automator_V1_7_5_1_AutoSave_" ..
             reason ..
             "_" ..
             os.date("%Y%m%d_%H%M%S") ..
@@ -5001,7 +4875,7 @@ installAutoSaveWatchers()
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_7_5_" ..
+        "Tycoon_Purchase_Automator_V1_7_5_1_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
@@ -5081,38 +4955,3 @@ safeCall("INITIAL_TYCOON", function()
 end)
 
 State.Health.Bootstrap = "OK"
-State.Health.Engine = "ACTIVE"
-State.Health.Reading = "PAUSED"
-
-pushEvent("SYSTEM", "ENGINE_STARTED", {
-    Version = VERSION,
-})
-
-task.spawn(function()
-    while State.Running do
-        safeCall("STAT_LOOP", function()
-            refreshStatsObjects()
-
-            local money = readValue(State.MoneyObject)
-            local rebirths = readValue(State.RebirthObject)
-
-            if State.MoneyObject and money ~= nil then
-                State.Health.Money = "ACTIVE"
-            else
-                State.Health.Money = "SEARCHING"
-            end
-
-            if State.RebirthObject and rebirths ~= nil then
-                State.Health.Rebirths = "ACTIVE"
-            else
-                State.Health.Rebirths = "SEARCHING"
-            end
-
-            if State.Reading
-            and State.LastMoney ~= nil
-            and money ~= nil
-            and money ~= State.LastMoney then
-                local delta = money - State.LastMoney
-
-                pushEvent(
-                    delta < 0 and "MONEY_SPEND" or "MO
