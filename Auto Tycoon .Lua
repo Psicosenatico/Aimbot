@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - TELEPORT TEST V1.1
+PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - TELEPORT TEST V1.3 + DEV COLLECT
 COMPATIBILITY / STABILITY BUILD
 
 Purchase automation + diagnostics - authorized teleport test build.
@@ -7,6 +7,8 @@ For the user's own authorized test environment, teleports the local character di
 onto ordinary MAIN_TYCOON purchase buttons instead of walking to them.
 Does not alter Money/Rebirths or fake Marketplace receipts.
 BUNKER transition remains the game's normal transition instead of long-distance teleport.
+Auto-collect uses only a dedicated developer/test RemoteFunction supplied by the companion server script.
+It is not Studio-only; it can run in a published server when the player is explicitly authorized server-side.
 
 Purchase classes:
 - TYCOON_MONEY
@@ -36,9 +38,10 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "AUTO-TP-1.1"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorTeleportTestV1_1"
+local VERSION = "AUTO-TP-1.3"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorTeleportTestV1_3"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -117,6 +120,9 @@ local State = {
     AutomationRunId = 0,
     AutomationSuccessful = 0,
     AutomationFailed = 0,
+    AutoCollectAttempts = {},
+    AutoCollectSuccessful = 0,
+    AutoCollectFailed = 0,
 
     DataStats = {
         TotalEventsObserved = 0,
@@ -654,7 +660,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO TP V1.1 - teleport test + diagnostic"
+    version.Text = "AUTO TP V1.3 - teleport + dev collect"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -821,7 +827,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO TP V1.1 (.txt)"
+    export.Text = "Exportar relatorio AUTO TP V1.3 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -903,14 +909,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Automator TP V1.1] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator TP V1.3] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Automator TP V1.1] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator TP V1.3] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -2453,6 +2459,8 @@ local AUTO_SERVER_WAIT = 6
 local AUTO_RETRY_COOLDOWN = 7
 local AUTO_IDLE_WAIT = 0.6
 local AUTO_ARRIVE_DISTANCE = 5.5
+local AUTO_COLLECT_MIN = 1000
+local AUTO_COLLECT_CONFIRM_TIMEOUT = 4
 
 local function autoRecord(kind, details)
     details = details or {}
@@ -2520,6 +2528,190 @@ local function autoTeleportToPart(targetPart)
     end
 
     return false, "TELEPORT_NOT_CONFIRMED"
+end
+
+
+
+local DEV_COLLECT_API_FOLDER = "PsicoTycoonTestAPI"
+local DEV_COLLECT_REMOTE = "DevCollect"
+
+local function autoCollectorContainer()
+    if not State.Tycoon then
+        return nil
+    end
+
+    local direct = State.Tycoon:FindFirstChild("Collector", true)
+    if direct then
+        return direct
+    end
+
+    for _, descendant in ipairs(State.Tycoon:GetDescendants()) do
+        if normalize(descendant.Name) == "collector" then
+            return descendant
+        end
+    end
+
+    return nil
+end
+
+local function autoCollectorAmount()
+    local collector = autoCollectorContainer()
+    if not collector then
+        return nil, nil
+    end
+
+    for _, descendant in ipairs(collector:GetDescendants()) do
+        if normalize(descendant.Name) == "money" then
+            local value = readValue(descendant)
+            if value ~= nil then
+                return value, safeFullName(descendant)
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+local function autoGetDevCollectRemote()
+    local folder = ReplicatedStorage:FindFirstChild(DEV_COLLECT_API_FOLDER)
+    if not folder then
+        return nil, "DEV_COLLECT_API_FOLDER_NOT_FOUND"
+    end
+
+    local remote = folder:FindFirstChild(DEV_COLLECT_REMOTE)
+    if not remote or not remote:IsA("RemoteFunction") then
+        return nil, "DEV_COLLECT_REMOTE_NOT_FOUND"
+    end
+
+    return remote, nil
+end
+
+local function autoDevCollect()
+    local amountBefore, amountPath = autoCollectorAmount()
+
+    if amountBefore == nil then
+        return false, "COLLECTOR_AMOUNT_UNAVAILABLE", nil
+    end
+
+    if amountBefore < AUTO_COLLECT_MIN then
+        return false, "COLLECTOR_BELOW_THRESHOLD", amountBefore
+    end
+
+    local remote, remoteReason = autoGetDevCollectRemote()
+    if not remote then
+        autoRecord("DEV_COLLECT_UNAVAILABLE", {
+            Reason = remoteReason,
+            CollectorBefore = amountBefore,
+            Threshold = AUTO_COLLECT_MIN,
+            Note = "This build does not invoke unknown game remotes. It only uses the dedicated PsicoTycoonTestAPI.DevCollect endpoint.",
+        })
+        return false, remoteReason, amountBefore
+    end
+
+    local attempt = {
+        Id = #State.AutoCollectAttempts + 1,
+        StartedUnix = os.time(),
+        StartedElapsed = elapsed(),
+        CollectorBefore = amountBefore,
+        CollectorPath = amountPath,
+        MoneyBefore = State.LastMoney,
+        Result = "STARTED",
+    }
+    table.insert(State.AutoCollectAttempts, attempt)
+
+    State.AutomationState = "AUTO_COLLECTING"
+    State.Health.Automation = "AUTO_COLLECTING"
+
+    autoRecord("DEV_COLLECT_REQUESTED", {
+        CollectAttemptId = attempt.Id,
+        CollectorBefore = amountBefore,
+        Threshold = AUTO_COLLECT_MIN,
+        Endpoint = DEV_COLLECT_API_FOLDER .. "." .. DEV_COLLECT_REMOTE,
+        Movement = "NONE",
+    })
+
+    local ok, result = pcall(function()
+        return remote:InvokeServer({
+            MinimumCollector = AUTO_COLLECT_MIN,
+            Reason = "AUTOMATOR_INSUFFICIENT_TYCOON_MONEY",
+        })
+    end)
+
+    if not ok then
+        attempt.Result = "REMOTE_ERROR"
+        attempt.FinishedUnix = os.time()
+        attempt.FinishedElapsed = elapsed()
+        State.AutoCollectFailed = State.AutoCollectFailed + 1
+        autoRecord("DEV_COLLECT_FAILED", {
+            CollectAttemptId = attempt.Id,
+            Reason = "REMOTE_ERROR",
+            Error = tostring(result),
+        })
+        return false, "REMOTE_ERROR", amountBefore
+    end
+
+    if type(result) ~= "table" or result.Ok ~= true then
+        local reason = type(result) == "table" and tostring(result.Reason or "REJECTED") or "INVALID_RESPONSE"
+        attempt.Result = reason
+        attempt.FinishedUnix = os.time()
+        attempt.FinishedElapsed = elapsed()
+        State.AutoCollectFailed = State.AutoCollectFailed + 1
+        autoRecord("DEV_COLLECT_REJECTED", {
+            CollectAttemptId = attempt.Id,
+            Reason = reason,
+            Response = result,
+        })
+        return false, reason, amountBefore
+    end
+
+    local confirmDeadline = os.clock() + AUTO_COLLECT_CONFIRM_TIMEOUT
+    local observedAfter = amountBefore
+
+    while State.Running and State.AutomationEnabled and os.clock() < confirmDeadline do
+        local current = autoCollectorAmount()
+        if current ~= nil then
+            observedAfter = current
+            if current < amountBefore then
+                attempt.Result = "COLLECTED_OBSERVED"
+                attempt.CollectorAfter = current
+                attempt.MoneyAfter = State.LastMoney
+                attempt.FinishedUnix = os.time()
+                attempt.FinishedElapsed = elapsed()
+                State.AutoCollectSuccessful = State.AutoCollectSuccessful + 1
+
+                autoRecord("DEV_COLLECT_SUCCESS_OBSERVED", {
+                    CollectAttemptId = attempt.Id,
+                    CollectorBefore = amountBefore,
+                    CollectorAfter = current,
+                    MoneyBefore = attempt.MoneyBefore,
+                    MoneyAfter = State.LastMoney,
+                    ServerResponse = result,
+                    Movement = "NONE",
+                })
+
+                return true, "COLLECTED_OBSERVED", current
+            end
+        end
+
+        task.wait(0.1)
+    end
+
+    attempt.Result = "COLLECTION_NOT_OBSERVED"
+    attempt.CollectorAfter = observedAfter
+    attempt.MoneyAfter = State.LastMoney
+    attempt.FinishedUnix = os.time()
+    attempt.FinishedElapsed = elapsed()
+    State.AutoCollectFailed = State.AutoCollectFailed + 1
+
+    autoRecord("DEV_COLLECT_FAILED", {
+        CollectAttemptId = attempt.Id,
+        Reason = "COLLECTION_NOT_OBSERVED",
+        CollectorBefore = amountBefore,
+        CollectorAfter = observedAfter,
+        ServerResponse = result,
+    })
+
+    return false, "COLLECTION_NOT_OBSERVED", observedAfter
 end
 
 local function autoWaitForAcceptance(buttonName, originalButton, timeout)
@@ -2822,12 +3014,47 @@ local function autoAttemptPurchase(record)
     State.AutomationFailed = State.AutomationFailed + 1
     State.AutomationCooldowns[record.Path or record.Name] = os.clock() + AUTO_RETRY_COOLDOWN
 
+    local declaredPrice = parseNumber(record.Price)
+    local insufficientBalanceInferred =
+        record.Type == "TYCOON_MONEY"
+        and declaredPrice ~= nil
+        and State.LastMoney ~= nil
+        and State.LastMoney < declaredPrice
+
     autoRecord("PURCHASE_NOT_ACCEPTED_OBSERVED", {
         AttemptId = attempt.Id,
         Name = record.Name,
         Reason = acceptanceReason,
-        Note = "No client-visible button removal/purchase creation was observed; server internal reason is unknown.",
+        DeclaredPrice = declaredPrice,
+        MoneyObserved = State.LastMoney,
+        InsufficientBalanceInferred = insufficientBalanceInferred,
+        Note = "No client-visible button removal/purchase creation was observed; exact server internal reason is unknown.",
     })
+
+    if insufficientBalanceInferred then
+        local collectorAmount, collectorPath = autoCollectorAmount()
+
+        autoRecord("AUTO_COLLECT_CHECK", {
+            AttemptId = attempt.Id,
+            PurchaseTarget = record.Name,
+            CollectorAmount = collectorAmount,
+            CollectorPath = collectorPath,
+            Threshold = AUTO_COLLECT_MIN,
+            Trigger = "PURCHASE_REJECTED_AND_LOCAL_MONEY_BELOW_DECLARED_PRICE",
+        })
+
+        if collectorAmount ~= nil and collectorAmount >= AUTO_COLLECT_MIN then
+            local collected, collectReason = autoDevCollect()
+
+            if collected then
+                State.AutomationCooldowns[record.Path or record.Name] = nil
+                task.wait(0.35)
+                return false, "AUTO_COLLECTED_AFTER_INSUFFICIENT_BALANCE"
+            else
+                return false, "AUTO_COLLECT_FAILED:" .. tostring(collectReason)
+            end
+        end
+    end
 
     return false, acceptanceReason
 end
@@ -2896,7 +3123,7 @@ local function setAutomation(enabled)
             Rebirths = State.LastRebirths,
             Floor = State.MainFloor,
             Zone = State.CurrentZone,
-            Policy = "Normal character movement; no economy or movement bypass.",
+            Policy = "MAIN_TYCOON purchases use test teleport; insufficient-balance recovery requests dedicated server-authorized DevCollect when stored coins >= 1000; no collector movement and no Money/Rebirth client edits.",
         })
     else
         autoRecord("AUTOMATION_STOPPED", {
@@ -3062,10 +3289,18 @@ local function buildReport()
             CurrentTarget = State.AutomationTarget,
             SuccessfulAttempts = State.AutomationSuccessful,
             FailedAttempts = State.AutomationFailed,
+            AutoCollectSuccessful = State.AutoCollectSuccessful,
+            AutoCollectFailed = State.AutoCollectFailed,
+            AutoCollectAttempts = State.AutoCollectAttempts,
             Attempts = State.AutomationAttempts,
             RebirthResets = State.AutomationResets,
             Policy = {
                 PurchaseInteraction = "DIRECT_LOCAL_CHARACTER_TELEPORT_TO_TOUCH_BUTTON_TEST",
+                AutoCollectTrigger = "AFTER_REJECTED_TYCOON_MONEY_WHEN_LOCAL_MONEY_BELOW_PRICE_AND_COLLECTOR_AT_LEAST_1000",
+                AutoCollectMovement = "NONE",
+                AutoCollectEndpoint = "ReplicatedStorage.PsicoTycoonTestAPI.DevCollect",
+                AutoCollectDirectRemoteInvocation = true,
+                AutoCollectUnknownGameRemoteInvocation = false,
                 BunkerTransition = "LEGITIMATE_PROXIMITY_PROMPT",
                 DirectTeleport = true,
                 DirectTeleportScope = "MAIN_TYCOON_PURCHASE_BUTTONS_TEST_ONLY",
@@ -3117,7 +3352,7 @@ end
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_Teleport_Test_V1_1_" ..
+        "Tycoon_Purchase_Automator_Teleport_Test_V1_3_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
