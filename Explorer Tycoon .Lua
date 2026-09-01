@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE DIAGNOSTIC - V2.1.1
+PSICOSENATICO - TYCOON PURCHASE DIAGNOSTIC - V2.2
 COMPATIBILITY / STABILITY BUILD
 
 Diagnostic only.
@@ -17,8 +17,8 @@ local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 
-local VERSION = "2.1.1"
-local GUI_NAME = "PsicoTycoonPurchaseDiagnosticV211"
+local VERSION = "2.2"
+local GUI_NAME = "PsicoTycoonPurchaseDiagnosticV22"
 
 local MAX_EVENTS = 1500
 local MONEY_INTERVAL = 0.25
@@ -514,7 +514,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "V2.1.1 - stability build"
+    version.Text = "V2.2 - stability build"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -652,7 +652,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio V2.1.1 (.txt)"
+    export.Text = "Exportar relatorio V2.2 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -666,7 +666,7 @@ local function createGui()
     floating.Position = UDim2.new(0, 18, 0.5, -30)
     floating.BackgroundColor3 = COLORS.Floating
     floating.BorderSizePixel = 0
-    floating.Text = "V2.1.1"
+    floating.Text = "V2.2"
     floating.TextColor3 = Color3.fromRGB(240, 246, 255)
     floating.Font = Enum.Font.GothamBold
     floating.TextSize = 11
@@ -729,14 +729,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Diagnostic V2.1.1] LocalPlayer indisponivel.")
+    warn("[Tycoon Diagnostic V2.2] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Diagnostic V2.1.1] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Diagnostic V2.2] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -763,6 +763,10 @@ local function describeButton(button)
         ProductId = attrCI(button, "ProductId"),
         DeveloperProductId = attrCI(button, "DeveloperProductId"),
         GamePassId = attrCI(button, "GamePassId"),
+        Gamepass = attrCI(button, "Gamepass"),
+        DevProduct = attrCI(button, "DevProduct"),
+        NonPurchase = attrCI(button, "NonPurchase"),
+        Dependency = attrCI(button, "Dependency"),
         Robux = attrCI(button, "Robux"),
         Attributes = getAttributes(button),
         HasTouch = button:FindFirstChild("Touch", true) ~= nil,
@@ -783,6 +787,10 @@ local function describePurchase(purchase)
         ProductId = attrCI(purchase, "ProductId"),
         DeveloperProductId = attrCI(purchase, "DeveloperProductId"),
         GamePassId = attrCI(purchase, "GamePassId"),
+        Gamepass = attrCI(purchase, "Gamepass"),
+        DevProduct = attrCI(purchase, "DevProduct"),
+        NonPurchase = attrCI(purchase, "NonPurchase"),
+        Dependency = attrCI(purchase, "Dependency"),
         Attributes = getAttributes(purchase),
     }
 
@@ -813,41 +821,38 @@ local function classify(buttonInfo, purchaseInfo)
     local requiredRebirths = parseNumber(button.RequiredRebirths or button.Rebirths)
 
     if price and price > 0 then
-        moneyScore = moneyScore + 5
+        moneyScore = moneyScore + 7
         table.insert(evidence, "Price/Cost=" .. tostring(price))
     end
 
     if requiredRebirths and requiredRebirths > 0 then
-        rebirthScore = rebirthScore + 8
+        rebirthScore = rebirthScore + 9
         table.insert(evidence, "Rebirth requirement=" .. tostring(requiredRebirths))
     end
 
-    local ids = {
-        button.ProductId,
-        button.DeveloperProductId,
-        button.GamePassId,
-        purchase.ProductId,
-        purchase.DeveloperProductId,
-        purchase.GamePassId,
+    local marketplaceNamed = {
+        {"Gamepass", button.Gamepass or purchase.Gamepass},
+        {"DevProduct", button.DevProduct or purchase.DevProduct},
+        {"ProductId", button.ProductId or purchase.ProductId},
+        {"DeveloperProductId", button.DeveloperProductId or purchase.DeveloperProductId},
+        {"GamePassId", button.GamePassId or purchase.GamePassId},
+        {"Robux", button.Robux},
     }
 
-    for _, id in ipairs(ids) do
-        if parseNumber(id) then
+    for _, pair in ipairs(marketplaceNamed) do
+        local key = pair[1]
+        local value = pair[2]
+
+        if value ~= nil and tostring(value) ~= "" then
             robuxScore = robuxScore + 10
-            table.insert(evidence, "Marketplace ID=" .. tostring(id))
+            table.insert(evidence, key .. "=" .. tostring(value))
         end
     end
 
-    if parseNumber(button.Robux) then
-        robuxScore = robuxScore + 8
-        table.insert(evidence, "Robux attribute=" .. tostring(button.Robux))
-    end
-
-    local itemName = button.Name or purchase.Name or ""
-
-    if containsAny(itemName, {"robux", "gamepass", "developerproduct"}) then
-        robuxScore = robuxScore + 2
-        table.insert(evidence, "Name suggests Marketplace")
+    local nonPurchase = normalize(button.NonPurchase or purchase.NonPurchase)
+    if nonPurchase == "true" then
+        robuxScore = robuxScore + 3
+        table.insert(evidence, "NonPurchase=true")
     end
 
     local bestType = "UNKNOWN"
@@ -872,7 +877,7 @@ local function classify(buttonInfo, purchaseInfo)
 
     if bestScore >= 10 then
         confidence = "high"
-    elseif bestScore >= 5 then
+    elseif bestScore >= 7 then
         confidence = "medium"
     elseif bestScore > 0 then
         confidence = "low"
@@ -1082,7 +1087,10 @@ local function finalize(name)
 
         DeclaredPrice = pending.Button and (pending.Button.Price or pending.Button.Cost) or nil,
         RequiredRebirths = pending.Button and (pending.Button.RequiredRebirths or pending.Button.Rebirths) or nil,
-        LinkedPurchases = pending.Button and pending.Button.LinkedPurchases or nil,
+        LinkedPurchases = (pending.Button and pending.Button.LinkedPurchases)
+            or (pending.Purchase and pending.Purchase.LinkedPurchases) or nil,
+        Dependency = (pending.Button and pending.Button.Dependency)
+            or (pending.Purchase and pending.Purchase.Dependency) or nil,
 
         MoneyBefore = pending.MoneyBefore,
         MoneyAfter = pending.MoneyAfter,
@@ -1100,6 +1108,31 @@ local function finalize(name)
             PurchaseCreatedAt = pending.PurchaseCreatedAt,
         },
     }
+
+    local declaredPriceNumber = parseNumber(transaction.DeclaredPrice)
+    local delta = transaction.MoneyDelta
+
+    transaction.EconomyEvidence = {
+        Direction = delta and (delta < 0 and "SPEND" or (delta > 0 and "INCOME" or "NO_CHANGE")) or "UNOBSERVED",
+        ExactPriceMatch = (
+            declaredPriceNumber ~= nil
+            and delta ~= nil
+            and delta < 0
+            and math.abs(delta) == declaredPriceNumber
+        ) or false,
+        ObservedSpend = (delta ~= nil and delta < 0) and math.abs(delta) or nil,
+        ObservedIncome = (delta ~= nil and delta > 0) and delta or nil,
+    }
+
+    if transaction.Classification.Type == "TYCOON_MONEY"
+    and transaction.EconomyEvidence.ExactPriceMatch then
+        transaction.Classification.Confidence = "confirmed"
+        transaction.Classification.Score = math.max(transaction.Classification.Score or 0, 15)
+        table.insert(transaction.Classification.Evidence, "Money deduction exactly matches declared Price")
+    elseif transaction.Classification.Type == "TYCOON_MONEY"
+    and delta ~= nil and delta > 0 then
+        table.insert(transaction.Classification.Evidence, "Positive Money delta is income, not purchase cost")
+    end
 
     table.insert(State.Transactions, transaction)
     pending.Completed = true
@@ -1160,6 +1193,10 @@ local function watchButtonAttributes(button)
         "ProductId",
         "DeveloperProductId",
         "GamePassId",
+        "Gamepass",
+        "DevProduct",
+        "NonPurchase",
+        "Dependency",
         "Robux",
     }
 
@@ -1341,7 +1378,10 @@ local function correlateStatChanges(oldMoney, newMoney, oldRebirths, newRebirths
         return
     end
 
-    if oldMoney ~= nil and newMoney ~= nil and oldMoney ~= newMoney then
+    -- Only negative Money deltas are purchase-spend evidence.
+    -- Positive deltas are income/collection and are deliberately not
+    -- attached as MoneyAfter to a purchase.
+    if oldMoney ~= nil and newMoney ~= nil and newMoney < oldMoney then
         best.MoneyBefore = best.MoneyBefore or oldMoney
         best.MoneyAfter = newMoney
     end
@@ -1406,6 +1446,45 @@ local function refreshUI()
     end
 end
 
+local function buildProgressionGraph()
+    local edges = {}
+
+    for _, transaction in ipairs(State.Transactions) do
+        local source = transaction.Name
+
+        if transaction.Dependency and tostring(transaction.Dependency) ~= "" then
+            table.insert(edges, {
+                Type = "DEPENDENCY",
+                From = tostring(transaction.Dependency),
+                To = source,
+            })
+        end
+
+        if transaction.LinkedPurchases and tostring(transaction.LinkedPurchases) ~= "" then
+            for linked in string.gmatch(tostring(transaction.LinkedPurchases), "[^,]+") do
+                linked = linked:gsub("^%s+", ""):gsub("%s+$", "")
+                if linked ~= "" then
+                    table.insert(edges, {
+                        Type = "LINKED_PURCHASE",
+                        From = source,
+                        To = linked,
+                    })
+                end
+            end
+        end
+
+        for _, unlocked in ipairs(transaction.UnlockedButtons or {}) do
+            table.insert(edges, {
+                Type = "OBSERVED_UNLOCK",
+                From = source,
+                To = unlocked,
+            })
+        end
+    end
+
+    return edges
+end
+
 local function buildReport()
     local payload = {
         Report = "Tycoon Purchase Diagnostic",
@@ -1435,6 +1514,7 @@ local function buildReport()
         InitialButtons = State.InitialButtons,
         InitialPurchases = State.InitialPurchases,
         Transactions = State.Transactions,
+        ProgressionGraph = buildProgressionGraph(),
         Events = State.Events,
         Errors = State.Errors,
         Health = State.Health,
@@ -1454,7 +1534,7 @@ end
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Diagnostic_V2_1_1_" ..
+        "Tycoon_Purchase_Diagnostic_V2_2_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
@@ -1541,11 +1621,18 @@ task.spawn(function()
             end
 
             if State.LastMoney ~= nil and money ~= nil and money ~= State.LastMoney then
-                pushEvent("MONEY_CHANGE", "Money", {
-                    OldValue = State.LastMoney,
-                    NewValue = money,
-                    Delta = money - State.LastMoney,
-                })
+                local delta = money - State.LastMoney
+
+                pushEvent(
+                    delta < 0 and "MONEY_SPEND" or "MONEY_INCOME",
+                    "Money",
+                    {
+                        OldValue = State.LastMoney,
+                        NewValue = money,
+                        Delta = delta,
+                        Direction = delta < 0 and "SPEND" or "INCOME",
+                    }
+                )
 
                 correlateStatChanges(
                     State.LastMoney,
@@ -1605,5 +1692,5 @@ task.spawn(function()
     end
 end)
 
-UI.Status.Text = "V2.1.1 ativa. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "V2.2 ativa. GUI=" .. tostring(UI.ParentKind)
 refreshUI()
