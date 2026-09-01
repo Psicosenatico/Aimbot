@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V2.2.1
+PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V2.3.1
 DESTINO: LocalScript / ambiente de teste do cliente
 
 OBJETIVO
@@ -24,8 +24,8 @@ local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 
-local VERSION = "SERVER-RESPONSE-RESEARCH-2.2"
-local GUI_NAME = "PsicoTycoonServerResponseResearchV2_2"
+local VERSION = "SERVER-RESPONSE-RESEARCH-2.3"
+local GUI_NAME = "PsicoTycoonServerResponseResearchV2_3"
 local MAX_EVENTS = 3500
 local SAMPLE_INTERVAL = 0.20
 local CORRELATION_WINDOW = 4.0
@@ -71,6 +71,7 @@ local State = {
     },
 
     LastRemovedButton = nil,
+    LastAcceptedResponse = nil,
     PrimaryTycoonMoneySignals = {
         SuccessRemote = "TycoonService.ButtonPurchased",
         RejectRemote = "TycoonService.ButtonCannotPurchase",
@@ -78,6 +79,7 @@ local State = {
         ClientRequestPayloadObserved = false,
         ClientRequestMechanismObserved = false,
         Note = "This client-side observer confirms server responses, not the exact client-to-server purchase request payload.",
+        PurchaseAddedPolicy = "PURCHASE_ADDED enriches an existing/recent accepted response; it never starts a new pending response.",
     },
 }
 
@@ -430,6 +432,7 @@ finalizePendingResponse = function(status, remoteName, remoteElapsed)
 
     if status == "ACCEPTED" then
         State.ResponseCounters.Accepted += 1
+        State.LastAcceptedResponse = pending
     elseif status == "REJECTED" then
         State.ResponseCounters.Rejected += 1
     else
@@ -460,6 +463,7 @@ local function notePurchaseStructure(kind, details)
     if not State.VerificationActive then return end
 
     local nowElapsed = elapsed()
+
     if State.PendingPurchaseResponse then
         local started = State.PendingPurchaseResponse.StartedElapsed or nowElapsed
         if (nowElapsed - started) > PURCHASE_RESPONSE_WINDOW then
@@ -468,15 +472,12 @@ local function notePurchaseStructure(kind, details)
     end
 
     if kind == "BUTTON_REMOVED" then
-        -- Strongest target identity for an accepted purchase:
-        -- capture the button immediately, before it disappears from Buttons.
         State.LastRemovedButton = {
             Details = details,
             Elapsed = nowElapsed,
             Unix = os.time(),
         }
 
-        -- A new removed button starts a fresh response correlation.
         if State.PendingPurchaseResponse then
             finalizePendingResponse("UNRESOLVED", "REPLACED_BY_NEW_BUTTON_REMOVAL", nowElapsed)
         end
@@ -489,33 +490,64 @@ local function notePurchaseStructure(kind, details)
             TargetInference = "BUTTON_REMOVED",
             StructuralEvidence = {},
         }
-    elseif not State.PendingPurchaseResponse then
-        State.PendingPurchaseResponse = {
-            StartedUnix = os.time(),
-            StartedElapsed = nowElapsed,
-            EconomyBefore = snapshotEconomy(),
-            NearbyButton = nearestButtonInfo(),
-            TargetInference = "NEARBY_BUTTON_FALLBACK",
-            StructuralEvidence = {},
-        }
+
+        table.insert(State.PendingPurchaseResponse.StructuralEvidence, {
+            Kind = "BUTTON_REMOVED",
+            Elapsed = nowElapsed,
+            Details = details,
+        })
+        State.PendingPurchaseResponse.ButtonRemoved = details
+        return
     end
 
-    State.PendingPurchaseResponse.StructuralEvidence = State.PendingPurchaseResponse.StructuralEvidence or {}
-    table.insert(State.PendingPurchaseResponse.StructuralEvidence, {
-        Kind = kind,
-        Elapsed = nowElapsed,
-        Details = details,
-    })
+    if kind == "PURCHASE_ADDED" then
+        -- Important V2.3 rule:
+        -- PURCHASE_ADDED alone must NEVER open a new pending response.
+        if State.PendingPurchaseResponse then
+            State.PendingPurchaseResponse.StructuralEvidence = State.PendingPurchaseResponse.StructuralEvidence or {}
+            table.insert(State.PendingPurchaseResponse.StructuralEvidence, {
+                Kind = "PURCHASE_ADDED",
+                Elapsed = nowElapsed,
+                Details = details,
+            })
+            State.PendingPurchaseResponse.PurchaseAdded = details
 
-    if kind == "BUTTON_REMOVED" then
-        State.PendingPurchaseResponse.ButtonRemoved = details
-    elseif kind == "PURCHASE_ADDED" then
-        State.PendingPurchaseResponse.PurchaseAdded = details
-
-        local candidate = State.PendingPurchaseResponse.CandidateButton
-        if candidate and candidate.Name and details and details.Name == candidate.Name then
-            State.PendingPurchaseResponse.TargetConfirmedByPurchaseAdded = true
+            local candidate = State.PendingPurchaseResponse.CandidateButton
+            if candidate and candidate.Name and details and details.Name == candidate.Name then
+                State.PendingPurchaseResponse.TargetConfirmedByPurchaseAdded = true
+            end
+            return
         end
+
+        -- If the accepted response already closed a few milliseconds earlier,
+        -- attach PURCHASE_ADDED retroactively instead of creating UNRESOLVED noise.
+        local lastAccepted = State.LastAcceptedResponse
+        if lastAccepted and lastAccepted.ResponseElapsed and
+            (nowElapsed - lastAccepted.ResponseElapsed) <= PURCHASE_RESPONSE_WINDOW then
+
+            lastAccepted.StructuralEvidence = lastAccepted.StructuralEvidence or {}
+            table.insert(lastAccepted.StructuralEvidence, {
+                Kind = "PURCHASE_ADDED",
+                Elapsed = nowElapsed,
+                Details = details,
+            })
+            lastAccepted.PurchaseAdded = details
+
+            if lastAccepted.TargetName and details and details.Name == lastAccepted.TargetName then
+                lastAccepted.TargetConfirmedByPurchaseAdded = true
+            end
+
+            pushEvent("PURCHASE_RESPONSE_ENRICHED", {
+                Id = lastAccepted.Id,
+                Status = lastAccepted.Status,
+                TargetName = lastAccepted.TargetName,
+                TargetPath = lastAccepted.TargetPath,
+                PurchaseAdded = details,
+                TargetConfirmedByPurchaseAdded = lastAccepted.TargetConfirmedByPurchaseAdded == true,
+            })
+        end
+
+        return
     end
 end
 
@@ -754,6 +786,7 @@ local function beginVerification()
     State.PurchaseResponses = {}
     State.PendingPurchaseResponse = nil
     State.LastRemovedButton = nil
+    State.LastAcceptedResponse = nil
     State.ResponseCounters = {
         Accepted = 0,
         Rejected = 0,
@@ -875,7 +908,7 @@ local function createGui()
     title.Position = UDim2.new(0, 12, 0, 0)
     title.BackgroundTransparency = 1
     title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V2.2"
+    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V2.3"
     title.TextColor3 = Color3.fromRGB(83,226,169)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 11
@@ -945,7 +978,7 @@ local function createGui()
     export.TextColor3 = Color3.fromRGB(238,242,250)
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
-    export.Text = "Exportar SERVER RESPONSE V2.2 (.txt)"
+    export.Text = "Exportar SERVER RESPONSE V2.3 (.txt)"
     export.Parent = main
     round(export, 8)
 
@@ -1057,7 +1090,7 @@ local function createGui()
             return
         end
 
-        local filename = "Auto_Tycoon_Server_Response_Research_V2_2_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
+        local filename = "Auto_Tycoon_Server_Response_Research_V2_3_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
         local saved, copied = false, false
 
         if type(writefile) == "function" then
