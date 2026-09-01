@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.7.1 + AUDITED BUNKER TELEPORT + AUTOSAVE
+PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.7.2 + AUTOSAVE DEDUPLICADO
 COMPATIBILITY / STABILITY BUILD
 
 Purchase automation + diagnostics - authorized teleport test build.
@@ -44,8 +44,8 @@ local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GuiService = game:GetService("GuiService")
 
-local VERSION = "AUTO-TP-1.7.1"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_1"
+local VERSION = "AUTO-TP-1.7.2"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_2"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -139,6 +139,9 @@ local State = {
     AutoSaveLastFile = nil,
     AutoSaveLastOk = nil,
     AutoSaveFunction = nil,
+    AutoSaveEmergencyLatched = false,
+    AutoSaveEmergencyClock = 0,
+    AutoSaveEmergencyReason = nil,
 
     AutomationLastRebirth = nil,
     AutomationRunId = 0,
@@ -681,7 +684,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.7.1 - audited bunker + autosave"
+    version.Text = "AUTO V1.7.2 - autosave deduplicado"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -848,7 +851,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.7.1 (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.7.2 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -898,7 +901,7 @@ local function createGui()
     addConnection(close.MouseButton1Click, function()
         if State.AutoSaveFunction then
             pcall(function()
-                State.AutoSaveFunction("MENU_CLOSED", true)
+                State.AutoSaveFunction("MENU_CLOSED", false)
             end)
         end
 
@@ -936,14 +939,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Automator V1.7.1] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.7.2] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Automator V1.7.1] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator V1.7.2] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -3773,6 +3776,9 @@ local function buildReport()
             LastFile = State.AutoSaveLastFile,
             LastOk = State.AutoSaveLastOk,
             IntervalSeconds = AUTOSAVE_INTERVAL,
+            PeriodicFilePolicy = "OVERWRITE_SINGLE_LATEST_FILE",
+            EmergencyFilePolicy = "OVERWRITE_SINGLE_LATEST_FILE_WITH_10S_DEDUPE",
+            RebirthFilePolicy = "ONE_TIMESTAMPED_CRITICAL_SNAPSHOT",
         },
 
         StoragePolicy = {
@@ -3814,32 +3820,33 @@ local function buildReport()
 end
 
 
+
 local function autoSaveNow(reason, timestamped)
     reason = tostring(reason or "UNKNOWN")
     reason = string.upper(reason)
     reason = string.gsub(reason, "[^%w_%-]", "_")
     reason = string.sub(reason, 1, 48)
 
-    State.AutoSaveCount = State.AutoSaveCount + 1
-    State.AutoSaveLastUnix = os.time()
-    State.AutoSaveLastReason = reason
-
     if type(writefile) ~= "function" then
         State.AutoSaveLastOk = false
+        State.AutoSaveLastReason = reason
         return false, "WRITEFILE_UNAVAILABLE"
     end
 
-    local filename = "Tycoon_Purchase_Automator_V1_7_1_AutoSave_Latest.txt"
+    local filename = "Tycoon_Purchase_Automator_V1_7_2_AutoSave_Latest.txt"
 
     if timestamped then
         filename =
-            "Tycoon_Purchase_Automator_V1_7_1_AutoSave_" ..
+            "Tycoon_Purchase_Automator_V1_7_2_AutoSave_" ..
             reason ..
             "_" ..
             os.date("%Y%m%d_%H%M%S") ..
             ".txt"
     end
 
+    State.AutoSaveCount = State.AutoSaveCount + 1
+    State.AutoSaveLastUnix = os.time()
+    State.AutoSaveLastReason = reason
     State.AutoSaveLastFile = filename
 
     local content = buildReport()
@@ -3858,37 +3865,102 @@ end
 
 State.AutoSaveFunction = autoSaveNow
 
-local function installAutoSaveWatchers()
-    pcall(function()
-        addConnection(GuiService.ErrorMessageChanged:Connect(function(message)
-            if tostring(message or "") ~= "" then
-                task.defer(function()
-                    autoSaveNow("GUI_ERROR_OR_DISCONNECT", true)
-                end)
-            end
-        end))
-    end)
+local function textLooksLikeDisconnect(message)
+    local text = normalize(message)
 
-    pcall(function()
-        local promptGui = CoreGui:FindFirstChild("RobloxPromptGui")
-        local overlay = promptGui and promptGui:FindFirstChild("promptOverlay")
+    if text == "" then
+        return false
+    end
 
-        if overlay then
-            addConnection(overlay.ChildAdded:Connect(function(child)
-                local nameText = normalize(child.Name)
-                local looksLikeError =
-                    string.find(nameText, "error", 1, true) ~= nil
-                    or string.find(nameText, "disconnect", 1, true) ~= nil
-                    or string.find(nameText, "kick", 1, true) ~= nil
+    local needles = {
+        "disconnect",
+        "disconnected",
+        "connection lost",
+        "lost connection",
+        "internet",
+        "kicked",
+        "kick",
+        "error code",
+        "server shutdown",
+        "server shut down",
+        "desconect",
+        "conexao",
+        "conexão",
+        "internet",
+        "expulso",
+        "expulsa",
+        "codigo de erro",
+        "código de erro",
+    }
 
-                if looksLikeError then
-                    task.defer(function()
-                        autoSaveNow("ROBLOX_ERROR_PROMPT", true)
-                    end)
-                end
-            end))
+    for _, needle in ipairs(needles) do
+        if string.find(text, normalize(needle), 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function emergencyAutoSave(reason)
+    local now = os.clock()
+
+    -- One emergency save per shutdown/error burst.
+    -- This prevents ErrorMessageChanged + ErrorPrompt + repeated UI messages
+    -- from creating several files for the same disconnection.
+    if State.AutoSaveEmergencyLatched
+    and now - (State.AutoSaveEmergencyClock or 0) < 10 then
+        return false, "EMERGENCY_SAVE_DEDUPLICATED"
+    end
+
+    State.AutoSaveEmergencyLatched = true
+    State.AutoSaveEmergencyClock = now
+    State.AutoSaveEmergencyReason = reason
+
+    -- Emergency autosave overwrites one stable file instead of creating
+    -- a new timestamped file for every error signal.
+    local ok, result = autoSaveNow("EMERGENCY_" .. tostring(reason), false)
+
+    task.delay(10, function()
+        if State.Running then
+            State.AutoSaveEmergencyLatched = false
         end
     end)
+
+    return ok, result
+end
+
+local function installAutoSaveWatchers()
+    -- IMPORTANT: pass the RBXScriptSignal to addConnection.
+    -- V1.7.1 accidentally called :Connect first and then passed the
+    -- RBXScriptConnection back into addConnection, causing:
+    -- "Connect is not a valid member of RBXScriptConnection".
+    addConnection(GuiService.ErrorMessageChanged, function(message)
+        if textLooksLikeDisconnect(message) then
+            task.defer(function()
+                emergencyAutoSave("GUI_ERROR_OR_DISCONNECT")
+            end)
+        end
+    end)
+
+    local promptGui = CoreGui:FindFirstChild("RobloxPromptGui")
+    local overlay = promptGui and promptGui:FindFirstChild("promptOverlay")
+
+    if overlay then
+        addConnection(overlay.ChildAdded, function(child)
+            local nameText = normalize(child.Name)
+            local looksLikeError =
+                string.find(nameText, "error", 1, true) ~= nil
+                or string.find(nameText, "disconnect", 1, true) ~= nil
+                or string.find(nameText, "kick", 1, true) ~= nil
+
+            if looksLikeError then
+                task.defer(function()
+                    emergencyAutoSave("ROBLOX_ERROR_PROMPT")
+                end)
+            end
+        end)
+    end
 end
 
 task.spawn(function()
@@ -3896,6 +3968,7 @@ task.spawn(function()
         task.wait(AUTOSAVE_INTERVAL)
 
         if State.Running and State.Reading then
+            -- Periodic checkpoint always overwrites the same file.
             autoSaveNow("PERIODIC_CHECKPOINT", false)
         end
     end
@@ -3906,7 +3979,7 @@ installAutoSaveWatchers()
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_7_1_Audited_" ..
+        "Tycoon_Purchase_Automator_V1_7_2_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
@@ -4095,7 +4168,7 @@ task.spawn(function()
     end
 end)
 
-UI.Status.Text = "AUTO V1.7.1 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "AUTO V1.7.2 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
 safeCall("UI_INITIAL_REFRESH", function()
     refreshUI()
 end)
