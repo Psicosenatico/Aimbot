@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE DIAGNOSTIC - V2.3
+PSICOSENATICO - TYCOON PURCHASE DIAGNOSTIC - V2.3.3
 COMPATIBILITY / STABILITY BUILD
 
 Diagnostic only.
@@ -25,10 +25,10 @@ local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 
-local VERSION = "2.3"
-local GUI_NAME = "PsicoTycoonPurchaseDiagnosticV23"
+local VERSION = "2.3.3"
+local GUI_NAME = "PsicoTycoonPurchaseDiagnosticV233"
 
-local MAX_EVENTS = 1500
+local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
 local TYCOON_INTERVAL = 1.5
 local CORRELATION_WINDOW = 4
@@ -49,6 +49,10 @@ local COLORS = {
 
 local State = {
     Running = true,
+    Reading = false,
+    ReadingSessions = {},
+    CurrentReadingSession = nil,
+
     StartedUnix = os.time(),
     StartedClock = os.clock(),
 
@@ -72,7 +76,17 @@ local State = {
     Pending = {},
     Transactions = {},
     Events = {},
+    CriticalEvents = {},
     Errors = {},
+
+    DataStats = {
+        TotalEventsObserved = 0,
+        AuxiliaryEventsStored = 0,
+        AuxiliaryEventsDiscarded = 0,
+        CriticalEventsStored = 0,
+        TransactionsStored = 0,
+        TransactionDataDiscarded = 0,
+    },
 
     Connections = {},
     TycoonConnections = {},
@@ -84,6 +98,7 @@ local State = {
         Money = "SEARCHING",
         Rebirths = "SEARCHING",
         Engine = "STARTING",
+        Reading = "PAUSED",
     },
 
     Minimized = false,
@@ -184,6 +199,18 @@ local function containsAny(value, words)
     return false
 end
 
+local CRITICAL_EVENT_KINDS = {
+    TRANSACTION_FINALIZED = true,
+    MONEY_SPEND = true,
+    REBIRTH_CHANGE = true,
+    BUTTON_REMOVED = true,
+    PURCHASE_CREATED = true,
+    BUTTONS_UNLOCKED = true,
+    READING_STARTED = true,
+    READING_STOPPED = true,
+    ERROR = true,
+}
+
 local function pushEvent(kind, label, details)
     local item = {
         Time = clockText(),
@@ -194,10 +221,21 @@ local function pushEvent(kind, label, details)
         Details = details or {},
     }
 
-    table.insert(State.Events, item)
+    State.DataStats.TotalEventsObserved = State.DataStats.TotalEventsObserved + 1
 
-    while #State.Events > MAX_EVENTS do
+    if CRITICAL_EVENT_KINDS[kind] then
+        table.insert(State.CriticalEvents, item)
+        State.DataStats.CriticalEventsStored = #State.CriticalEvents
+    end
+
+    table.insert(State.Events, item)
+    State.DataStats.AuxiliaryEventsStored = #State.Events
+
+    while #State.Events > MAX_AUX_EVENTS do
         table.remove(State.Events, 1)
+        State.DataStats.AuxiliaryEventsDiscarded =
+            State.DataStats.AuxiliaryEventsDiscarded + 1
+        State.DataStats.AuxiliaryEventsStored = #State.Events
     end
 
     return item
@@ -522,7 +560,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "V2.3 - stability build"
+    version.Text = "V2.3.3 - stability build"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -622,7 +660,7 @@ local function createGui()
     local scroll = Instance.new("ScrollingFrame")
     scroll.Name = "Log"
     scroll.Position = UDim2.new(0, 0, 0, 102)
-    scroll.Size = UDim2.new(1, 0, 1, -146)
+    scroll.Size = UDim2.new(1, 0, 1, -188)
     scroll.BackgroundColor3 = COLORS.CardDark
     scroll.BorderSizePixel = 0
     scroll.ScrollBarThickness = 4
@@ -654,13 +692,27 @@ local function createGui()
     live.ZIndex = 12
     live.Parent = scroll
 
+    local readToggle = Instance.new("TextButton")
+    readToggle.Name = "ReadToggle"
+    readToggle.Position = UDim2.new(0, 0, 1, -80)
+    readToggle.Size = UDim2.new(1, 0, 0, 36)
+    readToggle.BackgroundColor3 = COLORS.Floating
+    readToggle.BorderSizePixel = 0
+    readToggle.Text = "Iniciar leitura de dados"
+    readToggle.TextColor3 = COLORS.Text
+    readToggle.Font = Enum.Font.GothamBold
+    readToggle.TextSize = 11
+    readToggle.ZIndex = 12
+    readToggle.Parent = body
+    round(readToggle, 8)
+
     local export = Instance.new("TextButton")
     export.Name = "Export"
     export.Position = UDim2.new(0, 0, 1, -38)
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio V2.3 (.txt)"
+    export.Text = "Exportar relatorio V2.3.3 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -674,7 +726,7 @@ local function createGui()
     floating.Position = UDim2.new(0, 18, 0.5, -30)
     floating.BackgroundColor3 = COLORS.Floating
     floating.BorderSizePixel = 0
-    floating.Text = "V2.3"
+    floating.Text = "V2.3.3"
     floating.TextColor3 = Color3.fromRGB(240, 246, 255)
     floating.Font = Enum.Font.GothamBold
     floating.TextSize = 11
@@ -692,6 +744,7 @@ local function createGui()
     UI.Rebirths = rebirths
     UI.Health = health
     UI.Live = live
+    UI.ReadToggle = readToggle
     UI.Export = export
     UI.Minimize = minimize
     UI.Close = close
@@ -737,14 +790,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Diagnostic V2.3] LocalPlayer indisponivel.")
+    warn("[Tycoon Diagnostic V2.3.3] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Diagnostic V2.3] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Diagnostic V2.3.3] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -1182,6 +1235,7 @@ local function finalize(name)
     end
 
     table.insert(State.Transactions, transaction)
+    State.DataStats.TransactionsStored = #State.Transactions
     pending.Completed = true
 
     pushEvent("TRANSACTION_FINALIZED", name, transaction)
@@ -1253,6 +1307,10 @@ local function watchButtonAttributes(button)
             local info = describeButton(button)
             State.ButtonCache[button.Name] = info
 
+            if not State.Reading then
+                return
+            end
+
             pushEvent("BUTTON_ATTRIBUTE_CHANGED", button.Name, {
                 Attribute = attrName,
                 Button = info,
@@ -1269,26 +1327,34 @@ local function onButtonAdded(button)
 
     local info = describeButton(button)
     State.ButtonCache[button.Name] = info
+    watchButtonAttributes(button)
+
+    if not State.Reading then
+        return
+    end
 
     pushEvent("BUTTON_AVAILABLE", button.Name, {
         Button = info,
         Classification = classify(info, nil),
     })
-
-    watchButtonAttributes(button)
 end
 
 local function onButtonRemoved(button)
     local name = button.Name
     local info = State.ButtonCache[name] or describeButton(button)
+
+    State.ButtonCache[name] = nil
+
+    if not State.Reading then
+        return
+    end
+
     local pending = pendingFor(name)
 
     pending.Button = info
     pending.ButtonRemovedAt = os.clock()
     pending.MoneyBefore = State.LastMoney
     pending.RebirthsBefore = State.LastRebirths
-
-    State.ButtonCache[name] = nil
 
     local baseline = buttonsSet()
 
@@ -1307,6 +1373,10 @@ local function onPurchaseAdded(purchase)
         return
     end
 
+    if not State.Reading then
+        return
+    end
+
     local name = purchase.Name
     local pending = pendingFor(name)
     local info = describePurchase(purchase)
@@ -1321,15 +1391,16 @@ local function onPurchaseAdded(purchase)
 end
 
 local function scanInitial()
-    State.InitialButtons = {}
-    State.InitialPurchases = {}
     State.ButtonCache = {}
+
+    local buttonsSnapshot = {}
+    local purchasesSnapshot = {}
 
     if State.ButtonsFolder then
         for _, button in ipairs(State.ButtonsFolder:GetChildren()) do
             if button:IsA("Model") or button:IsA("Folder") then
                 local info = describeButton(button)
-                table.insert(State.InitialButtons, info)
+                table.insert(buttonsSnapshot, info)
                 State.ButtonCache[button.Name] = info
                 watchButtonAttributes(button)
             end
@@ -1339,15 +1410,20 @@ local function scanInitial()
     if State.PurchasesFolder then
         for _, purchase in ipairs(State.PurchasesFolder:GetChildren()) do
             if purchase:IsA("Model") or purchase:IsA("Folder") then
-                table.insert(State.InitialPurchases, describePurchase(purchase))
+                table.insert(purchasesSnapshot, describePurchase(purchase))
             end
         end
     end
 
-    pushEvent("INITIAL_STATE", "Initial state", {
-        Buttons = #State.InitialButtons,
-        Purchases = #State.InitialPurchases,
-    })
+    if State.Reading then
+        State.InitialButtons = buttonsSnapshot
+        State.InitialPurchases = purchasesSnapshot
+
+        pushEvent("INITIAL_STATE", "Initial state", {
+            Buttons = #State.InitialButtons,
+            Purchases = #State.InitialPurchases,
+        })
+    end
 end
 
 local function bindTycoon(tycoon, score, evidence)
@@ -1385,11 +1461,13 @@ local function bindTycoon(tycoon, score, evidence)
 
     State.Health.Tycoon = "CONFIRMED"
 
-    pushEvent("TYCOON_BOUND", tycoon.Name, {
-        Path = safeFullName(tycoon),
-        Score = State.TycoonScore,
-        Evidence = evidence,
-    })
+    if State.Reading then
+        pushEvent("TYCOON_BOUND", tycoon.Name, {
+            Path = safeFullName(tycoon),
+            Score = State.TycoonScore,
+            Evidence = evidence,
+        })
+    end
 
     return true
 end
@@ -1442,6 +1520,8 @@ local function correlateStatChanges(oldMoney, newMoney, oldRebirths, newRebirths
     end
 end
 
+local buildAutomationCandidates
+
 local function refreshUI()
     if not UI.Screen or not UI.Screen.Parent then
         return
@@ -1452,9 +1532,20 @@ local function refreshUI()
     local candidates = buildAutomationCandidates()
 
     UI.Status.Text =
-        "Tycoon: " .. tostring(tycoonName) ..
+        "Leitura: " .. (State.Reading and "ATIVA" or "PAUSADA") ..
+        " | Tycoon: " .. tostring(tycoonName) ..
         " | Compras: " .. tostring(#State.Transactions) ..
         " | Elegiveis: " .. tostring(#candidates.Eligible)
+
+    if UI.ReadToggle and UI.ReadToggle.Parent then
+        UI.ReadToggle.Text = State.Reading
+            and "Parar leitura de dados"
+            or "Iniciar leitura de dados"
+
+        UI.ReadToggle.BackgroundColor3 = State.Reading
+            and COLORS.Danger
+            or COLORS.Floating
+    end
 
     UI.Money.Text =
         "Money: " ..
@@ -1466,9 +1557,13 @@ local function refreshUI()
 
     UI.Health.Text =
         "UI:" .. tostring(State.Health.UI) ..
+        " Leitura:" .. tostring(State.Health.Reading) ..
         " Tycoon:" .. tostring(State.Health.Tycoon) ..
         " Money:" .. tostring(State.Health.Money) ..
         " Rebirth:" .. tostring(State.Health.Rebirths) ..
+        " Tx:" .. tostring(#State.Transactions) ..
+        " Ev:" .. tostring(State.DataStats.TotalEventsObserved) ..
+        " Desc:" .. tostring(State.DataStats.AuxiliaryEventsDiscarded) ..
         " Errors:" .. tostring(#State.Errors)
 
     local lines = {}
@@ -1496,7 +1591,7 @@ local function refreshUI()
     end
 end
 
-local function buildAutomationCandidates()
+buildAutomationCandidates = function()
     local result = {Eligible = {}, Ignored = {}}
     if not State.ButtonsFolder then return result end
 
@@ -1529,6 +1624,81 @@ local function buildAutomationCandidates()
     table.sort(result.Eligible, function(a, b) return tostring(a.Name) < tostring(b.Name) end)
     table.sort(result.Ignored, function(a, b) return tostring(a.Name) < tostring(b.Name) end)
     return result
+end
+
+local function setReading(enabled)
+    enabled = enabled and true or false
+
+    if State.Reading == enabled then
+        return
+    end
+
+    if enabled then
+        State.Reading = true
+        State.Health.Reading = "ACTIVE"
+        State.Pending = {}
+
+        refreshStatsObjects()
+        State.LastMoney = readValue(State.MoneyObject)
+        State.LastRebirths = readValue(State.RebirthObject)
+
+        local session = {
+            StartedUnix = os.time(),
+            StartedElapsed = elapsed(),
+            StartedMoney = State.LastMoney,
+            StartedRebirths = State.LastRebirths,
+            StartedEventCount = State.DataStats.TotalEventsObserved,
+            StartedTransactionCount = #State.Transactions,
+        }
+
+        State.CurrentReadingSession = session
+        table.insert(State.ReadingSessions, session)
+
+        scanInitial()
+
+        pushEvent("READING_STARTED", "READING_STARTED", {
+            Money = State.LastMoney,
+            Rebirths = State.LastRebirths,
+            Buttons = #State.InitialButtons,
+            Purchases = #State.InitialPurchases,
+            TransactionsStored = #State.Transactions,
+            EventsObserved = State.DataStats.TotalEventsObserved,
+        })
+    else
+        pushEvent("READING_STOPPED", "READING_STOPPED", {
+            Money = State.LastMoney,
+            Rebirths = State.LastRebirths,
+            TransactionsStored = #State.Transactions,
+            EventsObserved = State.DataStats.TotalEventsObserved,
+            AuxiliaryEventsDiscarded = State.DataStats.AuxiliaryEventsDiscarded,
+        })
+
+        if State.CurrentReadingSession then
+            State.CurrentReadingSession.StoppedUnix = os.time()
+            State.CurrentReadingSession.StoppedElapsed = elapsed()
+            State.CurrentReadingSession.StoppedMoney = State.LastMoney
+            State.CurrentReadingSession.StoppedRebirths = State.LastRebirths
+            State.CurrentReadingSession.StoppedEventCount =
+                State.DataStats.TotalEventsObserved
+            State.CurrentReadingSession.StoppedTransactionCount =
+                #State.Transactions
+            State.CurrentReadingSession.EventsObserved =
+                State.CurrentReadingSession.StoppedEventCount -
+                (State.CurrentReadingSession.StartedEventCount or 0)
+            State.CurrentReadingSession.TransactionsRecorded =
+                State.CurrentReadingSession.StoppedTransactionCount -
+                (State.CurrentReadingSession.StartedTransactionCount or 0)
+        end
+
+        State.CurrentReadingSession = nil
+        State.Pending = {}
+        State.Reading = false
+        State.Health.Reading = "PAUSED"
+    end
+
+    safeCall("READING_UI_REFRESH", function()
+        refreshUI()
+    end)
 end
 
 local function buildProgressionGraph()
@@ -1598,7 +1768,28 @@ local function buildReport()
 
         InitialButtons = State.InitialButtons,
         InitialPurchases = State.InitialPurchases,
+        ReadingActive = State.Reading,
+        ReadingSessions = State.ReadingSessions,
+
+        StoragePolicy = {
+            Transactions = "UNBOUNDED_DURING_SESSION",
+            CriticalEvents = "UNBOUNDED_DURING_SESSION",
+            AuxiliaryEvents = "RING_BUFFER",
+            AuxiliaryEventLimit = MAX_AUX_EVENTS,
+            Note = "Only auxiliary history is trimmed. Consolidated transactions and critical purchase evidence are preserved for the full session.",
+        },
+
+        DataStats = {
+            TotalEventsObserved = State.DataStats.TotalEventsObserved,
+            AuxiliaryEventsStored = #State.Events,
+            AuxiliaryEventsDiscarded = State.DataStats.AuxiliaryEventsDiscarded,
+            CriticalEventsStored = #State.CriticalEvents,
+            TransactionsStored = #State.Transactions,
+            TransactionDataDiscarded = State.DataStats.TransactionDataDiscarded,
+        },
+
         Transactions = State.Transactions,
+        CriticalEvents = State.CriticalEvents,
         AutomationCandidates = buildAutomationCandidates(),
         ProgressionGraph = buildProgressionGraph(),
         Events = State.Events,
@@ -1620,7 +1811,7 @@ end
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Diagnostic_V2_3_" ..
+        "Tycoon_Purchase_Diagnostic_V2_3_3_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
@@ -1654,15 +1845,23 @@ local function exportReport()
     return false, "writefile/clipboard indisponivel."
 end
 
-addConnection(UI.Export.MouseButton1Click, function()
-    local ok, message = exportReport()
-    UI.Status.Text = message
+addConnection(UI.ReadToggle.MouseButton1Click, function()
+    safeCall("READING_TOGGLE", function()
+        setReading(not State.Reading)
+    end)
+end)
 
-    pushEvent(
-        "SYSTEM",
-        ok and "EXPORT_SUCCESS" or "EXPORT_UNAVAILABLE",
-        {Message = message}
-    )
+addConnection(UI.Export.MouseButton1Click, function()
+    safeCall("EXPORT", function()
+        local ok, message = exportReport()
+        UI.Status.Text = message
+
+        pushEvent(
+            "SYSTEM",
+            ok and "EXPORT_SUCCESS" or "EXPORT_UNAVAILABLE",
+            {Message = message}
+        )
+    end)
 end)
 
 -- ============================================================
@@ -1681,6 +1880,7 @@ end)
 
 State.Health.Bootstrap = "OK"
 State.Health.Engine = "ACTIVE"
+State.Health.Reading = "PAUSED"
 
 pushEvent("SYSTEM", "ENGINE_STARTED", {
     Version = VERSION,
@@ -1706,7 +1906,10 @@ task.spawn(function()
                 State.Health.Rebirths = "SEARCHING"
             end
 
-            if State.LastMoney ~= nil and money ~= nil and money ~= State.LastMoney then
+            if State.Reading
+            and State.LastMoney ~= nil
+            and money ~= nil
+            and money ~= State.LastMoney then
                 local delta = money - State.LastMoney
 
                 pushEvent(
@@ -1728,7 +1931,8 @@ task.spawn(function()
                 )
             end
 
-            if State.LastRebirths ~= nil
+            if State.Reading
+            and State.LastRebirths ~= nil
             and rebirths ~= nil
             and rebirths ~= State.LastRebirths then
                 pushEvent("REBIRTH_CHANGE", "Rebirths", {
@@ -1778,5 +1982,7 @@ task.spawn(function()
     end
 end)
 
-UI.Status.Text = "V2.3 ativa. GUI=" .. tostring(UI.ParentKind)
-refreshUI()
+UI.Status.Text = "V2.3.3 pronta. Leitura PAUSADA. GUI=" .. tostring(UI.ParentKind)
+safeCall("UI_INITIAL_REFRESH", function()
+    refreshUI()
+end)
