@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V2.3.1
+PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V2.4.1
 DESTINO: LocalScript / ambiente de teste do cliente
 
 OBJETIVO
@@ -24,8 +24,8 @@ local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 
-local VERSION = "SERVER-RESPONSE-RESEARCH-2.3"
-local GUI_NAME = "PsicoTycoonServerResponseResearchV2_3"
+local VERSION = "SERVER-RESPONSE-RESEARCH-2.4"
+local GUI_NAME = "PsicoTycoonServerResponseResearchV2_4"
 local MAX_EVENTS = 3500
 local SAMPLE_INTERVAL = 0.20
 local CORRELATION_WINDOW = 4.0
@@ -72,6 +72,18 @@ local State = {
 
     LastRemovedButton = nil,
     LastAcceptedResponse = nil,
+
+    RebirthResearch = {
+        SetCanRebirthEvents = {},
+        LastSetCanRebirth = nil,
+        UiSnapshots = {},
+        UiEvents = {},
+        LastUiSignature = nil,
+        LastUiScanClock = 0,
+        WatchedButtons = setmetatable({}, {__mode = "k"}),
+        RebirthChanges = {},
+    },
+
     PrimaryTycoonMoneySignals = {
         SuccessRemote = "TycoonService.ButtonPurchased",
         RejectRemote = "TycoonService.ButtonCannotPurchase",
@@ -305,6 +317,10 @@ local function trimRecentRemoteInbound()
 end
 
 local function correlate(kind, details)
+    if not State.VerificationActive then
+        return
+    end
+
     trimRecentRemoteInbound()
     if #State.RecentRemoteInbound == 0 then return end
     local related = {}
@@ -317,6 +333,7 @@ local function correlate(kind, details)
             DeltaSeconds = math.floor((elapsed() - remoteEvent.Elapsed) * 1000) / 1000,
             ArgumentCount = remoteEvent.ArgumentCount,
             ArgumentTypes = remoteEvent.ArgumentTypes,
+            SafeArguments = remoteEvent.SafeArguments,
         })
     end
     local record = {
@@ -501,7 +518,7 @@ local function notePurchaseStructure(kind, details)
     end
 
     if kind == "PURCHASE_ADDED" then
-        -- Important V2.3 rule:
+        -- Important V2.4 rule:
         -- PURCHASE_ADDED alone must NEVER open a new pending response.
         if State.PendingPurchaseResponse then
             State.PendingPurchaseResponse.StructuralEvidence = State.PendingPurchaseResponse.StructuralEvidence or {}
@@ -551,6 +568,174 @@ local function notePurchaseStructure(kind, details)
     end
 end
 
+
+local function safePrimitive(value)
+    local valueType = typeof(value)
+
+    if valueType == "string" then
+        local text = tostring(value)
+        if #text > 120 then
+            text = string.sub(text, 1, 120) .. "..."
+        end
+        return text
+    elseif valueType == "number" or valueType == "boolean" then
+        return value
+    elseif valueType == "nil" then
+        return nil
+    end
+
+    return "<" .. tostring(valueType) .. ">"
+end
+
+local function safeArguments(args)
+    local result = {}
+    local limit = math.min(#args, 8)
+
+    for i = 1, limit do
+        result[i] = {
+            Type = typeof(args[i]),
+            Value = safePrimitive(args[i]),
+        }
+    end
+
+    return result
+end
+
+local function rebirthUiEntry(obj)
+    local item = {
+        Path = safeFullName(obj),
+        Name = obj.Name,
+        ClassName = obj.ClassName,
+    }
+
+    if obj:IsA("GuiObject") then
+        item.Visible = obj.Visible
+        item.Active = obj.Active
+    end
+
+    if obj:IsA("GuiButton") then
+        item.AutoButtonColor = obj.AutoButtonColor
+        item.Interactable = obj.Interactable
+    end
+
+    if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+        local text = tostring(obj.Text or "")
+        if #text > 160 then
+            text = string.sub(text, 1, 160) .. "..."
+        end
+        item.Text = text
+    end
+
+    return item
+end
+
+local function rebirthUiLooksRelevant(obj)
+    local nameNorm = normalize(obj.Name)
+    local textNorm = ""
+
+    if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+        textNorm = normalize(obj.Text)
+    end
+
+    local function relevant(text)
+        return string.find(text, "rebirth", 1, true)
+            or string.find(text, "prestige", 1, true)
+            or string.find(text, "renascimento", 1, true)
+            or string.find(text, "renascer", 1, true)
+    end
+
+    return relevant(nameNorm) or relevant(textNorm)
+end
+
+local function scanRebirthUi()
+    local gui = Player:FindFirstChild("PlayerGui")
+    if not gui then
+        return {}
+    end
+
+    local results = {}
+    local scanned = 0
+
+    for _, obj in ipairs(gui:GetDescendants()) do
+        scanned += 1
+        if scanned > 3000 then
+            break
+        end
+
+        if rebirthUiLooksRelevant(obj) then
+            table.insert(results, rebirthUiEntry(obj))
+
+            if obj:IsA("GuiButton")
+            and not State.RebirthResearch.WatchedButtons[obj] then
+                State.RebirthResearch.WatchedButtons[obj] = true
+
+                addConnection(obj.Activated, function()
+                    if not State.VerificationActive then
+                        return
+                    end
+
+                    local details = rebirthUiEntry(obj)
+                    details.Money = State.LastMoney
+                    details.Rebirths = State.LastRebirths
+                    details.LastSetCanRebirth = State.RebirthResearch.LastSetCanRebirth
+
+                    table.insert(State.RebirthResearch.UiEvents, details)
+                    pushEvent("REBIRTH_UI_ACTIVATED", details)
+                end)
+            end
+
+            if #results >= 24 then
+                break
+            end
+        end
+    end
+
+    table.sort(results, function(a, b)
+        return tostring(a.Path) < tostring(b.Path)
+    end)
+
+    return results
+end
+
+local function updateRebirthUiSnapshot(forceReason)
+    local now = os.clock()
+    if not forceReason and (now - State.RebirthResearch.LastUiScanClock) < 0.50 then
+        return
+    end
+    State.RebirthResearch.LastUiScanClock = now
+
+    local snapshot = scanRebirthUi()
+    local ok, signature = pcall(function()
+        return HttpService:JSONEncode(snapshot)
+    end)
+
+    if not ok then
+        signature = tostring(#snapshot)
+    end
+
+    if forceReason or signature ~= State.RebirthResearch.LastUiSignature then
+        State.RebirthResearch.LastUiSignature = signature
+
+        local record = {
+            Unix = os.time(),
+            Elapsed = elapsed(),
+            Reason = forceReason or "UI_STATE_CHANGED",
+            Rebirths = State.LastRebirths,
+            Money = State.LastMoney,
+            Objects = snapshot,
+        }
+
+        table.insert(State.RebirthResearch.UiSnapshots, record)
+        while #State.RebirthResearch.UiSnapshots > 120 do
+            table.remove(State.RebirthResearch.UiSnapshots, 1)
+        end
+
+        if State.VerificationActive then
+            pushEvent("REBIRTH_UI_STATE_CHANGED", record)
+        end
+    end
+end
+
 local function catalogRemote(obj)
     if not (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) then return end
     local path = safeFullName(obj)
@@ -589,6 +774,32 @@ local function catalogRemote(obj)
                 ArgumentCount = #args,
                 ArgumentTypes = types,
             }
+
+            if obj.Name == "SetCanRebirth" then
+                inbound.SafeArguments = safeArguments(args)
+
+                local rebirthRecord = {
+                    Unix = inbound.Unix,
+                    Elapsed = inbound.Elapsed,
+                    Path = path,
+                    ArgumentCount = inbound.ArgumentCount,
+                    ArgumentTypes = inbound.ArgumentTypes,
+                    SafeArguments = inbound.SafeArguments,
+                    Money = State.LastMoney,
+                    Collector = State.LastCollector,
+                    Rebirths = State.LastRebirths,
+                }
+
+                State.RebirthResearch.LastSetCanRebirth = rebirthRecord
+                table.insert(State.RebirthResearch.SetCanRebirthEvents, rebirthRecord)
+
+                if #State.RebirthResearch.SetCanRebirthEvents > 240 then
+                    table.remove(State.RebirthResearch.SetCanRebirthEvents, 1)
+                end
+
+                pushEvent("REBIRTH_SETCANREBIRTH_OBSERVED", rebirthRecord)
+                updateRebirthUiSnapshot("SET_CAN_REBIRTH")
+            end
 
             table.insert(State.RecentRemoteInbound, inbound)
             trimRecentRemoteInbound()
@@ -787,6 +998,12 @@ local function beginVerification()
     State.PendingPurchaseResponse = nil
     State.LastRemovedButton = nil
     State.LastAcceptedResponse = nil
+    State.RebirthResearch.SetCanRebirthEvents = {}
+    State.RebirthResearch.LastSetCanRebirth = nil
+    State.RebirthResearch.UiSnapshots = {}
+    State.RebirthResearch.UiEvents = {}
+    State.RebirthResearch.LastUiSignature = nil
+    State.RebirthResearch.RebirthChanges = {}
     State.ResponseCounters = {
         Accepted = 0,
         Rejected = 0,
@@ -813,6 +1030,8 @@ local function beginVerification()
         Rebirths = State.LastRebirths,
         Tycoon = session.StartedTycoon,
     })
+
+    updateRebirthUiSnapshot("VERIFICATION_STARTED")
 
     if UI.Toggle and UI.Toggle.Parent then
         UI.Toggle.Text = "Parar verificacao"
@@ -908,7 +1127,7 @@ local function createGui()
     title.Position = UDim2.new(0, 12, 0, 0)
     title.BackgroundTransparency = 1
     title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V2.3"
+    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V2.4"
     title.TextColor3 = Color3.fromRGB(83,226,169)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 11
@@ -978,7 +1197,7 @@ local function createGui()
     export.TextColor3 = Color3.fromRGB(238,242,250)
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
-    export.Text = "Exportar SERVER RESPONSE V2.3 (.txt)"
+    export.Text = "Exportar SERVER RESPONSE V2.4 (.txt)"
     export.Parent = main
     round(export, 8)
 
@@ -1069,6 +1288,16 @@ local function createGui()
                 ResponseCounters = State.ResponseCounters,
                 PrimaryTycoonMoneySignals = State.PrimaryTycoonMoneySignals,
             },
+            RebirthResearch = {
+                SetCanRebirthEvents = State.RebirthResearch.SetCanRebirthEvents,
+                LastSetCanRebirth = State.RebirthResearch.LastSetCanRebirth,
+                UiSnapshots = State.RebirthResearch.UiSnapshots,
+                UiEvents = State.RebirthResearch.UiEvents,
+                RebirthChanges = State.RebirthResearch.RebirthChanges,
+                Scope = "ADDITIVE: preserves V2.3 purchase/economy/remote research and adds Rebirth-specific evidence.",
+                SafeArgumentPolicy = "Only bounded primitive values are recorded for SetCanRebirth; complex values are represented by type.",
+                Mutation = false,
+            },
             Policy = {
                 Perspective = "server response as observed by client",
                 TrueServerAuthority = false,
@@ -1080,7 +1309,7 @@ local function createGui()
                 ServerAuthorizationForgery = false,
                 OutboundPurchaseRequestCaptured = false,
                 OutboundPurchaseRequestPayloadKnown = false,
-                Notes = "Inbound RemoteEvent activity and replicated state changes are observational evidence, not internal server state.",
+                Notes = "Inbound RemoteEvent activity and replicated state changes are observational evidence, not internal server state. V2.4 preserves the V2.3 research structure and adds Rebirth-focused observation only.",
             },
         }
 
@@ -1090,7 +1319,7 @@ local function createGui()
             return
         end
 
-        local filename = "Auto_Tycoon_Server_Response_Research_V2_3_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
+        local filename = "Auto_Tycoon_Server_Response_Research_V2_4_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
         local saved, copied = false, false
 
         if type(writefile) == "function" then
@@ -1157,11 +1386,24 @@ task.spawn(function()
         end
 
         if rebirthValue ~= State.LastRebirths then
-            local details = {Before=State.LastRebirths, After=rebirthValue, Source=rebirth and rebirth.Path or nil}
+            local details = {
+                Before = State.LastRebirths,
+                After = rebirthValue,
+                Source = rebirth and rebirth.Path or nil,
+                Money = moneyValue,
+                Collector = collectorValue,
+                LastSetCanRebirth = State.RebirthResearch.LastSetCanRebirth,
+                RebirthUi = scanRebirthUi(),
+            }
+
+            table.insert(State.RebirthResearch.RebirthChanges, details)
             pushEvent("REBIRTH_CHANGED", details)
             correlate("REBIRTH_CHANGED", details)
             State.LastRebirths = rebirthValue
+            updateRebirthUiSnapshot("REBIRTH_CHANGED")
         end
+
+        updateRebirthUiSnapshot(nil)
 
         if UI.Status and UI.Status.Parent then
             local remoteCount = 0
