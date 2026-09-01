@@ -1,10 +1,12 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.0
+PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - TELEPORT TEST V1.1
 COMPATIBILITY / STABILITY BUILD
 
-Purchase automation + diagnostics.
-Uses normal character movement to reach Tycoon purchase buttons.
-Does not alter Money/Rebirths, fake Marketplace receipts, or bypass movement/economy checks.
+Purchase automation + diagnostics - authorized teleport test build.
+For the user's own authorized test environment, teleports the local character directly
+onto ordinary MAIN_TYCOON purchase buttons instead of walking to them.
+Does not alter Money/Rebirths or fake Marketplace receipts.
+BUNKER transition remains the game's normal transition instead of long-distance teleport.
 
 Purchase classes:
 - TYCOON_MONEY
@@ -19,7 +21,8 @@ Context diagnostics:
 - StageUnlocks groups newly observed buttons by progression floor
 - Money discovery prefers leaderstats ValueBase, then Player/Tycoon, with PlayerGui as fallback
 - Bunker-dependent purchases use MovementPolicy=USE_GAME_TRANSITION
-- This diagnostic does not teleport or bypass movement correction
+- MAIN_TYCOON test purchases use direct local-character teleport to the button
+- BUNKER transition still uses the game's normal transition
 
 Automation policy:
 - TYCOON_MONEY (including Price=0 structural buttons): eligible
@@ -33,10 +36,9 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
-local PathfindingService = game:GetService("PathfindingService")
 
-local VERSION = "AUTO-1.0"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1"
+local VERSION = "AUTO-TP-1.1"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorTeleportTestV1_1"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -652,7 +654,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.0 - purchase + diagnostic"
+    version.Text = "AUTO TP V1.1 - teleport test + diagnostic"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -819,7 +821,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.0 (.txt)"
+    export.Text = "Exportar relatorio AUTO TP V1.1 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -833,7 +835,7 @@ local function createGui()
     floating.Position = UDim2.new(0, 18, 0.5, -30)
     floating.BackgroundColor3 = COLORS.Floating
     floating.BorderSizePixel = 0
-    floating.Text = "AUTO V1"
+    floating.Text = "AUTO TP"
     floating.TextColor3 = Color3.fromRGB(240, 246, 255)
     floating.Font = Enum.Font.GothamBold
     floating.TextSize = 11
@@ -901,14 +903,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Automator V1.0] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator TP V1.1] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Automator V1.0] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator TP V1.1] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -2482,88 +2484,42 @@ local function autoTargetPart(container)
     return container:FindFirstChildWhichIsA("BasePart", true)
 end
 
-local function autoWalkToPosition(position, timeout)
-    timeout = timeout or AUTO_MOVE_TIMEOUT
+local function autoTeleportToPart(targetPart)
     local character, humanoid, root = autoGetCharacter()
 
     if not character or not humanoid or not root or humanoid.Health <= 0 then
         return false, "CHARACTER_UNAVAILABLE"
     end
 
-    local started = os.clock()
-
-    local function arrived()
-        return root.Parent
-            and (root.Position - position).Magnitude <= AUTO_ARRIVE_DISTANCE
+    if not targetPart or not targetPart.Parent or not targetPart:IsA("BasePart") then
+        return false, "TARGET_PART_UNAVAILABLE"
     end
 
-    if arrived() then
-        return true, "ALREADY_NEAR"
-    end
+    -- Test-only direct positioning. The server still decides whether the purchase is accepted.
+    local destination = targetPart.CFrame * CFrame.new(0, 2.6, 0)
 
-    local pathOk, path = pcall(function()
-        local p = PathfindingService:CreatePath({
-            AgentRadius = 2,
-            AgentHeight = 5,
-            AgentCanJump = true,
-            WaypointSpacing = 4,
-        })
-        p:ComputeAsync(root.Position, position)
-        return p
+    local ok, err = pcall(function()
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        root.CFrame = destination
     end)
 
-    if pathOk and path and path.Status == Enum.PathStatus.Success then
-        for _, waypoint in ipairs(path:GetWaypoints()) do
-            if not State.Running or not State.AutomationEnabled then
-                humanoid:Move(Vector3.zero, false)
-                return false, "AUTOMATION_STOPPED"
-            end
-
-            if os.clock() - started > timeout then
-                return false, "MOVE_TIMEOUT"
-            end
-
-            if waypoint.Action == Enum.PathWaypointAction.Jump then
-                humanoid.Jump = true
-            end
-
-            humanoid:MoveTo(waypoint.Position)
-
-            local waypointDeadline = math.min(started + timeout, os.clock() + 4)
-            while State.Running
-            and State.AutomationEnabled
-            and os.clock() < waypointDeadline do
-                if not root.Parent or humanoid.Health <= 0 then
-                    return false, "CHARACTER_LOST"
-                end
-
-                if (root.Position - waypoint.Position).Magnitude <= 4.5 then
-                    break
-                end
-
-                task.wait(0.08)
-            end
-        end
-    else
-        humanoid:MoveTo(position)
+    if not ok then
+        return false, "TELEPORT_FAILED:" .. tostring(err)
     end
 
-    while State.Running
-    and State.AutomationEnabled
-    and os.clock() - started <= timeout do
-        if not root.Parent or humanoid.Health <= 0 then
-            return false, "CHARACTER_LOST"
-        end
+    task.wait(0.12)
 
-        if arrived() then
-            return true, "ARRIVED"
-        end
-
-        humanoid:MoveTo(position)
-        task.wait(0.12)
+    if not root.Parent then
+        return false, "CHARACTER_LOST"
     end
 
-    return false, "MOVE_TIMEOUT"
+    local distance = (root.Position - targetPart.Position).Magnitude
+    if distance <= 7 then
+        return true, "TELEPORTED_TO_BUTTON"
+    end
+
+    return false, "TELEPORT_NOT_CONFIRMED"
 end
 
 local function autoWaitForAcceptance(buttonName, originalButton, timeout)
@@ -2631,10 +2587,28 @@ local function autoEnterBunker()
 
     local part = autoPromptPart(prompt)
     if part then
-        local walked, reason = autoWalkToPosition(part.Position, AUTO_MOVE_TIMEOUT)
-        if not walked then
-            autoRecord("BUNKER_APPROACH_FAILED", {Reason = reason, Prompt = safeFullName(prompt)})
-            return false, reason
+        local character, humanoid, root = autoGetCharacter()
+        if not character or not humanoid or not root or humanoid.Health <= 0 then
+            autoRecord("BUNKER_APPROACH_FAILED", {Reason = "CHARACTER_UNAVAILABLE", Prompt = safeFullName(prompt)})
+            return false, "CHARACTER_UNAVAILABLE"
+        end
+
+        humanoid:MoveTo(part.Position)
+        local deadline = os.clock() + AUTO_MOVE_TIMEOUT
+        while State.Running and State.AutomationEnabled and os.clock() < deadline do
+            if not root.Parent or humanoid.Health <= 0 then
+                return false, "CHARACTER_LOST"
+            end
+            if (root.Position - part.Position).Magnitude <= AUTO_ARRIVE_DISTANCE then
+                break
+            end
+            humanoid:MoveTo(part.Position)
+            task.wait(0.12)
+        end
+
+        if (root.Position - part.Position).Magnitude > AUTO_ARRIVE_DISTANCE then
+            autoRecord("BUNKER_APPROACH_FAILED", {Reason = "MOVE_TIMEOUT", Prompt = safeFullName(prompt)})
+            return false, "MOVE_TIMEOUT"
         end
     end
 
@@ -2755,8 +2729,8 @@ local function autoAttemptPurchase(record)
         return false, "TOUCH_PART_NOT_FOUND"
     end
 
-    State.AutomationState = "MOVING"
-    State.Health.Automation = "MOVING"
+    State.AutomationState = "TELEPORTING"
+    State.Health.Automation = "TELEPORTING"
     State.AutomationTarget = record.Name
     State.AutomationTargetStarted = os.clock()
 
@@ -2787,10 +2761,10 @@ local function autoAttemptPurchase(record)
         Rebirths = record.Rebirths,
     })
 
-    local moved, moveReason = autoWalkToPosition(targetPart.Position, AUTO_MOVE_TIMEOUT)
-    if not moved then
-        attempt.Result = "MOVE_FAILED"
-        attempt.Reason = moveReason
+    local teleported, teleportReason = autoTeleportToPart(targetPart)
+    if not teleported then
+        attempt.Result = "TELEPORT_FAILED"
+        attempt.Reason = teleportReason
         attempt.FinishedUnix = os.time()
         State.AutomationFailed = State.AutomationFailed + 1
         State.AutomationCooldowns[record.Path or record.Name] = os.clock() + AUTO_RETRY_COOLDOWN
@@ -2798,11 +2772,19 @@ local function autoAttemptPurchase(record)
         autoRecord("PURCHASE_ATTEMPT_FAILED", {
             AttemptId = attempt.Id,
             Name = record.Name,
-            Stage = "MOVE",
-            Reason = moveReason,
+            Stage = "TELEPORT",
+            Reason = teleportReason,
         })
-        return false, moveReason
+        return false, teleportReason
     end
+
+    attempt.TeleportEvidence = teleportReason
+    autoRecord("PURCHASE_TARGET_TELEPORTED", {
+        AttemptId = attempt.Id,
+        Name = record.Name,
+        TargetPart = safeFullName(targetPart),
+        Evidence = teleportReason,
+    })
 
     State.AutomationState = "WAIT_SERVER"
     State.Health.Automation = "WAIT_SERVER"
@@ -3062,7 +3044,8 @@ local function buildReport()
             StageUnlocks = State.StageUnlocks,
             MovementSafetyPolicy = {
                 Bunker = "USE_GAME_TRANSITION_ONLY",
-                LongDistanceDirectTeleport = "DO_NOT_USE",
+                MainTycoonDirectTeleport = "TEST_ENABLED",
+                LongDistanceBunkerTeleport = "DO_NOT_USE",
                 Reason = "Bunker is a separate progression zone; direct long-distance movement can conflict with the game's movement correction.",
             },
         },
@@ -3082,9 +3065,10 @@ local function buildReport()
             Attempts = State.AutomationAttempts,
             RebirthResets = State.AutomationResets,
             Policy = {
-                PurchaseInteraction = "NORMAL_CHARACTER_MOVEMENT_TO_TOUCH_BUTTON",
+                PurchaseInteraction = "DIRECT_LOCAL_CHARACTER_TELEPORT_TO_TOUCH_BUTTON_TEST",
                 BunkerTransition = "LEGITIMATE_PROXIMITY_PROMPT",
-                DirectTeleport = false,
+                DirectTeleport = true,
+                DirectTeleportScope = "MAIN_TYCOON_PURCHASE_BUTTONS_TEST_ONLY",
                 MoneyBypass = false,
                 RebirthBypass = false,
                 MarketplaceBypass = false,
@@ -3133,7 +3117,7 @@ end
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_" ..
+        "Tycoon_Purchase_Automator_Teleport_Test_V1_1_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
