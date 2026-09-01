@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE DIAGNOSTIC - V2.4
+PSICOSENATICO - TYCOON PURCHASE DIAGNOSTIC - V2.4.2
 COMPATIBILITY / STABILITY BUILD
 
 Diagnostic only.
@@ -34,7 +34,7 @@ local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 
 local VERSION = "2.4.1"
-local GUI_NAME = "PsicoTycoonPurchaseDiagnosticV241"
+local GUI_NAME = "PsicoTycoonPurchaseDiagnosticV242"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -100,6 +100,7 @@ local State = {
     Events = {},
     CriticalEvents = {},
     Errors = {},
+    ErrorRepeats = {},
 
     DataStats = {
         TotalEventsObserved = 0,
@@ -291,18 +292,45 @@ local function pushEvent(kind, label, details)
 end
 
 local function pushError(stage, err)
+    local message = tostring(err)
+    local key = tostring(stage) .. "|" .. message
+    local nowClock = os.clock()
+    local repeatInfo = State.ErrorRepeats[key]
+
+    if repeatInfo and (nowClock - repeatInfo.LastClock) < 2 then
+        repeatInfo.Count = repeatInfo.Count + 1
+        repeatInfo.LastClock = nowClock
+
+        if UI.Status and UI.Status.Parent then
+            UI.Status.Text =
+                "Erro em " .. tostring(stage) .. ": " .. message ..
+                " (repetido x" .. tostring(repeatInfo.Count) .. ")"
+        end
+
+        return
+    end
+
+    State.ErrorRepeats[key] = {
+        Count = repeatInfo and (repeatInfo.Count + 1) or 1,
+        LastClock = nowClock,
+    }
+
     local item = {
         Time = clockText(),
         Elapsed = elapsed(),
         Stage = stage,
-        Error = tostring(err),
+        Error = message,
+        RepeatCount = State.ErrorRepeats[key].Count,
     }
 
     table.insert(State.Errors, item)
-    pushEvent("ERROR", stage, {Error = tostring(err)})
+    pushEvent("ERROR", stage, {
+        Error = message,
+        RepeatCount = item.RepeatCount,
+    })
 
     if UI.Status and UI.Status.Parent then
-        UI.Status.Text = "Erro em " .. tostring(stage) .. ": " .. tostring(err)
+        UI.Status.Text = "Erro em " .. tostring(stage) .. ": " .. message
     end
 end
 
@@ -609,7 +637,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "V2.4 - stability build"
+    version.Text = "V2.4.2 - stability build"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -761,7 +789,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio V2.4 (.txt)"
+    export.Text = "Exportar relatorio V2.4.2 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -775,7 +803,7 @@ local function createGui()
     floating.Position = UDim2.new(0, 18, 0.5, -30)
     floating.BackgroundColor3 = COLORS.Floating
     floating.BorderSizePixel = 0
-    floating.Text = "V2.4"
+    floating.Text = "V2.4.2"
     floating.TextColor3 = Color3.fromRGB(240, 246, 255)
     floating.Font = Enum.Font.GothamBold
     floating.TextSize = 11
@@ -839,14 +867,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Diagnostic V2.4] LocalPlayer indisponivel.")
+    warn("[Tycoon Diagnostic V2.4.2] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Diagnostic V2.4] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Diagnostic V2.4.2] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -1520,6 +1548,31 @@ local function findStat(names)
 end
 
 local MONEY_NAMES = {"Money", "Cash", "Coins", "Coin", "Currency", "Saldo"}
+
+
+local function readValue(obj)
+    if not obj or not obj.Parent then
+        return nil
+    end
+
+    local ok, value = pcall(function()
+        if obj:IsA("ValueBase") then
+            return obj.Value
+        end
+
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+            return obj.Text
+        end
+
+        return nil
+    end)
+
+    if not ok then
+        return nil
+    end
+
+    return parseNumber(value)
+end
 
 local function moneyCandidateScore(instance, rootKind)
     if not instance or not instance.Parent then
@@ -2454,6 +2507,7 @@ local function buildReport()
         ProgressionGraph = buildProgressionGraph(),
         Events = State.Events,
         Errors = State.Errors,
+        ErrorRepeats = State.ErrorRepeats,
         Health = State.Health,
     }
 
@@ -2471,7 +2525,7 @@ end
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Diagnostic_V2_4_1_" ..
+        "Tycoon_Purchase_Diagnostic_V2_4_2_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
@@ -2654,7 +2708,7 @@ task.spawn(function()
     end
 end)
 
-UI.Status.Text = "V2.4.1 pronta. Leitura PAUSADA. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "V2.4.2 pronta. Leitura PAUSADA. GUI=" .. tostring(UI.ParentKind)
 safeCall("UI_INITIAL_REFRESH", function()
     refreshUI()
 end)
