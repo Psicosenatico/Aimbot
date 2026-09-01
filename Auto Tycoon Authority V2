@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V2.0
+PSICOSENATICO - AUTO TYCOON - SERVER RESPONSE RESEARCH V2.1.1
 DESTINO: LocalScript / ambiente de teste do cliente
 
 OBJETIVO
@@ -24,8 +24,8 @@ local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 
-local VERSION = "SERVER-RESPONSE-RESEARCH-2.0"
-local GUI_NAME = "PsicoTycoonServerResponseResearchV2"
+local VERSION = "SERVER-RESPONSE-RESEARCH-2.1"
+local GUI_NAME = "PsicoTycoonServerResponseResearchV2_1"
 local MAX_EVENTS = 3500
 local SAMPLE_INTERVAL = 0.20
 local CORRELATION_WINDOW = 4.0
@@ -60,6 +60,14 @@ local State = {
     VerificationActive = false,
     VerificationSessions = {},
     CurrentVerificationSession = nil,
+
+    PurchaseResponses = {},
+    PendingPurchaseResponse = nil,
+    ResponseCounters = {
+        Accepted = 0,
+        Rejected = 0,
+        Unresolved = 0,
+    },
 }
 
 local UI = {}
@@ -310,6 +318,116 @@ local function correlate(kind, details)
     pushEvent("CORRELATION_OBSERVED", record)
 end
 
+
+local function snapshotEconomy()
+    local money = State.MoneyCandidates[1]
+    local collector = State.CollectorCandidates[1]
+    local rebirth = State.RebirthCandidates[1]
+
+    return {
+        Money = money and money.Value or State.LastMoney,
+        Collector = collector and collector.Value or State.LastCollector,
+        Rebirths = rebirth and rebirth.Value or State.LastRebirths,
+    }
+end
+
+local function nearestButtonInfo()
+    if not State.ButtonsFolder then return nil end
+
+    local character = Player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+
+    local best, bestDist = nil, math.huge
+
+    for _, button in ipairs(State.ButtonsFolder:GetChildren()) do
+        local part = button:FindFirstChild("Touch", true)
+        if part and part:IsA("BasePart") then
+            local dist = (part.Position - root.Position).Magnitude
+            if dist < bestDist then
+                bestDist = dist
+                best = {
+                    Name = button.Name,
+                    Path = safeFullName(button),
+                    Distance = math.floor(dist * 100) / 100,
+                    Price = attrCI(button, "Price") or attrCI(button, "Cost"),
+                    Rebirths = attrCI(button, "RequiredRebirths") or attrCI(button, "Rebirths"),
+                    Dependency = attrCI(button, "Dependency"),
+                    Attributes = getAttributes(button),
+                }
+            end
+        end
+    end
+
+    return best
+end
+
+local function finalizePendingResponse(status, remoteName, remoteElapsed)
+    if not State.VerificationActive then return end
+
+    local pending = State.PendingPurchaseResponse or {
+        StartedUnix = os.time(),
+        StartedElapsed = remoteElapsed or elapsed(),
+        EconomyBefore = snapshotEconomy(),
+        NearbyButton = nearestButtonInfo(),
+    }
+
+    pending.Status = status
+    pending.RemoteName = remoteName
+    pending.ResponseElapsed = remoteElapsed or elapsed()
+    pending.ResponseUnix = os.time()
+    pending.ResponseLatency = pending.ResponseElapsed - (pending.StartedElapsed or pending.ResponseElapsed)
+    pending.EconomyAfter = snapshotEconomy()
+
+    if status == "ACCEPTED" then
+        State.ResponseCounters.Accepted += 1
+    elseif status == "REJECTED" then
+        State.ResponseCounters.Rejected += 1
+    else
+        State.ResponseCounters.Unresolved += 1
+    end
+
+    pending.Id = #State.PurchaseResponses + 1
+    table.insert(State.PurchaseResponses, pending)
+    State.PendingPurchaseResponse = nil
+
+    pushEvent("PURCHASE_RESPONSE_" .. status, {
+        Id = pending.Id,
+        RemoteName = remoteName,
+        ResponseLatency = pending.ResponseLatency,
+        NearbyButton = pending.NearbyButton,
+        EconomyBefore = pending.EconomyBefore,
+        EconomyAfter = pending.EconomyAfter,
+    })
+end
+
+local function notePurchaseStructure(kind, details)
+    if not State.VerificationActive then return end
+
+    if not State.PendingPurchaseResponse then
+        State.PendingPurchaseResponse = {
+            StartedUnix = os.time(),
+            StartedElapsed = elapsed(),
+            EconomyBefore = snapshotEconomy(),
+            NearbyButton = nearestButtonInfo(),
+            StructuralEvidence = {},
+        }
+    end
+
+    State.PendingPurchaseResponse.StructuralEvidence = State.PendingPurchaseResponse.StructuralEvidence or {}
+    table.insert(State.PendingPurchaseResponse.StructuralEvidence, {
+        Kind = kind,
+        Elapsed = elapsed(),
+        Details = details,
+    })
+
+    if kind == "BUTTON_REMOVED" then
+        State.PendingPurchaseResponse.ButtonRemoved = details
+    elseif kind == "PURCHASE_ADDED" then
+        State.PendingPurchaseResponse.PurchaseAdded = details
+    end
+end
+
 local function catalogRemote(obj)
     if not (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) then return end
     local path = safeFullName(obj)
@@ -352,6 +470,21 @@ local function catalogRemote(obj)
             table.insert(State.RecentRemoteInbound, inbound)
             trimRecentRemoteInbound()
             pushEvent("REMOTE_ON_CLIENT_EVENT", inbound)
+
+            if obj.Name == "ButtonPurchased" then
+                finalizePendingResponse("ACCEPTED", obj.Name, inbound.Elapsed)
+            elseif obj.Name == "ButtonCannotPurchase" then
+                if not State.PendingPurchaseResponse then
+                    State.PendingPurchaseResponse = {
+                        StartedUnix = os.time(),
+                        StartedElapsed = inbound.Elapsed,
+                        EconomyBefore = snapshotEconomy(),
+                        NearbyButton = nearestButtonInfo(),
+                        StructuralEvidence = {},
+                    }
+                end
+                finalizePendingResponse("REJECTED", obj.Name, inbound.Elapsed)
+            end
         end)
     end
 end
@@ -420,12 +553,14 @@ local function bindTycoon(tycoon)
     addConnection(State.ButtonsFolder.ChildRemoved, function(child)
         local details = describeButton(child)
         pushEvent("BUTTON_REMOVED", details)
+        notePurchaseStructure("BUTTON_REMOVED", details)
         correlate("BUTTON_REMOVED", details)
     end, State.TycoonConnections)
 
     addConnection(State.PurchasesFolder.ChildAdded, function(child)
         local details = describePurchase(child)
         pushEvent("PURCHASE_ADDED", details)
+        notePurchaseStructure("PURCHASE_ADDED", details)
         correlate("PURCHASE_ADDED", details)
     end, State.TycoonConnections)
 end
@@ -499,6 +634,13 @@ local function beginVerification()
     State.RecentRemoteInbound = {}
     State.Correlations = {}
     State.Events = {}
+    State.PurchaseResponses = {}
+    State.PendingPurchaseResponse = nil
+    State.ResponseCounters = {
+        Accepted = 0,
+        Rejected = 0,
+        Unresolved = 0,
+    }
 
     local session = {
         Id = #State.VerificationSessions + 1,
@@ -534,6 +676,10 @@ end
 local function stopVerification()
     if not State.VerificationActive then return end
 
+    if State.PendingPurchaseResponse then
+        finalizePendingResponse("UNRESOLVED", "NO_TERMINAL_REMOTE", elapsed())
+    end
+
     local session = State.CurrentVerificationSession
     if session then
         session.StoppedUnix = os.time()
@@ -543,6 +689,10 @@ local function stopVerification()
         session.StoppedRebirths = State.LastRebirths
         session.EventsCaptured = #State.Events
         session.CorrelationsCaptured = #State.Correlations
+        session.PurchaseResponsesCaptured = #State.PurchaseResponses
+        session.Accepted = State.ResponseCounters.Accepted
+        session.Rejected = State.ResponseCounters.Rejected
+        session.Unresolved = State.ResponseCounters.Unresolved
     end
 
     pushEvent("VERIFICATION_STOPPED", {
@@ -552,6 +702,10 @@ local function stopVerification()
         Rebirths = State.LastRebirths,
         EventsCaptured = #State.Events,
         CorrelationsCaptured = #State.Correlations,
+        PurchaseResponsesCaptured = #State.PurchaseResponses,
+        Accepted = State.ResponseCounters.Accepted,
+        Rejected = State.ResponseCounters.Rejected,
+        Unresolved = State.ResponseCounters.Unresolved,
     })
 
     State.VerificationActive = false
@@ -603,7 +757,7 @@ local function createGui()
     title.Position = UDim2.new(0, 12, 0, 0)
     title.BackgroundTransparency = 1
     title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V2"
+    title.Text = "AUTO TYCOON - SERVER RESPONSE RESEARCH V2.1"
     title.TextColor3 = Color3.fromRGB(83,226,169)
     title.Font = Enum.Font.GothamBold
     title.TextSize = 11
@@ -673,7 +827,7 @@ local function createGui()
     export.TextColor3 = Color3.fromRGB(238,242,250)
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
-    export.Text = "Exportar SERVER RESPONSE V2 (.txt)"
+    export.Text = "Exportar SERVER RESPONSE V2.1 (.txt)"
     export.Parent = main
     round(export, 8)
 
@@ -760,6 +914,8 @@ local function createGui()
                 CurrentSession = State.CurrentVerificationSession,
                 CapturedEvents = #State.Events,
                 CapturedCorrelations = #State.Correlations,
+                PurchaseResponses = State.PurchaseResponses,
+                ResponseCounters = State.ResponseCounters,
             },
             Policy = {
                 Perspective = "server response as observed by client",
@@ -780,7 +936,7 @@ local function createGui()
             return
         end
 
-        local filename = "Auto_Tycoon_Server_Response_Research_V2_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
+        local filename = "Auto_Tycoon_Server_Response_Research_V2_1_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
         local saved, copied = false, false
 
         if type(writefile) == "function" then
@@ -859,12 +1015,14 @@ task.spawn(function()
 
             if State.VerificationActive then
                 UI.Status.Text =
-                    "VERIFICACAO ATIVA | Money: " .. tostring(State.LastMoney) ..
-                    " | Rebirths: " .. tostring(State.LastRebirths)
+                    "ATIVA | Aceitas: " .. tostring(State.ResponseCounters.Accepted) ..
+                    " | Recusadas: " .. tostring(State.ResponseCounters.Rejected) ..
+                    " | Money: " .. tostring(State.LastMoney)
             else
                 UI.Status.Text =
-                    "VERIFICACAO PAUSADA | Eventos: " .. tostring(#State.Events) ..
-                    " | Correlacoes: " .. tostring(#State.Correlations)
+                    "PAUSADA | Aceitas: " .. tostring(State.ResponseCounters.Accepted) ..
+                    " | Recusadas: " .. tostring(State.ResponseCounters.Rejected) ..
+                    " | Nao resolvidas: " .. tostring(State.ResponseCounters.Unresolved)
             end
         end
 
