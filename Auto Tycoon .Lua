@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.5 + CLIENT COLLECT SIMULATION
+PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.6 + TOTEM COLLECT
 COMPATIBILITY / STABILITY BUILD
 
 Purchase automation + diagnostics - authorized teleport test build.
@@ -7,8 +7,8 @@ For the user's own authorized test environment, teleports the local character di
 onto ordinary MAIN_TYCOON purchase buttons instead of walking to them.
 Does not alter Money/Rebirths or fake Marketplace receipts.
 BUNKER transition remains the game's normal transition instead of long-distance teleport.
-Auto-collect in this build is a CLIENT-ONLY SIMULATION for queue/state-machine testing.
-It never modifies server-authoritative Money or Collector values and does not invoke a collection remote.
+Auto-collect in this build uses the character's physical collector/totem interaction.
+The character is moved directly to the local Tycoon collector; success is confirmed only if the observed wallet Money becomes greater than before.
 Known ButtonPurchased/ButtonCannotPurchase server-to-client responses are still observed to avoid fixed multi-second waits.
 
 Purchase classes:
@@ -41,8 +41,8 @@ local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "AUTO-TP-1.5-SIM"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorClientCollectSimV1_5"
+local VERSION = "AUTO-TP-1.6"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorTotemCollectV1_6"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -120,9 +120,10 @@ local State = {
     AutomationBlockedFunds = {},
     AutomationServerSignal = nil,
     AutomationServerSignalSeq = 0,
-        VirtualCollector = nil,
-    VirtualMoney = nil,
-    VirtualCollectCount = 0,
+        TotemCollectAttempts = {},
+    TotemCollectSuccessful = 0,
+    TotemCollectFailed = 0,
+    LastTotemCollectClock = 0,
     AutomationLastRebirth = nil,
     AutomationRunId = 0,
     AutomationSuccessful = 0,
@@ -667,7 +668,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.5 - client collect simulation"
+    version.Text = "AUTO V1.6 - totem collect + smart queue"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -834,7 +835,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.5 SIM (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.6 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -916,14 +917,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Automator V1.5 SIM] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.6] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Automator V1.5 SIM] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator V1.6] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -2578,40 +2579,166 @@ local function autoCollectorAmount()
     return nil, nil
 end
 
-local function autoClientSimulatedCollect()
-    local observedCollector, collectorPath = autoCollectorAmount()
-
-    if observedCollector == nil then
-        return false, "COLLECTOR_AMOUNT_UNAVAILABLE", nil
+local function autoCollectorTouchPart()
+    local collector = autoCollectorContainer()
+    if not collector then
+        return nil
     end
 
-    if observedCollector < AUTO_COLLECT_MIN then
-        return false, "COLLECTOR_BELOW_THRESHOLD", observedCollector
+    -- Prefer a physical part that actually owns touch handling.
+    for _, descendant in ipairs(collector:GetDescendants()) do
+        if descendant:IsA("BasePart")
+        and descendant:FindFirstChildWhichIsA("TouchTransmitter") then
+            return descendant
+        end
     end
 
-    local observedMoney = State.LastMoney or 0
+    -- Then use common physical collector/totem part naming.
+    local preferred = {
+        "touch", "collect", "collector", "totem", "pad", "button", "claim"
+    }
 
-    -- Client-side simulation only.
-    -- No replicated/server-authoritative Money or Collector values are edited.
-    State.VirtualMoney = (State.VirtualMoney ~= nil and State.VirtualMoney or observedMoney) + observedCollector
-    State.VirtualCollector = 0
-    State.VirtualCollectCount = State.VirtualCollectCount + 1
+    for _, wanted in ipairs(preferred) do
+        for _, descendant in ipairs(collector:GetDescendants()) do
+            if descendant:IsA("BasePart") then
+                local n = normalize(descendant.Name)
+                if string.find(n, wanted, 1, true) then
+                    return descendant
+                end
+            end
+        end
+    end
 
-    State.AutomationBlockedFunds = {}
+    if collector:IsA("BasePart") then
+        return collector
+    end
 
-    autoRecord("CLIENT_COLLECT_SIMULATED", {
-        CollectorObserved = observedCollector,
+    return collector:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function autoTeleportToCollectorAndConfirm()
+    local collectorBefore, collectorPath = autoCollectorAmount()
+    local moneyBefore = State.LastMoney
+
+    if collectorBefore == nil then
+        return false, "COLLECTOR_AMOUNT_UNAVAILABLE"
+    end
+
+    if collectorBefore < AUTO_COLLECT_MIN then
+        return false, "COLLECTOR_BELOW_THRESHOLD"
+    end
+
+    if moneyBefore == nil then
+        return false, "MONEY_UNAVAILABLE"
+    end
+
+    local targetPart = autoCollectorTouchPart()
+    if not targetPart then
+        return false, "COLLECTOR_TOUCH_PART_NOT_FOUND"
+    end
+
+    local character, humanoid, root = autoGetCharacter()
+    if not character or not humanoid or not root or humanoid.Health <= 0 then
+        return false, "CHARACTER_UNAVAILABLE"
+    end
+
+    local attempt = {
+        Id = #State.TotemCollectAttempts + 1,
+        StartedUnix = os.time(),
+        StartedElapsed = elapsed(),
+        CollectorBefore = collectorBefore,
         CollectorPath = collectorPath,
-        MoneyObserved = observedMoney,
-        VirtualMoneyAfter = State.VirtualMoney,
-        VirtualCollectorAfter = State.VirtualCollector,
-        Count = State.VirtualCollectCount,
-        Movement = "NONE",
-        ServerMutation = false,
-        Note = "Simulation only: real server Money/Collector are unchanged.",
+        MoneyBefore = moneyBefore,
+        TargetPart = safeFullName(targetPart),
+        Result = "STARTED",
+    }
+    table.insert(State.TotemCollectAttempts, attempt)
+
+    State.AutomationState = "COLLECTING_TOTEM"
+    State.Health.Automation = "COLLECTING_TOTEM"
+    State.LastTotemCollectClock = os.clock()
+
+    autoRecord("TOTEM_COLLECT_STARTED", {
+        CollectAttemptId = attempt.Id,
+        CollectorBefore = collectorBefore,
+        MoneyBefore = moneyBefore,
+        TargetPart = attempt.TargetPart,
+        Movement = "DIRECT_LOCAL_CHARACTER_TELEPORT",
     })
 
-    return true, "CLIENT_COLLECT_SIMULATED", 0
+    local ok, teleportReason = autoTeleportToPart(targetPart)
+    if not ok then
+        attempt.Result = teleportReason or "TELEPORT_FAILED"
+        attempt.FinishedUnix = os.time()
+        attempt.FinishedElapsed = elapsed()
+        State.TotemCollectFailed = State.TotemCollectFailed + 1
+
+        autoRecord("TOTEM_COLLECT_FAILED", {
+            CollectAttemptId = attempt.Id,
+            Reason = attempt.Result,
+        })
+
+        return false, attempt.Result
+    end
+
+    -- Do not infer collection from collector text alone.
+    -- Success requires the real observed wallet to become greater than its previous value.
+    local deadline = os.clock() + AUTO_COLLECT_CONFIRM_TIMEOUT
+    local highestMoney = moneyBefore
+
+    while State.Running and State.AutomationEnabled and os.clock() < deadline do
+        local currentMoney = State.LastMoney
+        if currentMoney ~= nil then
+            highestMoney = math.max(highestMoney, currentMoney)
+
+            if currentMoney > moneyBefore then
+                local collectorAfter = select(1, autoCollectorAmount())
+
+                attempt.Result = "MONEY_INCREASE_CONFIRMED"
+                attempt.MoneyAfter = currentMoney
+                attempt.CollectorAfter = collectorAfter
+                attempt.FinishedUnix = os.time()
+                attempt.FinishedElapsed = elapsed()
+                State.TotemCollectSuccessful = State.TotemCollectSuccessful + 1
+
+                -- Do NOT globally clear every blocked purchase.
+                -- Release only those whose price is now affordable.
+                autoRefreshFundsBlocks()
+
+                autoRecord("TOTEM_COLLECT_SUCCESS_CONFIRMED", {
+                    CollectAttemptId = attempt.Id,
+                    MoneyBefore = moneyBefore,
+                    MoneyAfter = currentMoney,
+                    MoneyDelta = currentMoney - moneyBefore,
+                    CollectorBefore = collectorBefore,
+                    CollectorAfter = collectorAfter,
+                    Evidence = "REAL_WALLET_INCREASED",
+                })
+
+                return true, "MONEY_INCREASE_CONFIRMED"
+            end
+        end
+
+        task.wait(0.03)
+    end
+
+    attempt.Result = "MONEY_DID_NOT_INCREASE"
+    attempt.MoneyAfter = highestMoney
+    attempt.CollectorAfter = select(1, autoCollectorAmount())
+    attempt.FinishedUnix = os.time()
+    attempt.FinishedElapsed = elapsed()
+    State.TotemCollectFailed = State.TotemCollectFailed + 1
+
+    autoRecord("TOTEM_COLLECT_FAILED", {
+        CollectAttemptId = attempt.Id,
+        Reason = "MONEY_DID_NOT_INCREASE",
+        MoneyBefore = moneyBefore,
+        MoneyAfter = highestMoney,
+        CollectorBefore = collectorBefore,
+        CollectorAfter = attempt.CollectorAfter,
+    })
+
+    return false, "MONEY_DID_NOT_INCREASE"
 end
 
 local function autoBindServerResponseSignals()
@@ -3052,12 +3179,12 @@ local function autoAttemptPurchase(record)
         })
 
         if collectorAmount ~= nil and collectorAmount >= AUTO_COLLECT_MIN then
-            local collected, collectReason = autoClientSimulatedCollect()
+            local collected, collectReason = autoTeleportToCollectorAndConfirm()
 
             if collected then
-                State.AutomationCooldowns[record.Path or record.Name] = nil
-                task.wait(0.35)
-                return false, "AUTO_COLLECTED_AFTER_INSUFFICIENT_BALANCE"
+                autoRefreshFundsBlocks()
+                task.wait(AUTO_POST_RESULT_WAIT)
+                return false, "TOTEM_COLLECTED_AFTER_INSUFFICIENT_BALANCE"
             else
                 return false, "AUTO_COLLECT_FAILED:" .. tostring(collectReason)
             end
@@ -3127,9 +3254,6 @@ local function setAutomation(enabled)
         State.AutomationCooldowns = {}
         State.AutomationBlockedFunds = {}
         State.AutomationServerSignal = nil
-        State.VirtualMoney = State.LastMoney
-        State.VirtualCollector = select(1, autoCollectorAmount())
-        State.VirtualCollectCount = 0
         State.AutomationLastRebirth = State.LastRebirths
 
         autoRecord("AUTOMATION_STARTED", {
@@ -3138,7 +3262,7 @@ local function setAutomation(enabled)
             Rebirths = State.LastRebirths,
             Floor = State.MainFloor,
             Zone = State.CurrentZone,
-            Policy = "Client-only simulation: rejected insufficient-money buttons are remembered; collector >=1000 creates a virtual client balance for queue/state testing only; real server Money/Collector are never modified."
+            Policy = "Rejected insufficient-money buttons stay blocked; collector >=1000 teleports character to the local Tycoon collector; collection is confirmed only when observed wallet Money increases; blocked buttons are released only when affordable."
         })
     else
         autoRecord("AUTOMATION_STOPPED", {
@@ -3309,21 +3433,23 @@ local function buildReport()
             AutoCollectSuccessful = State.AutoCollectSuccessful,
             AutoCollectFailed = State.AutoCollectFailed,
             AutoCollectAttempts = State.AutoCollectAttempts,
-            VirtualMoney = State.VirtualMoney,
-            VirtualCollector = State.VirtualCollector,
-            VirtualCollectCount = State.VirtualCollectCount,
+            TotemCollectAttempts = State.TotemCollectAttempts,
+            TotemCollectSuccessful = State.TotemCollectSuccessful,
+            TotemCollectFailed = State.TotemCollectFailed,
             FundsBlocked = State.AutomationBlockedFunds,
             Attempts = State.AutomationAttempts,
             RebirthResets = State.AutomationResets,
             Policy = {
                 PurchaseInteraction = "DIRECT_LOCAL_CHARACTER_TELEPORT_TO_TOUCH_BUTTON_TEST",
                 AutoCollectTrigger = "AFTER_REJECTED_TYCOON_MONEY_WHEN_LOCAL_MONEY_BELOW_PRICE_AND_COLLECTOR_AT_LEAST_1000",
-                AutoCollectMovement = "NONE",
-                AutoCollectEndpoint = "CLIENT_SIMULATION_ONLY",
+                AutoCollectConfirmation = "REAL_WALLET_MONEY_MUST_INCREASE",
+                InsufficientFundsMemory = "KEEP_BLOCKED_UNTIL_OBSERVED_MONEY_AT_LEAST_PRICE",
+                AutoCollectMovement = "DIRECT_LOCAL_CHARACTER_TELEPORT_TO_COLLECTOR",
+                AutoCollectEndpoint = "PHYSICAL_TOTEM_TOUCH_BY_CHARACTER",
                 AutoCollectDirectRemoteInvocation = false,
                 AutoCollectUnknownGameRemoteInvocation = false,
-                AutoCollectServerMutation = false,
-                AutoCollectSimulationOnly = true,
+                AutoCollectServerMutation = "OBSERVED_ONLY",
+                AutoCollectSimulationOnly = false,
                 BunkerTransition = "LEGITIMATE_PROXIMITY_PROMPT",
                 DirectTeleport = true,
                 DirectTeleportScope = "MAIN_TYCOON_PURCHASE_BUTTONS_TEST_ONLY",
@@ -3375,7 +3501,7 @@ end
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_5_ClientCollectSimulation_" ..
+        "Tycoon_Purchase_Automator_V1_6_TotemCollect_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
@@ -3516,55 +3642,3 @@ task.spawn(function()
                     NewValue = rebirths,
                     Delta = rebirths - State.LastRebirths,
                 })
-
-                correlateStatChanges(
-                    State.LastMoney,
-                    money,
-                    State.LastRebirths,
-                    rebirths
-                )
-            end
-
-            if money ~= nil then
-                State.LastMoney = money
-            end
-
-            if rebirths ~= nil then
-                State.LastRebirths = rebirths
-            end
-        end)
-
-        task.wait(MONEY_INTERVAL)
-    end
-end)
-
-task.spawn(function()
-    while State.Running do
-        safeCall("TYCOON_LOOP", function()
-            reconsiderTycoon()
-
-            local floor, floorEvidence = detectMainFloor()
-            setMainFloor(floor, floorEvidence)
-
-            local zone, zoneEvidence = detectZoneByPosition()
-            setZone(zone, zoneEvidence)
-        end)
-
-        task.wait(TYCOON_INTERVAL)
-    end
-end)
-
-task.spawn(function()
-    while State.Running do
-        safeCall("UI_LOOP", function()
-            refreshUI()
-        end)
-
-        task.wait(0.5)
-    end
-end)
-
-UI.Status.Text = "AUTO V1.0 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
-safeCall("UI_INITIAL_REFRESH", function()
-    refreshUI()
-end)
