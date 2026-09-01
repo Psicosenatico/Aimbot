@@ -1,0 +1,323 @@
+--[[
+PSICOSENATICO - TYCOON DEV COLLECT SERVER - V1.0
+DESTINO: ServerScriptService
+
+Purpose:
+- Authorized developer/test auto-collection for the owner's own Tycoon.
+- Works in Studio AND published servers.
+- Does NOT grant or emulate the AutoCollect gamepass.
+- Does NOT trust the client for balance, owner, collector value, or amount.
+- Client only requests collection; server recalculates everything.
+- Default deny: configure AUTHORIZED_USER_IDS or set the server-side attribute
+  PsicoDevCollectAllowed=true for a developer/test player.
+
+IMPORTANT:
+Adapt findMoneyObject/findCollectorValueObject/applyCollection only if your own game's
+authoritative economy stores those values elsewhere.
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local API_FOLDER_NAME = "PsicoTycoonTestAPI"
+local REMOTE_NAME = "DevCollect"
+local MINIMUM_ALLOWED_COLLECTOR = 1000
+local REQUEST_COOLDOWN = 0.75
+
+-- Add your own developer/test UserIds here.
+-- Example:
+-- [123456789] = true,
+local AUTHORIZED_USER_IDS = {
+}
+
+local lastRequest = {}
+
+local function normalize(value)
+    return string.lower(tostring(value or "")):gsub("[%s_%-%./]", "")
+end
+
+local function attrCI(inst, wanted)
+    if not inst then
+        return nil
+    end
+    local wantedNorm = normalize(wanted)
+    for key, value in pairs(inst:GetAttributes()) do
+        if normalize(key) == wantedNorm then
+            return value
+        end
+    end
+    return nil
+end
+
+local function ownerMatches(player, owner)
+    if owner == nil or not player then
+        return false
+    end
+    local text = tostring(owner)
+    return text == player.Name
+        or text == tostring(player.UserId)
+        or normalize(text) == normalize(player.Name)
+end
+
+local function isAuthorized(player)
+    if AUTHORIZED_USER_IDS[player.UserId] == true then
+        return true
+    end
+
+    -- This attribute must be set by trusted server code/admin tooling,
+    -- not by the requesting client.
+    return player:GetAttribute("PsicoDevCollectAllowed") == true
+end
+
+local function findPlayerTycoon(player)
+    local tycoons = workspace:FindFirstChild("Tycoons")
+    if not tycoons then
+        return nil
+    end
+
+    local best, bestScore = nil, 0
+
+    for _, tycoon in ipairs(tycoons:GetChildren()) do
+        local buttons = tycoon:FindFirstChild("Buttons")
+        local purchases = tycoon:FindFirstChild("Purchases")
+        if buttons and purchases then
+            local score = 0
+
+            if ownerMatches(player, attrCI(tycoon, "Owner")) then
+                score = score + 100
+            end
+
+            local checked = 0
+            for _, folder in ipairs({buttons, purchases}) do
+                for _, child in ipairs(folder:GetChildren()) do
+                    checked = checked + 1
+                    if ownerMatches(player, attrCI(child, "Owner")) then
+                        score = score + 40
+                        break
+                    end
+                    if checked >= 120 then
+                        break
+                    end
+                end
+            end
+
+            if score > bestScore then
+                best = tycoon
+                bestScore = score
+            end
+        end
+    end
+
+    if best and bestScore >= 40 then
+        return best
+    end
+
+    return nil
+end
+
+local function parseNumber(value)
+    if value == nil then
+        return nil
+    end
+    if type(value) == "number" then
+        return value
+    end
+    local text = tostring(value):gsub(",", ""):gsub("%s", ""):gsub("%$", "")
+    return tonumber(text)
+end
+
+local function findMoneyObject(player)
+    local leaderstats = player:FindFirstChild("leaderstats")
+    if leaderstats then
+        local direct = leaderstats:FindFirstChild("Money")
+        if direct and direct:IsA("ValueBase") then
+            return direct
+        end
+    end
+
+    for _, descendant in ipairs(player:GetDescendants()) do
+        if descendant:IsA("ValueBase") and normalize(descendant.Name) == "money" then
+            return descendant
+        end
+    end
+
+    return nil
+end
+
+local function findCollectorValueObject(tycoon)
+    local collector = tycoon and tycoon:FindFirstChild("Collector", true)
+    if not collector then
+        return nil
+    end
+
+    -- Prefer ValueBase named Money if your authoritative collector uses one.
+    for _, descendant in ipairs(collector:GetDescendants()) do
+        if descendant:IsA("ValueBase") and normalize(descendant.Name) == "money" then
+            return descendant
+        end
+    end
+
+    return nil
+end
+
+local function readValue(obj)
+    if not obj or not obj.Parent or not obj:IsA("ValueBase") then
+        return nil
+    end
+    return parseNumber(obj.Value)
+end
+
+local function writeNumericValue(obj, value)
+    if not obj or not obj.Parent or not obj:IsA("ValueBase") then
+        return false
+    end
+
+    local ok = pcall(function()
+        obj.Value = value
+    end)
+    return ok
+end
+
+local function applyCollection(player, tycoon)
+    local moneyObject = findMoneyObject(player)
+    local collectorObject = findCollectorValueObject(tycoon)
+
+    if not moneyObject then
+        return false, "AUTHORITATIVE_MONEY_NOT_FOUND"
+    end
+
+    if not collectorObject then
+        return false, "AUTHORITATIVE_COLLECTOR_VALUE_NOT_FOUND"
+    end
+
+    local moneyBefore = readValue(moneyObject)
+    local collectorBefore = readValue(collectorObject)
+
+    if moneyBefore == nil or collectorBefore == nil then
+        return false, "AUTHORITATIVE_VALUE_READ_FAILED"
+    end
+
+    if collectorBefore < MINIMUM_ALLOWED_COLLECTOR then
+        return false, "COLLECTOR_BELOW_MINIMUM"
+    end
+
+    -- Server-authoritative transfer.
+    -- If your game already has a single internal collection function/module,
+    -- replace ONLY this transfer with that function so manual collect and dev collect
+    -- share exactly the same authoritative path.
+    local newMoney = moneyBefore + collectorBefore
+
+    if not writeNumericValue(moneyObject, newMoney) then
+        return false, "MONEY_WRITE_FAILED"
+    end
+
+    if not writeNumericValue(collectorObject, 0) then
+        -- Best-effort rollback to avoid duplication if collector reset fails.
+        writeNumericValue(moneyObject, moneyBefore)
+        return false, "COLLECTOR_RESET_FAILED"
+    end
+
+    return true, {
+        MoneyBefore = moneyBefore,
+        MoneyAfter = newMoney,
+        CollectorBefore = collectorBefore,
+        CollectorAfter = 0,
+        Collected = collectorBefore,
+    }
+end
+
+local api = ReplicatedStorage:FindFirstChild(API_FOLDER_NAME)
+if not api then
+    api = Instance.new("Folder")
+    api.Name = API_FOLDER_NAME
+    api.Parent = ReplicatedStorage
+end
+
+local remote = api:FindFirstChild(REMOTE_NAME)
+if not remote then
+    remote = Instance.new("RemoteFunction")
+    remote.Name = REMOTE_NAME
+    remote.Parent = api
+end
+
+remote.OnServerInvoke = function(player, request)
+    if not isAuthorized(player) then
+        return {
+            Ok = false,
+            Reason = "NOT_AUTHORIZED_FOR_DEV_COLLECT",
+        }
+    end
+
+    local now = os.clock()
+    local previous = lastRequest[player]
+    if previous and (now - previous) < REQUEST_COOLDOWN then
+        return {
+            Ok = false,
+            Reason = "RATE_LIMITED",
+        }
+    end
+    lastRequest[player] = now
+
+    local tycoon = findPlayerTycoon(player)
+    if not tycoon then
+        return {
+            Ok = false,
+            Reason = "PLAYER_TYCOON_NOT_FOUND",
+        }
+    end
+
+    local minimumRequested =
+        type(request) == "table"
+        and tonumber(request.MinimumCollector)
+        or MINIMUM_ALLOWED_COLLECTOR
+
+    if minimumRequested and minimumRequested > MINIMUM_ALLOWED_COLLECTOR then
+        -- Client can request a stricter threshold, never a weaker one.
+    else
+        minimumRequested = MINIMUM_ALLOWED_COLLECTOR
+    end
+
+    local collectorObject = findCollectorValueObject(tycoon)
+    local collectorNow = readValue(collectorObject)
+
+    if collectorNow == nil then
+        return {
+            Ok = false,
+            Reason = "AUTHORITATIVE_COLLECTOR_VALUE_NOT_FOUND",
+        }
+    end
+
+    if collectorNow < minimumRequested then
+        return {
+            Ok = false,
+            Reason = "COLLECTOR_BELOW_REQUESTED_MINIMUM",
+            Collector = collectorNow,
+            Minimum = minimumRequested,
+        }
+    end
+
+    local ok, result = applyCollection(player, tycoon)
+
+    if not ok then
+        return {
+            Ok = false,
+            Reason = result,
+        }
+    end
+
+    return {
+        Ok = true,
+        Reason = "DEV_COLLECTION_APPLIED",
+        Collected = result.Collected,
+        MoneyBefore = result.MoneyBefore,
+        MoneyAfter = result.MoneyAfter,
+        CollectorBefore = result.CollectorBefore,
+        CollectorAfter = result.CollectorAfter,
+    }
+end
+
+Players.PlayerRemoving:Connect(function(player)
+    lastRequest[player] = nil
+end)
+
+print("[PsicoTycoon DevCollect V1] Ready. Published-server compatible; authorization required.")
