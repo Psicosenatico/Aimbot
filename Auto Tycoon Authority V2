@@ -1,0 +1,486 @@
+--[[
+PSICOSENATICO - AUTO TYCOON - SERVER AUTHORITY V2.0
+DESTINO: ServerScriptService
+
+OBJETIVO
+- Servidor continua sendo a autoridade da economia.
+- Cliente pode solicitar compra/coleta sem precisar caminhar fisicamente.
+- "Free test purchase" existe SOMENTE no Roblox Studio.
+- Não confia em preço, saldo, owner ou requisitos enviados pelo cliente.
+- Toda informação crítica é recalculada no servidor.
+
+INTEGRAÇÃO
+Este script cria ReplicatedStorage.PsicoTycoonAPI com:
+- RequestPurchase : RemoteFunction
+- RequestCollect  : RemoteFunction
+- GetSnapshot     : RemoteFunction
+- StateChanged    : RemoteEvent
+
+Como cada Tycoon implementa a criação real das compras de forma diferente,
+o script expõe dois BindableFunctions opcionais em:
+ServerScriptService.PsicoTycoonHooks
+- Purchase(player, tycoon, button, context)
+- Collect(player, tycoon, context)
+
+Se o seu jogo já possui a função real de compra/coleta, conecte-a nesses hooks.
+Assim o servidor autoriza e o código original do jogo executa a mutação real.
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local RunService = game:GetService("RunService")
+
+local VERSION = "SERVER-2.0"
+
+local API_FOLDER_NAME = "PsicoTycoonAPI"
+local HOOKS_FOLDER_NAME = "PsicoTycoonHooks"
+
+local ATTR_AUTO_PURCHASE = "PsicoAutoPurchase"
+local ATTR_AUTO_COLLECT = "PsicoAutoCollect"
+local ATTR_FREE_TEST = "PsicoFreePurchaseTest"
+
+local function normalize(value)
+    return string.lower(tostring(value or "")):gsub("[%s_%-%./]", "")
+end
+
+local function parseNumber(value)
+    if value == nil then return nil end
+    if type(value) == "number" then return value end
+
+    local text = tostring(value)
+    text = text:gsub(",", ""):gsub("%s", ""):gsub("R%$", ""):gsub("%$", "")
+
+    local suffix = string.upper(string.sub(text, -1))
+    local multiplier = 1
+
+    if suffix == "K" then
+        multiplier = 1e3
+        text = string.sub(text, 1, -2)
+    elseif suffix == "M" then
+        multiplier = 1e6
+        text = string.sub(text, 1, -2)
+    elseif suffix == "B" then
+        multiplier = 1e9
+        text = string.sub(text, 1, -2)
+    elseif suffix == "T" then
+        multiplier = 1e12
+        text = string.sub(text, 1, -2)
+    end
+
+    local n = tonumber(text)
+    return n and (n * multiplier) or nil
+end
+
+local function attrCI(inst, wanted)
+    if not inst then return nil end
+    local wantedNorm = normalize(wanted)
+
+    for key, value in pairs(inst:GetAttributes()) do
+        if normalize(key) == wantedNorm then
+            return value
+        end
+    end
+
+    return nil
+end
+
+local function ownerMatches(player, owner)
+    if not player or owner == nil then return false end
+    local text = tostring(owner)
+
+    return text == player.Name
+        or text == tostring(player.UserId)
+        or normalize(text) == normalize(player.Name)
+end
+
+local function findPlayerTycoon(player)
+    local tycoons = workspace:FindFirstChild("Tycoons")
+    if not tycoons then return nil end
+
+    local best, bestScore = nil, -1
+
+    for _, tycoon in ipairs(tycoons:GetChildren()) do
+        local buttons = tycoon:FindFirstChild("Buttons")
+        local purchases = tycoon:FindFirstChild("Purchases")
+
+        if buttons and purchases then
+            local score = 0
+
+            if ownerMatches(player, attrCI(tycoon, "Owner")) then
+                score = score + 100
+            end
+
+            local checked = 0
+            for _, folder in ipairs({buttons, purchases}) do
+                for _, child in ipairs(folder:GetChildren()) do
+                    checked = checked + 1
+                    if ownerMatches(player, attrCI(child, "Owner")) then
+                        score = score + 40
+                        break
+                    end
+                    if checked >= 120 then break end
+                end
+            end
+
+            if score > bestScore then
+                best = tycoon
+                bestScore = score
+            end
+        end
+    end
+
+    if bestScore >= 40 then
+        return best
+    end
+
+    return nil
+end
+
+local function findLeaderstat(player, names)
+    local leaderstats = player and player:FindFirstChild("leaderstats")
+    if not leaderstats then return nil end
+
+    for _, wanted in ipairs(names) do
+        local direct = leaderstats:FindFirstChild(wanted)
+        if direct and direct:IsA("ValueBase") then
+            return direct
+        end
+    end
+
+    for _, child in ipairs(leaderstats:GetChildren()) do
+        if child:IsA("ValueBase") then
+            local childNorm = normalize(child.Name)
+            for _, wanted in ipairs(names) do
+                if string.find(childNorm, normalize(wanted), 1, true) then
+                    return child
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function getMoneyObject(player)
+    return findLeaderstat(player, {"Money", "Cash", "Coins", "Coin", "Currency", "Saldo"})
+end
+
+local function getRebirthObject(player)
+    return findLeaderstat(player, {"Rebirths", "Rebirth", "Prestige", "Prestiges"})
+end
+
+local function readNumericValue(obj)
+    if not obj or not obj.Parent then return nil end
+    return parseNumber(obj.Value)
+end
+
+local function classifyButton(button, player)
+    local price = parseNumber(attrCI(button, "Price") or attrCI(button, "Cost"))
+    local rebirths = parseNumber(attrCI(button, "RequiredRebirths") or attrCI(button, "Rebirths"))
+
+    local marketplace =
+        attrCI(button, "Gamepass")
+        or attrCI(button, "GamePassId")
+        or attrCI(button, "ProductId")
+        or attrCI(button, "DeveloperProductId")
+        or attrCI(button, "DevProduct")
+        or attrCI(button, "Robux")
+
+    if marketplace ~= nil and tostring(marketplace) ~= "" then
+        return {
+            Type = "MARKETPLACE",
+            Price = price,
+            RequiredRebirths = rebirths,
+            Allowed = false,
+            Reason = "Marketplace purchases are not handled by this API",
+        }
+    end
+
+    if rebirths and rebirths > 0 then
+        local current = readNumericValue(getRebirthObject(player))
+        return {
+            Type = "REBIRTH",
+            Price = price,
+            RequiredRebirths = rebirths,
+            CurrentRebirths = current,
+            Allowed = current ~= nil and current >= rebirths,
+            Reason = current ~= nil and current >= rebirths
+                and "REBIRTH_REQUIREMENT_OK"
+                or "REBIRTH_REQUIREMENT_NOT_MET",
+        }
+    end
+
+    if price ~= nil and price >= 0 then
+        return {
+            Type = "TYCOON_MONEY",
+            Price = price,
+            Allowed = true,
+            Reason = "MONEY_PURCHASE",
+        }
+    end
+
+    return {
+        Type = "UNKNOWN",
+        Allowed = false,
+        Reason = "UNKNOWN_BUTTON_TYPE",
+    }
+end
+
+local apiFolder = ReplicatedStorage:FindFirstChild(API_FOLDER_NAME)
+if not apiFolder then
+    apiFolder = Instance.new("Folder")
+    apiFolder.Name = API_FOLDER_NAME
+    apiFolder.Parent = ReplicatedStorage
+end
+
+local function ensureRemoteFunction(name)
+    local obj = apiFolder:FindFirstChild(name)
+    if obj and not obj:IsA("RemoteFunction") then
+        obj:Destroy()
+        obj = nil
+    end
+    if not obj then
+        obj = Instance.new("RemoteFunction")
+        obj.Name = name
+        obj.Parent = apiFolder
+    end
+    return obj
+end
+
+local function ensureRemoteEvent(name)
+    local obj = apiFolder:FindFirstChild(name)
+    if obj and not obj:IsA("RemoteEvent") then
+        obj:Destroy()
+        obj = nil
+    end
+    if not obj then
+        obj = Instance.new("RemoteEvent")
+        obj.Name = name
+        obj.Parent = apiFolder
+    end
+    return obj
+end
+
+local requestPurchase = ensureRemoteFunction("RequestPurchase")
+local requestCollect = ensureRemoteFunction("RequestCollect")
+local getSnapshot = ensureRemoteFunction("GetSnapshot")
+local stateChanged = ensureRemoteEvent("StateChanged")
+
+local hooksFolder = ServerScriptService:FindFirstChild(HOOKS_FOLDER_NAME)
+if not hooksFolder then
+    hooksFolder = Instance.new("Folder")
+    hooksFolder.Name = HOOKS_FOLDER_NAME
+    hooksFolder.Parent = ServerScriptService
+end
+
+local purchaseHook = hooksFolder:FindFirstChild("Purchase")
+if not purchaseHook then
+    purchaseHook = Instance.new("BindableFunction")
+    purchaseHook.Name = "Purchase"
+    purchaseHook.Parent = hooksFolder
+end
+
+local collectHook = hooksFolder:FindFirstChild("Collect")
+if not collectHook then
+    collectHook = Instance.new("BindableFunction")
+    collectHook.Name = "Collect"
+    collectHook.Parent = hooksFolder
+end
+
+local function isFreeTestAllowed(player)
+    return RunService:IsStudio() and player:GetAttribute(ATTR_FREE_TEST) == true
+end
+
+local function executePurchaseHook(player, tycoon, button, context)
+    if not purchaseHook.OnInvoke then
+        return false, "AUTHORIZED_NO_PURCHASE_HANDLER"
+    end
+
+    local ok, resultA, resultB = pcall(function()
+        return purchaseHook:Invoke(player, tycoon, button, context)
+    end)
+
+    if not ok then
+        warn("[Psico Server V2] Purchase hook error:", resultA)
+        return false, "PURCHASE_HANDLER_ERROR"
+    end
+
+    if resultA == true then
+        return true, tostring(resultB or "PURCHASE_HANDLER_ACCEPTED")
+    end
+
+    return false, tostring(resultB or "PURCHASE_HANDLER_REJECTED")
+end
+
+local function executeCollectHook(player, tycoon, context)
+    if not collectHook.OnInvoke then
+        return false, "AUTHORIZED_NO_COLLECT_HANDLER", nil
+    end
+
+    local ok, resultA, resultB, resultC = pcall(function()
+        return collectHook:Invoke(player, tycoon, context)
+    end)
+
+    if not ok then
+        warn("[Psico Server V2] Collect hook error:", resultA)
+        return false, "COLLECT_HANDLER_ERROR", nil
+    end
+
+    if resultA == true then
+        return true, tostring(resultB or "COLLECT_HANDLER_ACCEPTED"), resultC
+    end
+
+    return false, tostring(resultB or "COLLECT_HANDLER_REJECTED"), resultC
+end
+
+getSnapshot.OnServerInvoke = function(player)
+    local tycoon = findPlayerTycoon(player)
+    local moneyObj = getMoneyObject(player)
+    local rebirthObj = getRebirthObject(player)
+
+    return {
+        Version = VERSION,
+        Tycoon = tycoon and tycoon:GetFullName() or nil,
+        Money = readNumericValue(moneyObj),
+        MoneyPath = moneyObj and moneyObj:GetFullName() or nil,
+        Rebirths = readNumericValue(rebirthObj),
+        RebirthPath = rebirthObj and rebirthObj:GetFullName() or nil,
+        AutoPurchase = player:GetAttribute(ATTR_AUTO_PURCHASE) == true,
+        AutoCollect = player:GetAttribute(ATTR_AUTO_COLLECT) == true,
+        FreePurchaseTest = isFreeTestAllowed(player),
+        Studio = RunService:IsStudio(),
+    }
+end
+
+requestPurchase.OnServerInvoke = function(player, buttonName)
+    if type(buttonName) ~= "string" or #buttonName > 128 then
+        return {Ok = false, Reason = "INVALID_BUTTON_NAME"}
+    end
+
+    local tycoon = findPlayerTycoon(player)
+    if not tycoon then
+        return {Ok = false, Reason = "TYCOON_NOT_FOUND"}
+    end
+
+    local buttons = tycoon:FindFirstChild("Buttons")
+    if not buttons then
+        return {Ok = false, Reason = "BUTTONS_FOLDER_NOT_FOUND"}
+    end
+
+    local button = buttons:FindFirstChild(buttonName)
+    if not button then
+        return {Ok = false, Reason = "BUTTON_NOT_FOUND"}
+    end
+
+    if not ownerMatches(player, attrCI(button, "Owner")) then
+        return {Ok = false, Reason = "OWNER_MISMATCH"}
+    end
+
+    local classification = classifyButton(button, player)
+    if not classification.Allowed then
+        return {
+            Ok = false,
+            Reason = classification.Reason,
+            Classification = classification,
+        }
+    end
+
+    local moneyObj = getMoneyObject(player)
+    local moneyBefore = readNumericValue(moneyObj)
+    local freeTest = isFreeTestAllowed(player)
+
+    if classification.Type == "TYCOON_MONEY" and not freeTest then
+        if moneyBefore == nil then
+            return {Ok = false, Reason = "AUTHORITATIVE_MONEY_NOT_FOUND"}
+        end
+
+        if moneyBefore < (classification.Price or 0) then
+            return {
+                Ok = false,
+                Reason = "INSUFFICIENT_MONEY",
+                Money = moneyBefore,
+                Price = classification.Price,
+            }
+        end
+    end
+
+    local context = {
+        Version = VERSION,
+        Classification = classification,
+        FreeTest = freeTest,
+        AutoPurchase = player:GetAttribute(ATTR_AUTO_PURCHASE) == true,
+        MoneyBefore = moneyBefore,
+    }
+
+    local ok, reason = executePurchaseHook(player, tycoon, button, context)
+
+    stateChanged:FireClient(player, {
+        Kind = "PURCHASE_RESULT",
+        Button = buttonName,
+        Ok = ok,
+        Reason = reason,
+        MoneyBefore = moneyBefore,
+        MoneyAfter = readNumericValue(moneyObj),
+        FreeTest = freeTest,
+    })
+
+    return {
+        Ok = ok,
+        Reason = reason,
+        MoneyBefore = moneyBefore,
+        MoneyAfter = readNumericValue(moneyObj),
+        Classification = classification,
+        FreeTest = freeTest,
+    }
+end
+
+requestCollect.OnServerInvoke = function(player)
+    local tycoon = findPlayerTycoon(player)
+    if not tycoon then
+        return {Ok = false, Reason = "TYCOON_NOT_FOUND"}
+    end
+
+    local context = {
+        Version = VERSION,
+        AutoCollect = player:GetAttribute(ATTR_AUTO_COLLECT) == true,
+        MoneyBefore = readNumericValue(getMoneyObject(player)),
+    }
+
+    local ok, reason, amount = executeCollectHook(player, tycoon, context)
+
+    stateChanged:FireClient(player, {
+        Kind = "COLLECT_RESULT",
+        Ok = ok,
+        Reason = reason,
+        Amount = amount,
+        MoneyAfter = readNumericValue(getMoneyObject(player)),
+    })
+
+    return {
+        Ok = ok,
+        Reason = reason,
+        Amount = amount,
+        MoneyBefore = context.MoneyBefore,
+        MoneyAfter = readNumericValue(getMoneyObject(player)),
+    }
+end
+
+local function initializePlayer(player)
+    if player:GetAttribute(ATTR_AUTO_PURCHASE) == nil then
+        player:SetAttribute(ATTR_AUTO_PURCHASE, false)
+    end
+    if player:GetAttribute(ATTR_AUTO_COLLECT) == nil then
+        player:SetAttribute(ATTR_AUTO_COLLECT, false)
+    end
+    if player:GetAttribute(ATTR_FREE_TEST) == nil then
+        player:SetAttribute(ATTR_FREE_TEST, false)
+    end
+end
+
+Players.PlayerAdded:Connect(initializePlayer)
+for _, player in ipairs(Players:GetPlayers()) do
+    initializePlayer(player)
+end
+
+print("[Psico Auto Tycoon] Server Authority V2.0 ready")
