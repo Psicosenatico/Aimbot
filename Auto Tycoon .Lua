@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.7.2 + AUTOSAVE DEDUPLICADO
+PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.7.3 + BUNKER SESSION LOCK
 COMPATIBILITY / STABILITY BUILD
 
 Purchase automation + diagnostics - authorized teleport test build.
@@ -44,8 +44,8 @@ local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GuiService = game:GetService("GuiService")
 
-local VERSION = "AUTO-TP-1.7.2"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_2"
+local VERSION = "AUTO-TP-1.7.3"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_3"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -132,6 +132,13 @@ local State = {
 
     BunkerTransitionLog = {},
     BunkerRescans = 0,
+    BunkerSessionActive = false,
+    BunkerSessionId = 0,
+    BunkerSessionStartedUnix = nil,
+    BunkerSessionStartedElapsed = nil,
+    BunkerSessionReason = nil,
+    BunkerExitInProgress = false,
+    BunkerSuppressedMainDetections = 0,
 
     AutoSaveCount = 0,
     AutoSaveLastUnix = nil,
@@ -684,7 +691,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.7.2 - autosave deduplicado"
+    version.Text = "AUTO V1.7.3 - bunker session lock"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -851,7 +858,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.7.2 (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.7.3 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -939,14 +946,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Automator V1.7.2] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.7.3] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Automator V1.7.2] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator V1.7.3] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -1204,6 +1211,46 @@ end
 
 local function setZone(newZone, evidence)
     newZone = tostring(newZone or "UNKNOWN")
+    evidence = tostring(evidence or "no evidence")
+
+    -- While an automation-confirmed Bunker session is active, raw proximity
+    -- evidence must not eject the state machine back to MAIN_TYCOON.
+    -- Only an explicit Exit prompt or the controlled auto-exit routine can
+    -- release the Bunker session.
+    local evidenceNorm = normalize(evidence)
+    local explicitExitPrompt =
+        string.find(evidenceNorm, "bunkerexitprompttriggeredbylocalplayer", 1, true) ~= nil
+
+    if State.BunkerSessionActive
+    and State.CurrentZone == "BUNKER"
+    and newZone == "MAIN_TYCOON"
+    and not State.BunkerExitInProgress
+    and not explicitExitPrompt then
+        State.BunkerSuppressedMainDetections = State.BunkerSuppressedMainDetections + 1
+        State.ZoneEvidence = "BUNKER_SESSION_LOCK_SUPPRESSED: " .. evidence
+        State.Health.Zone = "BUNKER"
+
+        if State.Reading then
+            pushEvent("ZONE_CHANGE_SUPPRESSED", "BUNKER", {
+                Time = clockText(),
+                Unix = os.time(),
+                Elapsed = elapsed(),
+                From = "BUNKER",
+                RequestedTo = "MAIN_TYCOON",
+                Evidence = evidence,
+                SessionId = State.BunkerSessionId,
+                Reason = "BUNKER_SESSION_LOCK_ACTIVE",
+            })
+        end
+
+        return
+    end
+
+    if explicitExitPrompt and State.BunkerSessionActive then
+        State.BunkerSessionActive = false
+        State.BunkerExitInProgress = false
+        State.BunkerSessionReason = "EXPLICIT_EXIT_PROMPT"
+    end
 
     if State.CurrentZone == newZone then
         State.ZoneEvidence = evidence or State.ZoneEvidence
@@ -2985,27 +3032,84 @@ local function autoTriggerBunkerPrompt(prompt, targetZone, labelPrefix)
 end
 
 local function autoEnterBunker()
-    if State.CurrentZone == "BUNKER" then
-        return true, "ALREADY_IN_BUNKER"
+    if State.CurrentZone == "BUNKER" and State.BunkerSessionActive then
+        return true, "ALREADY_IN_BUNKER_SESSION"
     end
 
     State.AutomationState = "ENTERING_BUNKER"
     State.Health.Automation = "ENTERING_BUNKER"
 
     local prompt = autoFindBunkerPrompt("enter")
-    return autoTriggerBunkerPrompt(prompt, "BUNKER", "BUNKER_ENTER")
+    local entered, reason = autoTriggerBunkerPrompt(prompt, "BUNKER", "BUNKER_ENTER")
+
+    if entered then
+        if not State.BunkerSessionActive then
+            State.BunkerSessionId = State.BunkerSessionId + 1
+        end
+
+        State.BunkerSessionActive = true
+        State.BunkerSessionStartedUnix = os.time()
+        State.BunkerSessionStartedElapsed = elapsed()
+        State.BunkerSessionReason = "ENTER_CONFIRMED"
+        State.BunkerExitInProgress = false
+
+        autoRecord("BUNKER_SESSION_LOCKED", {
+            SessionId = State.BunkerSessionId,
+            Reason = reason,
+            Zone = State.CurrentZone,
+            Policy = "REMAIN_IN_BUNKER_UNTIL_NO_ELIGIBLE_BUNKER_PURCHASES_REMAIN",
+        })
+    end
+
+    return entered, reason
 end
 
 local function autoExitBunker()
     if State.CurrentZone == "MAIN_TYCOON" then
+        if State.BunkerSessionActive then
+            autoRecord("BUNKER_SESSION_RELEASED", {
+                SessionId = State.BunkerSessionId,
+                Reason = "ALREADY_IN_MAIN_TYCOON",
+            })
+        end
+        State.BunkerSessionActive = false
+        State.BunkerExitInProgress = false
+        State.BunkerSessionReason = "ALREADY_IN_MAIN_TYCOON"
         return true, "ALREADY_IN_MAIN_TYCOON"
     end
 
     State.AutomationState = "EXITING_BUNKER"
     State.Health.Automation = "EXITING_BUNKER"
+    State.BunkerExitInProgress = true
 
     local prompt = autoFindBunkerPrompt("exit")
-    return autoTriggerBunkerPrompt(prompt, "MAIN_TYCOON", "BUNKER_EXIT")
+    local exited, reason = autoTriggerBunkerPrompt(prompt, "MAIN_TYCOON", "BUNKER_EXIT")
+
+    if exited then
+        autoRecord("BUNKER_SESSION_RELEASED", {
+            SessionId = State.BunkerSessionId,
+            Reason = reason,
+            StartedUnix = State.BunkerSessionStartedUnix,
+            StartedElapsed = State.BunkerSessionStartedElapsed,
+            SuppressedMainDetections = State.BunkerSuppressedMainDetections,
+        })
+
+        State.BunkerSessionActive = false
+        State.BunkerExitInProgress = false
+        State.BunkerSessionReason = "EXIT_CONFIRMED"
+    else
+        -- Keep the session locked if Exit did not actually complete.
+        State.BunkerExitInProgress = false
+        State.BunkerSessionReason = "EXIT_NOT_CONFIRMED"
+
+        autoRecord("BUNKER_SESSION_EXIT_FAILED", {
+            SessionId = State.BunkerSessionId,
+            Reason = reason,
+            Zone = State.CurrentZone,
+        })
+    end
+
+    return exited, reason
 end
 
 local function autoEffectiveZone(record)
@@ -3469,6 +3573,11 @@ local function autoHandleRebirth(oldValue, newValue)
     State.AutomationBlockedFunds = {}
     State.AutomationServerSignal = nil
     State.Pending = {}
+    State.BunkerSessionActive = false
+    State.BunkerExitInProgress = false
+    State.BunkerSessionReason = "REBIRTH_RESET"
+    State.BunkerSessionStartedUnix = nil
+    State.BunkerSessionStartedElapsed = nil
 
     local reset = {
         Id = #State.AutomationResets + 1,
@@ -3587,7 +3696,9 @@ task.spawn(function()
 
                 local target = nil
 
-                if State.CurrentZone == "BUNKER" then
+                if State.CurrentZone == "BUNKER" or State.BunkerSessionActive then
+                    -- Bunker has priority for the entire confirmed session.
+                    -- Do not bounce to MAIN between individual bunker purchases.
                     target = autoSelectCandidateInZone("BUNKER")
 
                     if not target then
@@ -3596,10 +3707,31 @@ task.spawn(function()
                         autoRecord("BUNKER_PRE_EXIT_RESCAN", {
                             Rescan = State.BunkerRescans,
                             WaitSeconds = BUNKER_RESCAN_WAIT,
+                            SessionId = State.BunkerSessionId,
                         })
 
                         task.wait(BUNKER_RESCAN_WAIT)
                         target = autoSelectCandidateInZone("BUNKER")
+
+                        if not target then
+                            autoRecord("BUNKER_ELIGIBLE_QUEUE_EXHAUSTED", {
+                                SessionId = State.BunkerSessionId,
+                                Rebirths = State.LastRebirths,
+                                NextAction = "EXIT_BUNKER_ONCE",
+                            })
+
+                            local exited, exitReason = autoExitBunker()
+                            if exited then
+                                task.wait(AUTO_POST_RESULT_WAIT)
+                            else
+                                autoRecord("BUNKER_EXIT_RETRY_LATER", {
+                                    SessionId = State.BunkerSessionId,
+                                    Reason = exitReason,
+                                })
+                                task.wait(AUTO_IDLE_WAIT)
+                            end
+                            return
+                        end
                     end
                 end
 
@@ -3740,6 +3872,16 @@ local function buildReport()
             IdleCollectTriggers = State.IdleCollectTriggers,
             BunkerTransitionLog = State.BunkerTransitionLog,
             BunkerRescans = State.BunkerRescans,
+            BunkerSession = {
+                Active = State.BunkerSessionActive,
+                Id = State.BunkerSessionId,
+                StartedUnix = State.BunkerSessionStartedUnix,
+                StartedElapsed = State.BunkerSessionStartedElapsed,
+                Reason = State.BunkerSessionReason,
+                ExitInProgress = State.BunkerExitInProgress,
+                SuppressedMainDetections = State.BunkerSuppressedMainDetections,
+                Policy = "LOCK_BUNKER_UNTIL_ELIGIBLE_QUEUE_EXHAUSTED_THEN_EXIT_ONCE",
+            },
             FundsBlocked = State.AutomationBlockedFunds,
             Attempts = State.AutomationAttempts,
             RebirthResets = State.AutomationResets,
@@ -3833,11 +3975,11 @@ local function autoSaveNow(reason, timestamped)
         return false, "WRITEFILE_UNAVAILABLE"
     end
 
-    local filename = "Tycoon_Purchase_Automator_V1_7_2_AutoSave_Latest.txt"
+    local filename = "Tycoon_Purchase_Automator_V1_7_3_AutoSave_Latest.txt"
 
     if timestamped then
         filename =
-            "Tycoon_Purchase_Automator_V1_7_2_AutoSave_" ..
+            "Tycoon_Purchase_Automator_V1_7_3_AutoSave_" ..
             reason ..
             "_" ..
             os.date("%Y%m%d_%H%M%S") ..
@@ -4168,7 +4310,7 @@ task.spawn(function()
     end
 end)
 
-UI.Status.Text = "AUTO V1.7.2 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "AUTO V1.7.3 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
 safeCall("UI_INITIAL_REFRESH", function()
     refreshUI()
 end)
