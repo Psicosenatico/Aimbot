@@ -8,8 +8,8 @@ local VirtualInputManager = nil
 pcall(function()
     VirtualInputManager = game:GetService("VirtualInputManager")
 end)
-local VERSION = "AUTO-TP-1.7.5.3"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_5_3"
+local VERSION = "AUTO-TP-1.7.5.4"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_5_4"
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
 local TYCOON_INTERVAL = 1.5
@@ -116,6 +116,14 @@ local State = {
     AutomationRunId = 0,
     AutomationSuccessful = 0,
     AutomationFailed = 0,
+    MovementSafeTeleportAttempts = 0,
+    MovementSafeTeleportConfirmed = 0,
+    MovementUnsafeDestinationRejected = 0,
+    MovementRecoveryAttempts = 0,
+    MovementRecoverySuccessful = 0,
+    MovementCharacterLosses = 0,
+    MovementLastSafeCFrame = nil,
+    MovementCharacter = nil,
     DataStats = {
         TotalEventsObserved = 0,
         AuxiliaryEventsStored = 0,
@@ -546,7 +554,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.7.5.3 - compras + renascimento"
+    version.Text = "AUTO V1.7.5.4 - safe teleport"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -699,7 +707,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.7.5.3 (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.7.5.4 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -769,12 +777,12 @@ local function createGui()
 end
 State.Player = waitForLocalPlayer(10)
 if not State.Player then
-    warn("[Tycoon Automator V1.7.5.3] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.7.5.4] LocalPlayer indisponivel.")
     return
 end
 local guiOk, guiResult = pcall(createGui)
 if not guiOk then
-    warn("[Tycoon Automator V1.7.5.3] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator V1.7.5.4] GUI ERROR: " .. tostring(guiResult))
     return
 end
 State.Health.Bootstrap = "GUI_OK"
@@ -2094,30 +2102,151 @@ end
 local function autoTeleportToPart(targetPart)
     local character, humanoid, root = autoGetCharacter()
     if not character or not humanoid or not root or humanoid.Health <= 0 then
+        State.MovementCharacterLosses = State.MovementCharacterLosses + 1
         return false, "CHARACTER_UNAVAILABLE"
     end
     if not targetPart or not targetPart.Parent or not targetPart:IsA("BasePart") then
         return false, "TARGET_PART_UNAVAILABLE"
     end
-    local destination = targetPart.CFrame * CFrame.new(0, 2.6, 0)
+    if not targetPart:IsDescendantOf(workspace) then
+        State.MovementUnsafeDestinationRejected = State.MovementUnsafeDestinationRejected + 1
+        return false, "TARGET_NOT_IN_WORKSPACE"
+    end
+    if State.Tycoon and State.Tycoon.Parent and not targetPart:IsDescendantOf(State.Tycoon) then
+        State.MovementUnsafeDestinationRejected = State.MovementUnsafeDestinationRejected + 1
+        autoRecord("SAFE_TELEPORT_REJECTED", {
+            Reason = "TARGET_OUTSIDE_ACTIVE_TYCOON",
+            TargetPart = safeFullName(targetPart),
+        })
+        return false, "TARGET_OUTSIDE_ACTIVE_TYCOON"
+    end
+
+    if State.MovementCharacter ~= character then
+        State.MovementCharacter = character
+        State.MovementLastSafeCFrame = root.CFrame
+    end
+
+    State.MovementSafeTeleportAttempts = State.MovementSafeTeleportAttempts + 1
+
+    local originCFrame = root.CFrame
+    local destinationPosition = targetPart.Position + Vector3.new(0, 2.6, 0)
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {character}
+    rayParams.IgnoreWater = false
+
+    local groundResult = workspace:Raycast(
+        destinationPosition + Vector3.new(0, 0.5, 0),
+        Vector3.new(0, -14, 0),
+        rayParams
+    )
+
+    if not groundResult then
+        State.MovementUnsafeDestinationRejected = State.MovementUnsafeDestinationRejected + 1
+        autoRecord("SAFE_TELEPORT_REJECTED", {
+            Reason = "NO_SURFACE_BELOW_TARGET",
+            TargetPart = safeFullName(targetPart),
+            TargetX = targetPart.Position.X,
+            TargetY = targetPart.Position.Y,
+            TargetZ = targetPart.Position.Z,
+        })
+        return false, "UNSAFE_DESTINATION_NO_SURFACE"
+    end
+
+    local surfaceGap = destinationPosition.Y - groundResult.Position.Y
+    if surfaceGap > 10.5 then
+        State.MovementUnsafeDestinationRejected = State.MovementUnsafeDestinationRejected + 1
+        autoRecord("SAFE_TELEPORT_REJECTED", {
+            Reason = "SURFACE_TOO_FAR_BELOW",
+            TargetPart = safeFullName(targetPart),
+            SurfaceGap = surfaceGap,
+            Surface = safeFullName(groundResult.Instance),
+        })
+        return false, "UNSAFE_DESTINATION_SURFACE_TOO_LOW"
+    end
+
+    local function recover(reason)
+        State.MovementRecoveryAttempts = State.MovementRecoveryAttempts + 1
+
+        local restoreCFrame = State.MovementLastSafeCFrame or originCFrame
+        local restored = false
+
+        if root.Parent and humanoid.Parent and humanoid.Health > 0 then
+            restored = pcall(function()
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+                root.CFrame = restoreCFrame
+            end)
+        end
+
+        if restored then
+            State.MovementRecoverySuccessful = State.MovementRecoverySuccessful + 1
+        else
+            State.MovementCharacterLosses = State.MovementCharacterLosses + 1
+        end
+
+        autoRecord("SAFE_TELEPORT_RECOVERY", {
+            Reason = reason,
+            Restored = restored,
+            TargetPart = safeFullName(targetPart),
+            Surface = safeFullName(groundResult.Instance),
+        })
+
+        return false, reason
+    end
+
+    local destination = CFrame.new(destinationPosition) * root.CFrame.Rotation
     local ok, err = pcall(function()
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
         root.CFrame = destination
     end)
+
     if not ok then
-        return false, "TELEPORT_FAILED:" .. tostring(err)
+        return recover("TELEPORT_FAILED:" .. tostring(err))
     end
+
     task.wait(0.12)
-    if not root.Parent then
-        return false, "CHARACTER_LOST"
+
+    if not root.Parent or not humanoid.Parent or humanoid.Health <= 0 then
+        State.MovementCharacterLosses = State.MovementCharacterLosses + 1
+        return false, "CHARACTER_LOST_AFTER_TELEPORT"
     end
-    local distance = (root.Position - targetPart.Position).Magnitude
-    if distance <= 7 then
-        return true, "TELEPORT_POSITION_CONFIRMED"
+
+    local firstDistance = (root.Position - targetPart.Position).Magnitude
+    local firstDrop = destinationPosition.Y - root.Position.Y
+    if firstDistance > 7 or firstDrop > 6 or root.AssemblyLinearVelocity.Y < -55 then
+        return recover(
+            firstDistance > 7 and "TELEPORT_NOT_CONFIRMED"
+            or firstDrop > 6 and "POST_TELEPORT_DROP_DETECTED"
+            or "POST_TELEPORT_FAST_FALL_DETECTED"
+        )
     end
-    return false, "TELEPORT_NOT_CONFIRMED"
+
+    task.wait(0.18)
+
+    if not root.Parent or not humanoid.Parent or humanoid.Health <= 0 then
+        State.MovementCharacterLosses = State.MovementCharacterLosses + 1
+        return false, "CHARACTER_LOST_DURING_POSTCHECK"
+    end
+
+    local finalDistance = (root.Position - targetPart.Position).Magnitude
+    local finalDrop = destinationPosition.Y - root.Position.Y
+    if finalDistance > 8 or finalDrop > 6 or root.AssemblyLinearVelocity.Y < -55 then
+        return recover(
+            finalDistance > 8 and "POST_TELEPORT_POSITION_UNSTABLE"
+            or finalDrop > 6 and "POST_TELEPORT_DROP_DETECTED"
+            or "POST_TELEPORT_FAST_FALL_DETECTED"
+        )
+    end
+
+    State.MovementLastSafeCFrame = root.CFrame
+    State.MovementSafeTeleportConfirmed = State.MovementSafeTeleportConfirmed + 1
+
+    return true, "TELEPORT_POSITION_CONFIRMED"
 end
+
 local function autoCollectorContainer()
     if not State.Tycoon then
         return nil
@@ -2224,7 +2353,7 @@ local function autoTeleportToCollectorAndConfirm()
         CollectorBefore = collectorBefore,
         MoneyBefore = moneyBefore,
         TargetPart = attempt.TargetPart,
-        Movement = "DIRECT_LOCAL_CHARACTER_TELEPORT",
+        Movement = "SAFE_WORLD_Y_TELEPORT_WITH_SURFACE_CHECK_AND_RECOVERY",
     })
     local ok, teleportReason = autoTeleportToPart(targetPart)
     if not ok then
@@ -3749,9 +3878,9 @@ local function buildReport()
             StageUnlocks = State.StageUnlocks,
             MovementSafetyPolicy = {
                 Bunker = "USE_GAME_TRANSITION_ONLY",
-                MainTycoonDirectTeleport = "TEST_ENABLED",
+                MainTycoonDirectTeleport = "SAFE_WORLD_Y_WITH_SURFACE_CHECK",
                 LongDistanceBunkerTeleport = "DO_NOT_USE",
-                Reason = "Bunker is a separate progression zone; direct long-distance movement can conflict with the game's movement correction.",
+                Reason = "All physical repositioning uses world-Y offset, surface validation, post-check and rollback on instability.",
             },
         },
         InitialButtons = State.InitialButtons,
@@ -3802,22 +3931,35 @@ local function buildReport()
             FundsBlocked = State.AutomationBlockedFunds,
             Attempts = State.AutomationAttempts,
             RebirthResets = State.AutomationResets,
+            MovementSafety = {
+                Attempts = State.MovementSafeTeleportAttempts,
+                Confirmed = State.MovementSafeTeleportConfirmed,
+                UnsafeDestinationsRejected = State.MovementUnsafeDestinationRejected,
+                RecoveryAttempts = State.MovementRecoveryAttempts,
+                RecoverySuccessful = State.MovementRecoverySuccessful,
+                CharacterLossesObserved = State.MovementCharacterLosses,
+                WorldYOffset = 2.6,
+                SurfaceRayDepth = 14,
+                MaxSurfaceGap = 10.5,
+                FastFallThresholdY = -55,
+                Policy = "TARGET_MUST_BE_ACTIVE_TYCOON_DESCENDANT; WORLD_Y_OFFSET; SURFACE_RAYCAST; TWO_POSTCHECKS; ROLLBACK_ON_INSTABILITY",
+            },
             Policy = {
-                PurchaseInteraction = "DIRECT_LOCAL_CHARACTER_TELEPORT_TO_TOUCH_BUTTON_TEST",
+                PurchaseInteraction = "SAFE_WORLD_Y_TELEPORT_TO_TOUCH_WITH_SURFACE_CHECK_AND_ROLLBACK",
                 AutoCollectTrigger = "AFTER_REJECTED_TYCOON_MONEY_WHEN_LOCAL_MONEY_BELOW_PRICE_AND_COLLECTOR_AT_LEAST_1000",
                 AutoCollectConfirmation = "REAL_WALLET_MONEY_MUST_INCREASE",
                 InsufficientFundsMemory = "KEEP_BLOCKED_UNTIL_OBSERVED_MONEY_AT_LEAST_PRICE",
                 ContinuousCollectorPolling = true,
                 ContinuousCollectorThreshold = 1000,
                 CollectorPollingOnlyWhenNoPurchaseCandidate = true,
-                AutoCollectMovement = "DIRECT_LOCAL_CHARACTER_TELEPORT_TO_COLLECTOR",
+                AutoCollectMovement = "SAFE_WORLD_Y_TELEPORT_TO_COLLECTOR_WITH_SURFACE_CHECK_AND_ROLLBACK",
                 AutoCollectEndpoint = "PHYSICAL_TOTEM_TOUCH_BY_CHARACTER",
                 AutoCollectDirectRemoteInvocation = false,
                 AutoCollectUnknownGameRemoteInvocation = false,
                 AutoCollectServerMutation = "OBSERVED_ONLY",
                 AutoCollectSimulationOnly = false,
                 BunkerTransition = "PROXIMITY_PROMPT_WITH_DIRECT_POSITIONING",
-                BunkerPurchaseMovement = "DIRECT_LOCAL_CHARACTER_TELEPORT",
+                BunkerPurchaseMovement = "SAFE_WORLD_Y_TELEPORT_WITH_SURFACE_CHECK_AND_RECOVERY",
                 BunkerExitPolicy = "RESCAN_BUNKER_BEFORE_EXIT",
                 AutoRebirth = true,
                 AutoRebirthSameToggleAsPurchases = true,
@@ -3826,7 +3968,7 @@ local function buildReport()
                 AutoRebirthDirectRemoteInvocation = false,
                 AutoRebirthConfirmation = "OBSERVED_REBIRTHS_INCREMENT",
                 DirectTeleport = true,
-                DirectTeleportScope = "MAIN_TYCOON_PURCHASE_BUTTONS_TEST_ONLY",
+                DirectTeleportScope = "ACTIVE_TYCOON_DESCENDANTS_ONLY_WITH_SAFETY_GUARDS",
                 MoneyBypass = false,
                 RebirthBypass = false,
                 MarketplaceBypass = false,
@@ -3888,10 +4030,10 @@ local function autoSaveNow(reason, timestamped)
         State.AutoSaveLastReason = reason
         return false, "WRITEFILE_UNAVAILABLE"
     end
-    local filename = "Tycoon_Purchase_Automator_V1_7_5_3_AutoSave_Latest.txt"
+    local filename = "Tycoon_Purchase_Automator_V1_7_5_4_AutoSave_Latest.txt"
     if timestamped then
         filename =
-            "Tycoon_Purchase_Automator_V1_7_5_3_AutoSave_" ..
+            "Tycoon_Purchase_Automator_V1_7_5_4_AutoSave_" ..
             reason ..
             "_" ..
             os.date("%Y%m%d_%H%M%S") ..
@@ -4004,7 +4146,7 @@ installAutoSaveWatchers()
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_7_5_3_" ..
+        "Tycoon_Purchase_Automator_V1_7_5_4_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
     local saved = false
@@ -4155,7 +4297,7 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
-UI.Status.Text = "AUTO V1.7.5.3 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "AUTO V1.7.5.4 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
 safeCall("UI_INITIAL_REFRESH", function()
     refreshUI()
 end)
