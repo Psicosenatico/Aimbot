@@ -1,433 +1,936 @@
+--[[
+    PSICOSENATICO • TYCOON PURCHASE DIAGNOSTIC • V1.0
+    SOMENTE DIAGNÓSTICO / OBSERVAÇÃO CLIENT-SIDE
 
-Script Atualizado: Tycoon Economy Analyzer v1.1
-Copiar
--- Tycoon Economy Analyzer v1.1
--- Adicionado: Botão de exportação para .txt
+    Objetivo:
+    - Observar possíveis botões/objetos de compra em Tycoons.
+    - Registrar mudanças de dinheiro/valores visíveis ao cliente.
+    - Registrar objetos adicionados/removidos próximos a interações.
+    - Capturar Attributes e ValueObjects úteis (Price, Cost, Owner, etc.).
+    - NÃO efetua compras.
+    - NÃO dispara RemoteEvents/RemoteFunctions.
+    - NÃO altera valores do jogo.
+    - Exporta relatório quando writefile/setclipboard estiver disponível.
+
+    Compatibilidade:
+    - Roblox/Luau
+    - Interface arrastável com mouse e touch
+    - ScrollingFrame com Canvas automático
+]]
 
 local Players = game:GetService("Players")
-local Player = Players.LocalPlayer
 local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
 
--- Configurações do Menu
-local MenuConfig = {
-    Title = "Tycoon Economy Analyzer",
-    Width = 300,
-    Height = 400,
-    Color = Color3.fromRGB(40, 40, 40),
-    TitleColor = Color3.fromRGB(0, 255, 150),
-    TextColor = Color3.fromRGB(255, 255, 255),
-    ButtonColor = Color3.fromRGB(60, 60, 60),
-    ButtonHoverColor = Color3.fromRGB(80, 80, 80)
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+    warn("[Tycoon Diagnostic] LocalPlayer indisponível.")
+    return
+end
+
+local CONFIG = {
+    VERSION = "1.0",
+    GUI_NAME = "PsicoTycoonPurchaseDiagnosticV1",
+    TITLE = "TYCOON PURCHASE DIAGNOSTIC",
+    MAX_EVENTS = 800,
+    SAMPLE_INTERVAL = 0.75,
+    RESCAN_INTERVAL = 5,
+    MAX_SCAN_DESCENDANTS = 12000,
+    MAX_VALUE_WATCHERS = 300,
+    MAX_INTERACTION_WATCHERS = 300,
+    NEARBY_WINDOW_SECONDS = 3.0,
+
+    POSSIBLE_PRICE_KEYS = {
+        "price", "cost", "cash", "money", "amount", "value", "purchaseprice",
+        "buyprice", "upgradeprice", "requiredcash", "requiredmoney"
+    },
+
+    POSSIBLE_OWNER_KEYS = {
+        "owner", "ownername", "ownerid", "userid", "player", "claimedby"
+    },
+
+    POSSIBLE_TYCOON_WORDS = {
+        "tycoon", "purchase", "buy", "button", "upgrade", "dropper", "collector",
+        "conveyor", "machine", "unlock", "rebirth", "cash", "money"
+    }
 }
 
--- Variáveis globais para rastreamento de dados
-local AnalysisData = {}
-local IsUpdating = false
+local State = {
+    StartedAtUnix = os.time(),
+    StartedAtClock = os.clock(),
+    Events = {},
+    Counters = {
+        Scans = 0,
+        InteractionCandidates = 0,
+        ValueCandidates = 0,
+        Added = 0,
+        Removed = 0,
+        ValueChanges = 0,
+        PromptTriggers = 0,
+        Clicks = 0,
+    },
+    Connections = {},
+    WatchedInstances = setmetatable({}, {__mode = "k"}),
+    WatchedValues = setmetatable({}, {__mode = "k"}),
+    LastInteraction = nil,
+    LastMoneySnapshot = {},
+    Running = true,
+}
 
--- Função para registrar um dado
-function RecordData(label, value)
-    table.insert(AnalysisData, {
+local GUI = {}
+local dragConnection = nil
+
+local function safeToString(v)
+    local ok, result = pcall(function()
+        if typeof(v) == "Instance" then
+            return v:GetFullName()
+        end
+        return tostring(v)
+    end)
+    return ok and result or "<unprintable>"
+end
+
+local function nowStamp()
+    return os.date("%H:%M:%S")
+end
+
+local function elapsed()
+    return math.floor((os.clock() - State.StartedAtClock) * 1000) / 1000
+end
+
+local function normalize(s)
+    return string.lower(tostring(s or "")):gsub("[%s_%-%./]", "")
+end
+
+local function containsAnyWord(text, words)
+    local n = normalize(text)
+    for _, word in ipairs(words) do
+        if string.find(n, normalize(word), 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function tableCloneShallow(t)
+    local out = {}
+    for k, v in pairs(t) do
+        out[k] = v
+    end
+    return out
+end
+
+local function getAttributesSafe(inst)
+    local ok, attrs = pcall(function()
+        return inst:GetAttributes()
+    end)
+    if not ok or type(attrs) ~= "table" then
+        return {}
+    end
+
+    local out = {}
+    for k, v in pairs(attrs) do
+        out[tostring(k)] = safeToString(v)
+    end
+    return out
+end
+
+local function getInterestingAttributes(inst)
+    local attrs = getAttributesSafe(inst)
+    local out = {}
+
+    for k, v in pairs(attrs) do
+        local nk = normalize(k)
+        if containsAnyWord(nk, CONFIG.POSSIBLE_PRICE_KEYS)
+        or containsAnyWord(nk, CONFIG.POSSIBLE_OWNER_KEYS)
+        or containsAnyWord(nk, CONFIG.POSSIBLE_TYCOON_WORDS) then
+            out[k] = v
+        end
+    end
+
+    return out
+end
+
+local function getValueObjectSnapshot(inst)
+    if not inst:IsA("ValueBase") then
+        return nil
+    end
+
+    local ok, val = pcall(function()
+        return inst.Value
+    end)
+
+    if not ok then
+        return nil
+    end
+
+    return {
+        Name = inst.Name,
+        ClassName = inst.ClassName,
+        Path = inst:GetFullName(),
+        Value = safeToString(val),
+    }
+end
+
+local function describeInstance(inst)
+    if not inst or not inst.Parent then
+        return {
+            Name = inst and inst.Name or "<nil>",
+            ClassName = inst and inst.ClassName or "<nil>",
+            Path = "<detached>",
+        }
+    end
+
+    local data = {
+        Name = inst.Name,
+        ClassName = inst.ClassName,
+        Path = inst:GetFullName(),
+        Attributes = getInterestingAttributes(inst),
+    }
+
+    if inst:IsA("BasePart") then
+        data.Position = {
+            X = math.floor(inst.Position.X * 100) / 100,
+            Y = math.floor(inst.Position.Y * 100) / 100,
+            Z = math.floor(inst.Position.Z * 100) / 100,
+        }
+        data.Size = {
+            X = math.floor(inst.Size.X * 100) / 100,
+            Y = math.floor(inst.Size.Y * 100) / 100,
+            Z = math.floor(inst.Size.Z * 100) / 100,
+        }
+    elseif inst:IsA("ProximityPrompt") then
+        data.ActionText = inst.ActionText
+        data.ObjectText = inst.ObjectText
+        data.HoldDuration = inst.HoldDuration
+        data.MaxActivationDistance = inst.MaxActivationDistance
+        data.Enabled = inst.Enabled
+    elseif inst:IsA("ClickDetector") then
+        data.MaxActivationDistance = inst.MaxActivationDistance
+    elseif inst:IsA("ValueBase") then
+        local snap = getValueObjectSnapshot(inst)
+        if snap then
+            data.Value = snap.Value
+        end
+    end
+
+    return data
+end
+
+local function pushEvent(kind, label, details)
+    local event = {
+        Time = nowStamp(),
+        Unix = os.time(),
+        Elapsed = elapsed(),
+        Kind = kind,
         Label = label,
-        Value = value,
-        Timestamp = os.date("%Y-%m-%d %H:%M:%S")
-    })
-    
-    -- Limita o histórico para não travar a memória (últimos 100 registros)
-    if #AnalysisData > 100 then
-        table.remove(AnalysisData, 1)
+        Details = details or {},
+    }
+
+    table.insert(State.Events, event)
+
+    while #State.Events > CONFIG.MAX_EVENTS do
+        table.remove(State.Events, 1)
+    end
+
+    if GUI.LogLabel and GUI.LogLabel.Parent then
+        GUI.LogLabel.Text =
+            ("Eventos: %d  |  Interações: %d  |  Valores: %d")
+            :format(
+                #State.Events,
+                State.Counters.InteractionCandidates,
+                State.Counters.ValueChanges
+            )
     end
 end
 
--- Função para criar o menu principal
-function CreateMenu()
-    local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "TycoonAnalyzer"
-    ScreenGui.ResetOnSpawn = false
-    ScreenGui.ZIndexBehavior = ZIndexBehavior.Global
-    ScreenGui.Parent = Player:WaitForChild("PlayerGui")
-    
-    local Frame = Instance.new("Frame")
-    Frame.Name = "MainFrame"
-    Frame.Size = UDim2.new(0, MenuConfig.Width, 0, MenuConfig.Height)
-    Frame.Position = UDim2.new(0.5, -MenuConfig.Width/2, 0.5, -MenuConfig.Height/2)
-    Frame.BackgroundColor3 = MenuConfig.Color
-    Frame.BorderSizePixel = 0
-    Frame.Parent = ScreenGui
-    
-    -- Cabeçalho
-    local Header = Instance.new("Frame")
-    Header.Name = "Header"
-    Header.Size = UDim2.new(1, 0, 0, 30)
-    Header.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-    Header.BorderSizePixel = 0
-    Header.Parent = Frame
-    
-    local TitleText = Instance.new("TextLabel")
-    TitleText.Name = "Title"
-    TitleText.Size = UDim2.new(1, -20, 1, 0)
-    TitleText.Position = UDim2.new(0, 10, 0, 0)
-    TitleText.BackgroundTransparency = 1
-    TitleText.Text = MenuConfig.Title
-    TitleText.TextColor3 = MenuConfig.TitleColor
-    TitleText.Font = Enum.Font.GothamBold
-    TitleText.TextSize = 14
-    TitleText.Parent = Header
-    
-    -- Botão de fechar
-    local CloseButton = Instance.new("TextButton")
-    CloseButton.Name = "CloseButton"
-    CloseButton.Size = UDim2.new(0, 30, 0, 30)
-    CloseButton.Position = UDim2.new(1, -30, 0, 0)
-    CloseButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
-    CloseButton.Text = "X"
-    CloseButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    CloseButton.Font = Enum.Font.SourceSans
-    CloseButton.TextSize = 14
-    CloseButton.Parent = Header
-    
-    CloseButton.MouseButton1Click:Connect(function()
-        Frame:Destroy()
+local function safeConnect(signal, callback)
+    local ok, connection = pcall(function()
+        return signal:Connect(callback)
     end)
-    
-    -- Área de conteúdo (ScrollingFrame)
-    local ContentFrame = Instance.new("ScrollingFrame")
-    ContentFrame.Name = "ContentFrame"
-    ContentFrame.Size = UDim2.new(1, -10, 0.7, -80) -- Deixa espaço para o botão
-    ContentFrame.Position = UDim2.new(0, 5, 0, 35)
-    ContentFrame.BackgroundTransparency = 1
-    ContentFrame.BorderSizePixel = 0
-    ContentFrame.ScrollBarThickness = 5
-    ContentFrame.Parent = Frame
-    
-    local UIListLayout = Instance.new("UIListLayout")
-    UIListLayout.Name = "UIListLayout"
-    UIListLayout.Padding = UDim.new(0, 5)
-    UIListLayout.HorizontalAlignment = HorizontalAlignment.Center
-    UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    UIListLayout.Parent = ContentFrame
-    
-    -- Botão de Exportar
-    local ExportButton = Instance.new("TextButton")
-    ExportButton.Name = "ExportButton"
-    ExportButton.Size = UDim2.new(0.9, 0, 0, 30)
-    ExportButton.Position = UDim2.new(0.05, 0, 0.75, 40) -- Posicionado abaixo do conteúdo
-    ExportButton.BackgroundColor3 = MenuConfig.ButtonColor
-    ExportButton.Text = "⬇ Baixar Dados (.txt)"
-    ExportButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    ExportButton.Font = Enum.Font.GothamBold
-    ExportButton.TextSize = 12
-    ExportButton.BorderSizePixel = 0
-    ExportButton.Parent = Frame
-    
-    -- Lógica de Hover para o botão de exportar
-    ExportButton.MouseEnter:Connect(function()
-        ExportButton.BackgroundColor3 = MenuConfig.ButtonHoverColor
-    end)
-    
-    ExportButton.MouseLeave:Connect(function()
-        ExportButton.BackgroundColor3 = MenuConfig.ButtonColor
-    end)
-    
-    -- Lógica de Exportação
-    ExportButton.MouseButton1Click:Connect(function()
-        ExportToTxt()
-    end)
-    
-    -- Adiciona itens de análise iniciais
-    AddAnalysisItem(ContentFrame, "💰 Dinheiro Atual", "Aguardando dados...")
-    AddAnalysisItem(ContentFrame, "📈 Lucro por Segundo", "Aguardando dados...")
-    AddAnalysisItem(ContentFrame, "🔄 Taxa de Retorno", "Aguardando dados...")
-    AddAnalysisItem(ContentFrame, "🏭 Máquinas Ativas", "Aguardando dados...")
-    
-    -- Sistema de arrastar
-    local dragging = false
-    local dragInput = nil
-    local dragStart = nil
-    local startPos = nil
-    
-    local function update(input)
-        local delta = input.Position - dragStart
-        Frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    if ok and connection then
+        table.insert(State.Connections, connection)
+        return connection
     end
-    
-    Frame.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
-            dragStart = input.Position
-            startPos = Frame.Position
-            
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
-    end)
-    
-    Frame.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement then
-            dragInput = input
-        end
-    end)
-    
-    UserInputService.InputChanged:Connect(function(input)
-        if input == dragInput and dragging then
-            update(input)
-        end
-    end)
-    
-    return ScreenGui, Frame, ContentFrame
+    return nil
 end
 
--- Função para adicionar item de análise na UI
-function AddAnalysisItem(parent, title, value)
-    local ItemFrame = Instance.new("Frame")
-    ItemFrame.Name = title
-    ItemFrame.Size = UDim2.new(0.9, 0, 0, 30)
-    ItemFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-    ItemFrame.BorderSizePixel = 0
-    ItemFrame.Parent = parent
-    
-    local TitleLabel = Instance.new("TextLabel")
-    TitleLabel.Name = "Title"
-    TitleLabel.Size = UDim2.new(0.6, 0, 1, 0)
-    TitleLabel.Position = UDim2.new(0, 5, 0, 0)
-    TitleLabel.BackgroundTransparency = 1
-    TitleLabel.Text = title
-    TitleLabel.TextColor3 = MenuConfig.TextColor
-    TitleLabel.Font = Enum.Font.Gotham
-    TitleLabel.TextSize = 12
-    TitleLabel.Parent = ItemFrame
-    
-    local ValueLabel = Instance.new("TextLabel")
-    ValueLabel.Name = "Value"
-    ValueLabel.Size = UDim2.new(0.4, -5, 1, 0)
-    ValueLabel.Position = UDim2.new(0.6, 5, 0, 0)
-    ValueLabel.BackgroundTransparency = 1
-    ValueLabel.Text = value
-    ValueLabel.TextColor3 = Color3.fromRGB(0, 255, 100)
-    ValueLabel.Font = Enum.Font.GothamBold
-    ValueLabel.TextSize = 12
-    ValueLabel.TextXAlignment = Enum.TextXAlignment.Right
-    ValueLabel.Parent = ItemFrame
-    
-    return ItemFrame, ValueLabel
+local function disconnectAll()
+    for _, c in ipairs(State.Connections) do
+        pcall(function()
+            c:Disconnect()
+        end)
+    end
+    table.clear(State.Connections)
+
+    if dragConnection then
+        pcall(function()
+            dragConnection:Disconnect()
+        end)
+        dragConnection = nil
+    end
 end
 
--- Função para atualizar a UI com novos dados
-function UpdateUIItem(title, newValue)
-    local PlayerGui = Player:WaitForChild("PlayerGui")
-    local Menu = PlayerGui:FindFirstChild("TycoonAnalyzer")
-    
-    if Menu and Menu:FindFirstChild("MainFrame") then
-        local ContentFrame = Menu.MainFrame:FindFirstChild("ContentFrame")
-        if ContentFrame then
-            local itemFrame = ContentFrame:FindFirstChild(title)
-            if itemFrame then
-                local valueLabel = itemFrame:FindFirstChild("Value")
-                if valueLabel then
-                    valueLabel.Text = newValue
-                    -- Registra no histórico para exportação
-                    RecordData(title, newValue)
+local function looksTycoonRelated(inst)
+    if containsAnyWord(inst.Name, CONFIG.POSSIBLE_TYCOON_WORDS) then
+        return true
+    end
+
+    local parent = inst.Parent
+    local depth = 0
+    while parent and depth < 4 do
+        if containsAnyWord(parent.Name, CONFIG.POSSIBLE_TYCOON_WORDS) then
+            return true
+        end
+        parent = parent.Parent
+        depth += 1
+    end
+
+    local attrs = getInterestingAttributes(inst)
+    return next(attrs) ~= nil
+end
+
+local function findNearbyPriceData(inst)
+    local result = {}
+    local seen = {}
+    local root = inst.Parent
+
+    for depth = 1, 3 do
+        if not root then break end
+
+        for _, child in ipairs(root:GetChildren()) do
+            if child:IsA("ValueBase") then
+                local n = normalize(child.Name)
+                if containsAnyWord(n, CONFIG.POSSIBLE_PRICE_KEYS) and not seen[child] then
+                    seen[child] = true
+                    table.insert(result, getValueObjectSnapshot(child))
                 end
             end
+
+            local attrs = getInterestingAttributes(child)
+            if next(attrs) ~= nil then
+                table.insert(result, {
+                    Name = child.Name,
+                    ClassName = child.ClassName,
+                    Path = child:GetFullName(),
+                    Attributes = attrs,
+                })
+            end
         end
+
+        root = root.Parent
     end
+
+    return result
 end
 
--- Função para Exportar para TXT
-function ExportToTxt()
-    local PlayerGui = Player:WaitForChild("PlayerGui")
-    local Menu = PlayerGui:FindFirstChild("TycoonAnalyzer")
-    
-    if not Menu then return end
-    
-    -- Gera o conteúdo do arquivo
-    local exportContent = "=== Tycoon Economy Analysis Report ===\n"
-    exportContent = exportContent .. "Gerado em: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n"
-    exportContent = exportContent .. "=====================================\n\n"
-    
-    if #AnalysisData == 0 then
-        exportContent = exportContent .. "Nenhum dado analisado ainda.\n"
-    else
-        for i, data in ipairs(AnalysisData) do
-            exportContent = exportContent .. "[" .. data.Timestamp .. "] " .. data.Label .. ": " .. tostring(data.Value) .. "\n"
-        end
+local function markInteraction(kind, inst)
+    State.LastInteraction = {
+        TimeClock = os.clock(),
+        Kind = kind,
+        Instance = inst,
+        Description = describeInstance(inst),
+        NearbyPriceData = findNearbyPriceData(inst),
+    }
+
+    if kind == "ProximityPrompt" then
+        State.Counters.PromptTriggers += 1
+    elseif kind == "ClickDetector" then
+        State.Counters.Clicks += 1
     end
-    
-    exportContent = exportContent .. "\n=== Fim do Relatório ===\n"
-    
-    -- Usa a API do navegador para baixar o arquivo
-    -- Isso funciona porque o Roblox WebView suporta Blob URLs
-    local Success, Err = pcall(function()
-        -- Cria um blob com os dados
-        local Blob = game:GetService("HttpService"):JSONEncode({
-            Content = exportContent,
-            Filename = "Tycoon_Analysis_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
-        })
-        
-        -- Tenta usar o método moderno de download via JS
-        -- Nota: A forma mais confiável no Roblox é usar o protocolo 'rbxasset://' ou 
-        -- injeção de JS, mas para simplificar, vamos usar um truque com o navegador padrão
-        
-        -- Método alternativo: Criar um arquivo temporário e abrir
-        -- Mas o método mais direto é usar o serviço de download do cliente se disponível
-        
-        -- Vamos usar o truque do "data URI"
-        local DataUri = "data:text/plain;charset=utf-8," .. game:GetService("HttpService"):JSONEncode({
-            Content = exportContent
-        }) -- Isso não é ideal para texto puro
-        
-        -- Método mais robusto para Roblox:
-        -- Usar o serviço de download do navegador se o cliente suportar
-        -- Para garantir compatibilidade universal, vamos usar o método de "Copiar para Clipboard" 
-        -- como fallback ou tentar o download direto se o navegador do Roblox suportar
-        
-        -- Abordagem simples e eficaz: Criar um arquivo e usar o método de download do navegador
-        -- Se o navegador do Roblox suportar blob: URLs
-        
-        -- Vamos usar o método mais universal: 
-        -- 1. Copiar para clipboard
-        -- 2. Tentar download direto
-        
-        -- Copiar para clipboard
-        game:GetService("VirtualInputManager"):WriteText(exportContent)
-        
-        -- Mostrar mensagem ao usuário
-        local Success, Err = pcall(function()
-            local ScreenGui = Menu
-            local MainFrame = ScreenGui:FindFirstChild("MainFrame")
-            if MainFrame then
-                local Notification = Instance.new("Frame")
-                Notification.Size = UDim2.new(0, 200, 0, 30)
-                Notification.Position = UDim2.new(0.5, -100, 0, -50)
-                Notification.BackgroundColor3 = Color3.fromRGB(0, 100, 0)
-                Notification.BorderSizePixel = 0
-                Notification.Parent = MainFrame
-                
-                local TextLabel = Instance.new("TextLabel")
-                TextLabel.Size = UDim2.new(1, 0, 1, 0)
-                TextLabel.BackgroundTransparency = 1
-                TextLabel.Text = "Dados copiados! Cole em um arquivo .txt"
-                TextLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-                TextLabel.Font = Enum.Font.GothamBold
-                TextLabel.TextSize = 12
-                TextLabel.Parent = Notification
-                
-                task.wait(3)
-                Notification:Destroy()
+
+    pushEvent("INTERACTION", kind, {
+        Target = describeInstance(inst),
+        NearbyPriceData = State.LastInteraction.NearbyPriceData,
+    })
+end
+
+local function watchInteraction(inst)
+    if State.WatchedInstances[inst] then
+        return
+    end
+
+    if State.Counters.InteractionCandidates >= CONFIG.MAX_INTERACTION_WATCHERS then
+        return
+    end
+
+    if not looksTycoonRelated(inst) then
+        return
+    end
+
+    if inst:IsA("ProximityPrompt") then
+        State.WatchedInstances[inst] = true
+        State.Counters.InteractionCandidates += 1
+
+        safeConnect(inst.Triggered, function(player)
+            if player == LocalPlayer then
+                markInteraction("ProximityPrompt", inst)
             end
         end)
-        
-        -- Tenta forçar o download via navegador (funciona em clientes modernos)
-        local function triggerDownload()
-            local url = "data:text/plain;charset=utf-8," .. game:GetService("HttpService"):URLEncode(exportContent)
-            -- Isso requer que o cliente suporte download via URL
-            -- Vamos usar o método mais confiável: Injeção de JS básica
-        end
-        
-        -- Método mais confiável para Roblox:
-        -- Usar o serviço de download do navegador se disponível
-        -- Para maior compatibilidade, vamos usar o método de clipboard + instrução
-        
-        -- Fallback: Se o download direto falhar, copiar para clipboard
-        game:GetService("VirtualInputManager"):WriteText(exportContent)
-        
-        -- Exibir notificação
-        local MainFrame = Menu:FindFirstChild("MainFrame")
-        if MainFrame then
-            local Success, Err = pcall(function()
-                local Notif = Instance.new("Frame")
-                Notif.Name = "Notification"
-                Notif.Size = UDim2.new(0, 250, 0, 40)
-                Notif.Position = UDim2.new(0.5, -125, 0, -60)
-                Notif.BackgroundColor3 = Color3.fromRGB(0, 100, 0)
-                Notif.BorderSizePixel = 0
-                Notif.Parent = MainFrame
-                
-                local Text = Instance.new("TextLabel")
-                Text.Size = UDim2.new(1, 0, 1, 0)
-                Text.BackgroundTransparency = 1
-                Text.Text = "✅ Dados exportados! Cole em um arquivo .txt"
-                Text.TextColor3 = Color3.fromRGB(255, 255, 255)
-                Text.Font = Enum.Font.GothamBold
-                Text.TextSize = 12
-                Text.Parent = Notif
-                
-                task.wait(3)
-                Notif:Destroy()
-            end)
-        end
-    end)
-    
-    if not Success then
-        warn("Erro ao exportar:", Err)
+
+        pushEvent("DISCOVERY", "ProximityPrompt encontrado", describeInstance(inst))
+
+    elseif inst:IsA("ClickDetector") then
+        State.WatchedInstances[inst] = true
+        State.Counters.InteractionCandidates += 1
+
+        -- MouseClick é observado; não é acionado pelo script.
+        safeConnect(inst.MouseClick, function(player)
+            if player == LocalPlayer then
+                markInteraction("ClickDetector", inst)
+            end
+        end)
+
+        pushEvent("DISCOVERY", "ClickDetector encontrado", describeInstance(inst))
     end
 end
 
--- Função principal de atualização
-function UpdateData()
-    -- Exemplo de coleta de dados (substitua pela lógica real do seu jogo)
-    local Money = 0
-    local ProfitPerSec = 0
-    local Machines = 0
-    
-    -- Aqui você adicionaria a lógica real para ler os valores do Tycoon
-    -- Por exemplo:
-    -- Money = game.Players.LocalPlayer.Leaderstats.Money.Value
-    -- ProfitPerSec = CalculatedValue
-    -- Machines = CountActiveMachines()
-    
-    -- Simulação para demonstração
-    Money = math.random(1000, 10000)
-    ProfitPerSec = math.random(10, 100)
-    Machines = math.random(1, 10)
-    
-    -- Atualiza a UI
-    UpdateUIItem("💰 Dinheiro Atual", "R$ " .. Money)
-    UpdateUIItem("📈 Lucro por Segundo", "R$ " .. ProfitPerSec .. "/s")
-    UpdateUIItem("🔄 Taxa de Retorno", "12.5%")
-    UpdateUIItem("🏭 Máquinas Ativas", Machines)
-    
-    -- Registra dados brutos para exportação
-    RecordData("Money", Money)
-    RecordData("ProfitPerSec", ProfitPerSec)
-    RecordData("Machines", Machines)
+local function isInterestingValue(inst)
+    if not inst:IsA("ValueBase") then
+        return false
+    end
+
+    local n = normalize(inst.Name)
+
+    if containsAnyWord(n, CONFIG.POSSIBLE_PRICE_KEYS)
+    or containsAnyWord(n, CONFIG.POSSIBLE_OWNER_KEYS)
+    or containsAnyWord(n, CONFIG.POSSIBLE_TYCOON_WORDS) then
+        return true
+    end
+
+    return looksTycoonRelated(inst)
+end
+
+local function watchValue(inst)
+    if State.WatchedValues[inst] then
+        return
+    end
+
+    if State.Counters.ValueCandidates >= CONFIG.MAX_VALUE_WATCHERS then
+        return
+    end
+
+    if not isInterestingValue(inst) then
+        return
+    end
+
+    State.WatchedValues[inst] = true
+    State.Counters.ValueCandidates += 1
+
+    local oldValue
+    pcall(function()
+        oldValue = inst.Value
+    end)
+
+    safeConnect(inst.Changed, function(newValue)
+        State.Counters.ValueChanges += 1
+
+        local previous = oldValue
+        oldValue = newValue
+
+        local details = {
+            Target = describeInstance(inst),
+            OldValue = safeToString(previous),
+            NewValue = safeToString(newValue),
+        }
+
+        if State.LastInteraction
+        and (os.clock() - State.LastInteraction.TimeClock) <= CONFIG.NEARBY_WINDOW_SECONDS then
+            details.RecentInteraction = tableCloneShallow(State.LastInteraction)
+        end
+
+        pushEvent("VALUE_CHANGE", inst.Name, details)
+    end)
+end
+
+local function scanRoot(root)
+    if not root then
+        return
+    end
+
+    State.Counters.Scans += 1
+    local descendants = root:GetDescendants()
+    local limit = math.min(#descendants, CONFIG.MAX_SCAN_DESCENDANTS)
+
+    for i = 1, limit do
+        local inst = descendants[i]
+
+        if inst:IsA("ProximityPrompt") or inst:IsA("ClickDetector") then
+            watchInteraction(inst)
+        elseif inst:IsA("ValueBase") then
+            watchValue(inst)
+        end
+    end
+end
+
+local function collectMoneyLikeValues()
+    local found = {}
+
+    local containers = {
+        LocalPlayer:FindFirstChild("leaderstats"),
+        LocalPlayer:FindFirstChild("PlayerGui"),
+        LocalPlayer:FindFirstChild("Backpack"),
+    }
+
+    for _, container in ipairs(containers) do
+        if container then
+            for _, inst in ipairs(container:GetDescendants()) do
+                if inst:IsA("ValueBase") then
+                    local n = normalize(inst.Name)
+                    if containsAnyWord(n, {"money", "cash", "coin", "coins", "currency", "saldo"}) then
+                        local ok, val = pcall(function()
+                            return inst.Value
+                        end)
+                        if ok then
+                            found[inst:GetFullName()] = {
+                                Instance = inst,
+                                Value = val,
+                            }
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return found
+end
+
+local function sampleMoney()
+    local current = collectMoneyLikeValues()
+
+    for path, info in pairs(current) do
+        local previous = State.LastMoneySnapshot[path]
+        if previous ~= nil and previous ~= info.Value then
+            local details = {
+                Path = path,
+                OldValue = safeToString(previous),
+                NewValue = safeToString(info.Value),
+            }
+
+            if State.LastInteraction
+            and (os.clock() - State.LastInteraction.TimeClock) <= CONFIG.NEARBY_WINDOW_SECONDS then
+                details.RecentInteraction = tableCloneShallow(State.LastInteraction)
+            end
+
+            pushEvent("MONEY_CHANGE", "Mudança de moeda", details)
+        end
+
+        State.LastMoneySnapshot[path] = info.Value
+    end
+end
+
+local function snapshotCandidate(inst, reason)
+    if not inst then return end
+
+    local details = {
+        Reason = reason,
+        Instance = describeInstance(inst),
+    }
+
+    if State.LastInteraction
+    and (os.clock() - State.LastInteraction.TimeClock) <= CONFIG.NEARBY_WINDOW_SECONDS then
+        details.RecentInteraction = tableCloneShallow(State.LastInteraction)
+    end
+
+    pushEvent("OBJECT_" .. string.upper(reason), inst.Name, details)
+end
+
+local function buildReport()
+    local payload = {
+        Report = "Tycoon Purchase Diagnostic",
+        Version = CONFIG.VERSION,
+        PlaceId = game.PlaceId,
+        JobId = game.JobId,
+        StartedAtUnix = State.StartedAtUnix,
+        FinishedAtUnix = os.time(),
+        Counters = State.Counters,
+        Events = State.Events,
+    }
+
+    local ok, encoded = pcall(function()
+        return HttpService:JSONEncode(payload)
+    end)
+
+    if ok then
+        return encoded
+    end
+
+    return "Falha ao serializar relatório: " .. tostring(encoded)
+end
+
+local function exportReport()
+    local content = buildReport()
+    local filename = "Tycoon_Purchase_Diagnostic_" .. os.date("%Y%m%d_%H%M%S") .. ".txt"
+
+    local wroteFile = false
+    local copied = false
+    local writeErr = nil
+
+    if typeof(writefile) == "function" then
+        local ok, err = pcall(function()
+            writefile(filename, content)
+        end)
+        wroteFile = ok
+        writeErr = err
+    end
+
+    if typeof(setclipboard) == "function" then
+        copied = pcall(function()
+            setclipboard(content)
+        end)
+    elseif typeof(toclipboard) == "function" then
+        copied = pcall(function()
+            toclipboard(content)
+        end)
+    end
+
+    if wroteFile then
+        return true, "Arquivo salvo: " .. filename
+    elseif copied then
+        return true, "Relatório copiado para a área de transferência."
+    else
+        return false,
+            "O ambiente atual não oferece writefile/setclipboard. " ..
+            "Os dados continuam disponíveis no painel e em memória."
+            .. (writeErr and (" | Erro: " .. tostring(writeErr)) or "")
+    end
+end
+
+local function createRounded(parent, radius)
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, radius)
+    corner.Parent = parent
+end
+
+local function createButton(parent, text)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 34)
+    btn.BackgroundColor3 = Color3.fromRGB(34, 43, 58)
+    btn.BorderSizePixel = 0
+    btn.TextColor3 = Color3.fromRGB(240, 244, 255)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.Text = text
+    btn.AutoButtonColor = true
+    btn.Parent = parent
+    createRounded(btn, 8)
+    return btn
+end
+
+local function makeDraggable(frame, handle)
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+    local activeInput = nil
+
+    safeConnect(handle.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            activeInput = input
+
+            safeConnect(input.Changed, function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                    activeInput = nil
+                end
+            end)
+        end
+    end)
+
+    safeConnect(UserInputService.InputChanged, function(input)
+        if not dragging or not dragStart or not startPos then
+            return
+        end
+
+        local validMouse =
+            activeInput
+            and activeInput.UserInputType == Enum.UserInputType.MouseButton1
+            and input.UserInputType == Enum.UserInputType.MouseMovement
+
+        local validTouch =
+            activeInput
+            and activeInput.UserInputType == Enum.UserInputType.Touch
+            and input == activeInput
+
+        if validMouse or validTouch then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+local function createGui()
+    local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+    local old = playerGui:FindFirstChild(CONFIG.GUI_NAME)
+    if old then
+        old:Destroy()
+    end
+
+    local screen = Instance.new("ScreenGui")
+    screen.Name = CONFIG.GUI_NAME
+    screen.ResetOnSpawn = false
+    screen.IgnoreGuiInset = false
+    screen.Parent = playerGui
+
+    local main = Instance.new("Frame")
+    main.Name = "Main"
+    main.AnchorPoint = Vector2.new(0.5, 0.5)
+    main.Position = UDim2.fromScale(0.5, 0.5)
+    main.Size = UDim2.new(0, 340, 0, 370)
+    main.BackgroundColor3 = Color3.fromRGB(19, 23, 31)
+    main.BorderSizePixel = 0
+    main.Parent = screen
+    createRounded(main, 12)
+
+    local sizeConstraint = Instance.new("UISizeConstraint")
+    sizeConstraint.MinSize = Vector2.new(280, 260)
+    sizeConstraint.MaxSize = Vector2.new(420, 520)
+    sizeConstraint.Parent = main
+
+    local header = Instance.new("Frame")
+    header.Size = UDim2.new(1, 0, 0, 48)
+    header.BackgroundColor3 = Color3.fromRGB(25, 31, 43)
+    header.BorderSizePixel = 0
+    header.Parent = main
+    createRounded(header, 12)
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -86, 0, 24)
+    title.Position = UDim2.new(0, 12, 0, 5)
+    title.BackgroundTransparency = 1
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = CONFIG.TITLE
+    title.TextColor3 = Color3.fromRGB(127, 255, 202)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 13
+    title.Parent = header
+
+    local version = Instance.new("TextLabel")
+    version.Size = UDim2.new(1, -86, 0, 16)
+    version.Position = UDim2.new(0, 12, 0, 27)
+    version.BackgroundTransparency = 1
+    version.TextXAlignment = Enum.TextXAlignment.Left
+    version.Text = "V" .. CONFIG.VERSION .. " • somente diagnóstico"
+    version.TextColor3 = Color3.fromRGB(155, 164, 180)
+    version.Font = Enum.Font.Gotham
+    version.TextSize = 10
+    version.Parent = header
+
+    local close = Instance.new("TextButton")
+    close.Size = UDim2.new(0, 34, 0, 34)
+    close.Position = UDim2.new(1, -40, 0, 7)
+    close.BackgroundColor3 = Color3.fromRGB(72, 38, 43)
+    close.Text = "X"
+    close.TextColor3 = Color3.new(1, 1, 1)
+    close.Font = Enum.Font.GothamBold
+    close.TextSize = 13
+    close.BorderSizePixel = 0
+    close.Parent = header
+    createRounded(close, 8)
+
+    local body = Instance.new("Frame")
+    body.Size = UDim2.new(1, -16, 1, -64)
+    body.Position = UDim2.new(0, 8, 0, 56)
+    body.BackgroundTransparency = 1
+    body.Parent = main
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 7)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = body
+
+    local status = Instance.new("TextLabel")
+    status.Size = UDim2.new(1, 0, 0, 34)
+    status.BackgroundColor3 = Color3.fromRGB(28, 35, 48)
+    status.BorderSizePixel = 0
+    status.TextColor3 = Color3.fromRGB(232, 236, 244)
+    status.Font = Enum.Font.Gotham
+    status.TextSize = 11
+    status.TextWrapped = true
+    status.Text = "Monitorando objetos e valores visíveis ao cliente..."
+    status.Parent = body
+    createRounded(status, 8)
+
+    local counters = Instance.new("TextLabel")
+    counters.Size = UDim2.new(1, 0, 0, 28)
+    counters.BackgroundTransparency = 1
+    counters.TextColor3 = Color3.fromRGB(169, 180, 198)
+    counters.Font = Enum.Font.Gotham
+    counters.TextSize = 10
+    counters.TextXAlignment = Enum.TextXAlignment.Left
+    counters.Text = "Eventos: 0  |  Interações: 0  |  Valores: 0"
+    counters.Parent = body
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, 0, 1, -150)
+    scroll.BackgroundColor3 = Color3.fromRGB(15, 19, 26)
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.CanvasSize = UDim2.new()
+    scroll.Parent = body
+    createRounded(scroll, 8)
+
+    local scrollPad = Instance.new("UIPadding")
+    scrollPad.PaddingTop = UDim.new(0, 6)
+    scrollPad.PaddingBottom = UDim.new(0, 6)
+    scrollPad.PaddingLeft = UDim.new(0, 7)
+    scrollPad.PaddingRight = UDim.new(0, 7)
+    scrollPad.Parent = scroll
+
+    local scrollLayout = Instance.new("UIListLayout")
+    scrollLayout.Padding = UDim.new(0, 4)
+    scrollLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    scrollLayout.Parent = scroll
+
+    local live = Instance.new("TextLabel")
+    live.Size = UDim2.new(1, 0, 0, 120)
+    live.AutomaticSize = Enum.AutomaticSize.Y
+    live.BackgroundTransparency = 1
+    live.TextColor3 = Color3.fromRGB(216, 222, 232)
+    live.TextXAlignment = Enum.TextXAlignment.Left
+    live.TextYAlignment = Enum.TextYAlignment.Top
+    live.TextWrapped = true
+    live.Font = Enum.Font.Code
+    live.TextSize = 10
+    live.Text = "Aguardando eventos..."
+    live.Parent = scroll
+
+    local export = createButton(body, "Exportar relatório .txt")
+    export.LayoutOrder = 20
+
+    GUI.Screen = screen
+    GUI.Main = main
+    GUI.Header = header
+    GUI.Status = status
+    GUI.LogLabel = counters
+    GUI.Live = live
+    GUI.Export = export
+
+    makeDraggable(main, header)
+
+    safeConnect(export.MouseButton1Click, function()
+        local ok, message = exportReport()
+        status.Text = message
+        pushEvent("SYSTEM", ok and "Exportação concluída" or "Exportação indisponível", {
+            Message = message
+        })
+    end)
+
+    safeConnect(close.MouseButton1Click, function()
+        State.Running = false
+        disconnectAll()
+        if screen then
+            screen:Destroy()
+        end
+    end)
+end
+
+local function refreshLiveUi()
+    if not GUI.Live or not GUI.Live.Parent then
+        return
+    end
+
+    local lines = {}
+    local startIndex = math.max(1, #State.Events - 14)
+
+    for i = #State.Events, startIndex, -1 do
+        local e = State.Events[i]
+        table.insert(lines,
+            ("[%s] %s • %s"):format(
+                e.Time or "--:--:--",
+                e.Kind or "?",
+                e.Label or "?"
+            )
+        )
+    end
+
+    if #lines == 0 then
+        GUI.Live.Text = "Aguardando eventos..."
+    else
+        GUI.Live.Text = table.concat(lines, "\n")
+    end
+end
+
+local function installWorldListeners()
+    safeConnect(workspace.DescendantAdded, function(inst)
+        State.Counters.Added += 1
+
+        task.defer(function()
+            if not State.Running or not inst or not inst.Parent then
+                return
+            end
+
+            if inst:IsA("ProximityPrompt") or inst:IsA("ClickDetector") then
+                watchInteraction(inst)
+            elseif inst:IsA("ValueBase") then
+                watchValue(inst)
+            end
+
+            if looksTycoonRelated(inst) then
+                snapshotCandidate(inst, "added")
+            elseif State.LastInteraction
+            and (os.clock() - State.LastInteraction.TimeClock) <= CONFIG.NEARBY_WINDOW_SECONDS then
+                snapshotCandidate(inst, "added_after_interaction")
+            end
+        end)
+    end)
+
+    safeConnect(workspace.DescendantRemoving, function(inst)
+        State.Counters.Removed += 1
+
+        if looksTycoonRelated(inst) then
+            snapshotCandidate(inst, "removed")
+        elseif State.LastInteraction
+        and (os.clock() - State.LastInteraction.TimeClock) <= CONFIG.NEARBY_WINDOW_SECONDS then
+            snapshotCandidate(inst, "removed_after_interaction")
+        end
+    end)
+end
+
+local function startLoops()
+    task.spawn(function()
+        while State.Running do
+            sampleMoney()
+            refreshLiveUi()
+            task.wait(CONFIG.SAMPLE_INTERVAL)
+        end
+    end)
+
+    task.spawn(function()
+        while State.Running do
+            scanRoot(workspace)
+            task.wait(CONFIG.RESCAN_INTERVAL)
+        end
+    end)
 end
 
 -- Inicialização
-local ScreenGui, MainFrame, ContentFrame = CreateMenu()
+createGui()
+pushEvent("SYSTEM", "Diagnostic iniciado", {
+    Version = CONFIG.VERSION,
+    PlaceId = game.PlaceId,
+    JobId = game.JobId,
+})
 
--- Atualiza dados periodicamente
-RunService.RenderStepped:Connect(UpdateData)
+scanRoot(workspace)
+sampleMoney()
+installWorldListeners()
+startLoops()
 
--- Adiciona listener para o botão de exportar (já foi adicionado na criação do menu)
-O que foi adicionado:
-Botão "Exportar Dados (.txt)":
-Localizado na parte inferior do menu
-Cor diferente para indicar ação
-Efeito hover para feedback visual
-Sistema de Registro de Dados:
-Função RecordData() que armazena todas as leituras
-Histórico com timestamp
-Limite de 100 registros para performance
-Funcionalidade de Exportação:
-Gera um arquivo .txt formatado
-Inclui data/hora de geração
-Usa clipboard como fallback universal
-Mostra notificação ao usuário
-Persistência de Dados:
-Todos os valores lidos são salvos para exportação
-Análise temporal dos dados
-Formato legível para humanos
-Como usar:
-Cole o script em um LocalScript dentro de StarterPlayerScripts
-O menu aparecerá automaticamente
-Clique em "⬇ Baixar Dados (.txt)" quando quiser exportar
-Os dados serão copiados para o clipboard
-Cole em qualquer editor de texto e salve como .txt
-Personalização:
-Modifique a função UpdateData() para ler dados reais do seu Tycoon
-Adicione mais métricas usando AddAnalysisItem()
-Ajuste as cores no MenuConfig
+if GUI.Status then
+    GUI.Status.Text =
+        "Ativo: observando interações, valores, dinheiro e mudanças no Tycoon."
+end
