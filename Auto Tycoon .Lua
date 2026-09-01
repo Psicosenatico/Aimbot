@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.7.3 + BUNKER SESSION LOCK
+PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.7.4 + AUTO REBIRTH
 COMPATIBILITY / STABILITY BUILD
 
 Purchase automation + diagnostics - authorized teleport test build.
@@ -12,6 +12,9 @@ The character is moved directly to the local Tycoon collector; success is confir
 When all current purchase targets are blocked by insufficient funds, Collector is rechecked continuously; every time it reaches at least 1000, collection is attempted again.
 As soon as Money is sufficient for an available purchase, collection pauses and the purchase queue resumes.
 Known ButtonPurchased/ButtonCannotPurchase server-to-client responses are still observed to avoid fixed multi-second waits.
+Auto Rebirth is tied to the same automation toggle: it uses only the normal Rebirth GUI,
+never invokes an unknown Rebirth remote directly, and confirms success only after the
+observed leaderstats Rebirths value increases.
 
 Purchase classes:
 - TYCOON_MONEY
@@ -35,6 +38,9 @@ Automation policy:
 - KILLS_OR_PREMIUM: ignored
 - ROBUX_ONLY: ignored
 - UNKNOWN: ignored
+- AUTO REBIRTH: after the eligible purchase queue is exhausted, no funds-blocked purchase
+  remains, and the normal Rebirth GUI button is confirmed ready, activate that UI and wait
+  for observed Rebirths N -> N+1 before reset/rescan.
 ]]
 
 local Players = game:GetService("Players")
@@ -44,8 +50,13 @@ local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GuiService = game:GetService("GuiService")
 
-local VERSION = "AUTO-TP-1.7.3"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_3"
+local VirtualInputManager = nil
+pcall(function()
+    VirtualInputManager = game:GetService("VirtualInputManager")
+end)
+
+local VERSION = "AUTO-TP-1.7.4"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_4"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -140,6 +151,18 @@ local State = {
     BunkerExitInProgress = false,
     BunkerSuppressedMainDetections = 0,
 
+    AutoRebirthServerReady = false,
+    AutoRebirthServerSignalSeen = false,
+    AutoRebirthButtonsLeft = nil,
+    AutoRebirthLastSignalUnix = nil,
+    AutoRebirthLastSignalElapsed = nil,
+    AutoRebirthLastSignalValue = nil,
+    AutoRebirthAttempts = {},
+    AutoRebirthSuccessful = 0,
+    AutoRebirthFailed = 0,
+    AutoRebirthLastAttemptClock = 0,
+    AutoRebirthLastMethod = nil,
+
     AutoSaveCount = 0,
     AutoSaveLastUnix = nil,
     AutoSaveLastReason = nil,
@@ -149,6 +172,8 @@ local State = {
     AutoSaveEmergencyLatched = false,
     AutoSaveEmergencyClock = 0,
     AutoSaveEmergencyReason = nil,
+    AutoSaveEmergencyDetail = nil,
+    AutoSaveEmergencySource = nil,
 
     AutomationLastRebirth = nil,
     AutomationRunId = 0,
@@ -691,7 +716,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.7.3 - bunker session lock"
+    version.Text = "AUTO V1.7.4 - auto rebirth + bunker lock"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -844,7 +869,7 @@ local function createGui()
     autoToggle.Size = UDim2.new(1, 0, 0, 36)
     autoToggle.BackgroundColor3 = COLORS.Floating
     autoToggle.BorderSizePixel = 0
-    autoToggle.Text = "Iniciar automacao de compras"
+    autoToggle.Text = "Iniciar compras + renascimento"
     autoToggle.TextColor3 = COLORS.Text
     autoToggle.Font = Enum.Font.GothamBold
     autoToggle.TextSize = 11
@@ -858,7 +883,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.7.3 (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.7.4 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -946,7 +971,7 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Automator V1.7.3] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.7.4] LocalPlayer indisponivel.")
     return
 end
 
@@ -2350,8 +2375,8 @@ local function refreshUI()
 
     if UI.AutoToggle and UI.AutoToggle.Parent then
         UI.AutoToggle.Text = State.AutomationEnabled
-            and "Parar automacao de compras"
-            or "Iniciar automacao de compras"
+            and "Parar compras + renascimento"
+            or "Iniciar compras + renascimento"
 
         UI.AutoToggle.BackgroundColor3 = State.AutomationEnabled
             and COLORS.Danger
@@ -2545,6 +2570,8 @@ local AUTO_COLLECT_MIN_GAP = 0.75
 local BUNKER_ZONE_TIMEOUT = 5
 local BUNKER_RESCAN_WAIT = 0.45
 local BUNKER_PURCHASE_SETTLE = 0.30
+local AUTO_REBIRTH_CONFIRM_TIMEOUT = 5
+local AUTO_REBIRTH_RETRY_COOLDOWN = 2.5
 local AUTOSAVE_INTERVAL = 15
 
 -- Forward declaration used by the collector routine.
@@ -2829,6 +2856,7 @@ local function autoBindServerResponseSignals()
 
     local purchased = tycoonService:FindFirstChild("ButtonPurchased")
     local rejected = tycoonService:FindFirstChild("ButtonCannotPurchase")
+    local setCanRebirth = tycoonService:FindFirstChild("SetCanRebirth")
 
     local function bind(remote, status)
         if not remote or not remote:IsA("RemoteEvent") then
@@ -2861,6 +2889,44 @@ local function autoBindServerResponseSignals()
 
     bind(purchased, "ACCEPTED")
     bind(rejected, "REJECTED")
+
+    if setCanRebirth and setCanRebirth:IsA("RemoteEvent") then
+        addConnection(setCanRebirth.OnClientEvent, function(scopeName, value)
+            if tostring(scopeName) ~= "Tycoon" then
+                return
+            end
+
+            State.AutoRebirthServerSignalSeen = true
+            State.AutoRebirthLastSignalUnix = os.time()
+            State.AutoRebirthLastSignalElapsed = elapsed()
+            State.AutoRebirthLastSignalValue = value
+
+            if typeof(value) == "boolean" then
+                State.AutoRebirthServerReady = value == true
+                if value == true then
+                    State.AutoRebirthButtonsLeft = 0
+                end
+            elseif typeof(value) == "number" then
+                State.AutoRebirthButtonsLeft = value
+                State.AutoRebirthServerReady = false
+            else
+                State.AutoRebirthServerReady = false
+            end
+
+            if State.Reading then
+                pushEvent("AUTOMATION", "AUTO_REBIRTH_SERVER_STATE", {
+                    Scope = tostring(scopeName),
+                    ValueType = typeof(value),
+                    Value = (typeof(value) == "number" or typeof(value) == "boolean" or typeof(value) == "string")
+                        and value
+                        or "<" .. tostring(typeof(value)) .. ">",
+                    Ready = State.AutoRebirthServerReady,
+                    ButtonsLeft = State.AutoRebirthButtonsLeft,
+                    Rebirths = State.LastRebirths,
+                })
+            end
+        end)
+    end
 end
 
 local function autoWaitForAcceptance(buttonName, originalButton, timeout)
@@ -3564,6 +3630,323 @@ local function autoAttemptPurchase(record)
     return false, acceptanceReason
 end
 
+
+local function autoFindRebirthButton()
+    local playerGui = State.Player and State.Player:FindFirstChild("PlayerGui")
+    if not playerGui then
+        return nil
+    end
+
+    local rebirthGui = playerGui:FindFirstChild("RebirthGui")
+    if not rebirthGui then
+        return nil
+    end
+
+    local frame = rebirthGui:FindFirstChild("Frame")
+    local buttons = frame and frame:FindFirstChild("Buttons")
+    local direct = buttons and buttons:FindFirstChild("Rebirth")
+
+    if direct and direct:IsA("GuiButton") then
+        return direct
+    end
+
+    for _, obj in ipairs(rebirthGui:GetDescendants()) do
+        if obj:IsA("GuiButton")
+        and normalize(obj.Name) == "rebirth" then
+            return obj
+        end
+    end
+
+    return nil
+end
+
+local function autoRebirthButtonText(button)
+    if not button then
+        return ""
+    end
+
+    local best = ""
+
+    local okText, directText = pcall(function()
+        return button.Text
+    end)
+    if okText and type(directText) == "string" and #directText > #best then
+        best = directText
+    end
+
+    for _, descendant in ipairs(button:GetDescendants()) do
+        if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+            local ok, value = pcall(function()
+                return descendant.Text
+            end)
+
+            if ok and type(value) == "string" and #value > #best then
+                best = value
+            end
+        end
+    end
+
+    return best
+end
+
+local function autoGuiActuallyVisible(button)
+    if not button or not button.Parent or not State.Player then
+        return false
+    end
+
+    local playerGui = State.Player:FindFirstChild("PlayerGui")
+    if not playerGui then
+        return false
+    end
+
+    local current = button
+
+    while current do
+        if current:IsA("GuiObject") then
+            local ok, visible = pcall(function()
+                return current.Visible
+            end)
+            if ok and visible == false then
+                return false
+            end
+        elseif current:IsA("ScreenGui") then
+            local ok, enabled = pcall(function()
+                return current.Enabled
+            end)
+            if ok and enabled == false then
+                return false
+            end
+        end
+
+        if current == playerGui then
+            break
+        end
+
+        current = current.Parent
+    end
+
+    return true
+end
+
+local function autoGetRebirthReadiness()
+    local button = autoFindRebirthButton()
+    if not button then
+        return false, "REBIRTH_BUTTON_NOT_FOUND", nil, nil
+    end
+
+    local interactable = false
+    local active = false
+
+    local okInteractable, interactableValue = pcall(function()
+        return button.Interactable
+    end)
+    if okInteractable then
+        interactable = interactableValue == true
+    end
+
+    local okActive, activeValue = pcall(function()
+        return button.Active
+    end)
+    if okActive then
+        active = activeValue == true
+    end
+
+    local textValue = autoRebirthButtonText(button)
+    local textNorm = normalize(textValue)
+    local saysButtonsLeft =
+        string.find(textNorm, "buttonsleft", 1, true) ~= nil
+        or string.find(textNorm, "buttonleft", 1, true) ~= nil
+
+    local uiReady = interactable and active and not saysButtonsLeft
+
+    if uiReady then
+        return true,
+            State.AutoRebirthServerReady and "SERVER_TRUE_AND_UI_INTERACTABLE" or "UI_INTERACTABLE_READY",
+            button,
+            textValue
+    end
+
+    return false, "UI_NOT_READY", button, textValue
+end
+
+local function autoActivateRebirthButton(button)
+    if not button or not button.Parent then
+        return false, "REBIRTH_BUTTON_UNAVAILABLE"
+    end
+
+    if VirtualInputManager and autoGuiActuallyVisible(button) then
+        local ok, err = pcall(function()
+            local pos = button.AbsolutePosition
+            local size = button.AbsoluteSize
+            local x = math.floor(pos.X + size.X * 0.5)
+            local y = math.floor(pos.Y + size.Y * 0.5)
+
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+            task.wait(0.06)
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        end)
+
+        if ok then
+            return true, "VIRTUAL_INPUT_GUI_CLICK"
+        end
+
+        autoRecord("AUTO_REBIRTH_INPUT_WARNING", {
+            Method = "VIRTUAL_INPUT_GUI_CLICK",
+            Error = tostring(err),
+            FallbackAvailable = type(firesignal) == "function",
+        })
+    end
+
+    if type(firesignal) == "function" then
+        local ok, err = pcall(function()
+            firesignal(button.Activated, nil, 1)
+        end)
+
+        if ok then
+            return true, "GUI_ACTIVATED_SIGNAL_FALLBACK"
+        end
+
+        return false, "GUI_ACTIVATED_SIGNAL_FAILED:" .. tostring(err)
+    end
+
+    return false, "NO_SUPPORTED_GUI_INPUT_METHOD"
+end
+
+local function autoBlockedFundsCount()
+    local count = 0
+    for _ in pairs(State.AutomationBlockedFunds) do
+        count += 1
+    end
+    return count
+end
+
+local function autoAttemptRebirth()
+    local now = os.clock()
+
+    if now - (State.AutoRebirthLastAttemptClock or 0) < AUTO_REBIRTH_RETRY_COOLDOWN then
+        return false, "REBIRTH_RETRY_COOLDOWN"
+    end
+
+    autoRefreshFundsBlocks()
+
+    if autoBlockedFundsCount() > 0 then
+        return false, "FUNDS_BLOCKED_PURCHASES_REMAIN"
+    end
+
+    if State.BunkerSessionActive or State.CurrentZone == "BUNKER" then
+        return false, "BUNKER_SESSION_NOT_FINISHED"
+    end
+
+    local ready, readinessReason, button, buttonText = autoGetRebirthReadiness()
+    if not ready then
+        return false, readinessReason
+    end
+
+    local before = State.LastRebirths
+    if before == nil then
+        return false, "REBIRTH_STAT_UNAVAILABLE"
+    end
+
+    State.AutoRebirthLastAttemptClock = now
+    State.AutomationState = "REBIRTHING"
+    State.Health.Automation = "REBIRTHING"
+
+    local attempt = {
+        Id = #State.AutoRebirthAttempts + 1,
+        StartedUnix = os.time(),
+        StartedElapsed = elapsed(),
+        RebirthsBefore = before,
+        ButtonPath = safeFullName(button),
+        ButtonText = buttonText,
+        ButtonInteractable = true,
+        ReadinessReason = readinessReason,
+        ServerReady = State.AutoRebirthServerReady,
+        ServerSignalSeen = State.AutoRebirthServerSignalSeen,
+        ServerSignalValue = State.AutoRebirthLastSignalValue,
+        ServerSignalUnix = State.AutoRebirthLastSignalUnix,
+    }
+    table.insert(State.AutoRebirthAttempts, attempt)
+
+    autoRecord("AUTO_REBIRTH_ATTEMPT_STARTED", {
+        AttemptId = attempt.Id,
+        RebirthsBefore = before,
+        ButtonPath = attempt.ButtonPath,
+        ButtonText = buttonText,
+        ReadinessReason = readinessReason,
+        ServerReady = State.AutoRebirthServerReady,
+        ServerSignalValue = State.AutoRebirthLastSignalValue,
+        Policy = "NORMAL_REBIRTH_GUI_ONLY_NO_DIRECT_REBIRTH_REMOTE",
+    })
+
+    local activated, method = autoActivateRebirthButton(button)
+    attempt.InputMethod = method
+    State.AutoRebirthLastMethod = method
+
+    if not activated then
+        attempt.Result = "INPUT_NOT_SENT"
+        attempt.FinishedUnix = os.time()
+        attempt.FinishedElapsed = elapsed()
+        State.AutoRebirthFailed = State.AutoRebirthFailed + 1
+
+        autoRecord("AUTO_REBIRTH_INPUT_FAILED", {
+            AttemptId = attempt.Id,
+            Method = method,
+        })
+
+        return false, method
+    end
+
+    autoRecord("AUTO_REBIRTH_INPUT_SENT", {
+        AttemptId = attempt.Id,
+        Method = method,
+        RebirthsBefore = before,
+    })
+
+    local started = os.clock()
+    while State.Running
+    and State.AutomationEnabled
+    and os.clock() - started <= AUTO_REBIRTH_CONFIRM_TIMEOUT do
+        local current = State.LastRebirths
+
+        if current ~= nil and current > before then
+            attempt.Result = "REBIRTH_INCREMENT_CONFIRMED"
+            attempt.RebirthsAfter = current
+            attempt.FinishedUnix = os.time()
+            attempt.FinishedElapsed = elapsed()
+            State.AutoRebirthSuccessful = State.AutoRebirthSuccessful + 1
+
+            autoRecord("AUTO_REBIRTH_CONFIRMED", {
+                AttemptId = attempt.Id,
+                Method = method,
+                RebirthsBefore = before,
+                RebirthsAfter = current,
+                Evidence = "OBSERVED_LEADERSTATS_REBIRTH_INCREMENT",
+            })
+
+            return true, "REBIRTH_INCREMENT_CONFIRMED"
+        end
+
+        task.wait(0.05)
+    end
+
+    attempt.Result = "REBIRTH_INCREMENT_NOT_OBSERVED"
+    attempt.RebirthsAfter = State.LastRebirths
+    attempt.FinishedUnix = os.time()
+    attempt.FinishedElapsed = elapsed()
+    State.AutoRebirthFailed = State.AutoRebirthFailed + 1
+
+    autoRecord("AUTO_REBIRTH_NOT_CONFIRMED", {
+        AttemptId = attempt.Id,
+        Method = method,
+        RebirthsBefore = before,
+        RebirthsObserved = State.LastRebirths,
+        TimeoutSeconds = AUTO_REBIRTH_CONFIRM_TIMEOUT,
+        Note = "No Rebirth mutation is performed locally; success requires observed server-authorized stat increase.",
+    })
+
+    return false, "REBIRTH_INCREMENT_NOT_OBSERVED"
+end
+
 local function autoHandleRebirth(oldValue, newValue)
     State.AutomationState = "RESETTING"
     State.Health.Automation = "RESETTING"
@@ -3578,6 +3961,9 @@ local function autoHandleRebirth(oldValue, newValue)
     State.BunkerSessionReason = "REBIRTH_RESET"
     State.BunkerSessionStartedUnix = nil
     State.BunkerSessionStartedElapsed = nil
+    State.AutoRebirthServerReady = false
+    State.AutoRebirthButtonsLeft = nil
+    State.AutoRebirthLastSignalValue = nil
 
     local reset = {
         Id = #State.AutomationResets + 1,
@@ -3645,7 +4031,7 @@ local function setAutomation(enabled)
             Rebirths = State.LastRebirths,
             Floor = State.MainFloor,
             Zone = State.CurrentZone,
-            Policy = "Continuous cycle: rejected insufficient-money buttons remain blocked; when no purchase can be made, Collector is checked continuously and collected at >=1000; purchases resume immediately once Money is enough for an available target.",
+            Policy = "Continuous cycle: purchases + Bunker session lock + collector recovery; when the eligible purchase queue is exhausted and the normal Rebirth GUI is ready, Auto Rebirth activates that GUI and waits for Rebirths to increase before reset/rescan.",
         })
     else
         autoRecord("AUTOMATION_STOPPED", {
@@ -3740,6 +4126,24 @@ task.spawn(function()
                 end
 
                 if not target then
+                    local rebirthed, rebirthReason = autoAttemptRebirth()
+                    if rebirthed then
+                        task.wait(AUTO_POST_RESULT_WAIT)
+                        return
+                    end
+
+                    if rebirthReason ~= "UI_NOT_READY"
+                    and rebirthReason ~= "REBIRTH_BUTTON_NOT_FOUND"
+                    and rebirthReason ~= "REBIRTH_RETRY_COOLDOWN"
+                    and rebirthReason ~= "FUNDS_BLOCKED_PURCHASES_REMAIN" then
+                        autoRecord("AUTO_REBIRTH_DEFERRED", {
+                            Reason = rebirthReason,
+                            Rebirths = State.LastRebirths,
+                            ServerReady = State.AutoRebirthServerReady,
+                            ButtonsLeft = State.AutoRebirthButtonsLeft,
+                        })
+                    end
+
                     State.AutomationState = "WAITING_FOR_FUNDS"
                     State.Health.Automation = "WAITING_FOR_FUNDS"
 
@@ -3882,6 +4286,23 @@ local function buildReport()
                 SuppressedMainDetections = State.BunkerSuppressedMainDetections,
                 Policy = "LOCK_BUNKER_UNTIL_ELIGIBLE_QUEUE_EXHAUSTED_THEN_EXIT_ONCE",
             },
+            AutoRebirth = {
+                EnabledWithAutomation = true,
+                ServerReady = State.AutoRebirthServerReady,
+                ServerSignalSeen = State.AutoRebirthServerSignalSeen,
+                ButtonsLeft = State.AutoRebirthButtonsLeft,
+                LastSignalUnix = State.AutoRebirthLastSignalUnix,
+                LastSignalElapsed = State.AutoRebirthLastSignalElapsed,
+                LastSignalValue = State.AutoRebirthLastSignalValue,
+                LastInputMethod = State.AutoRebirthLastMethod,
+                Successful = State.AutoRebirthSuccessful,
+                Failed = State.AutoRebirthFailed,
+                Attempts = State.AutoRebirthAttempts,
+                TriggerPolicy = "PURCHASE_QUEUE_EXHAUSTED_AND_NO_FUNDS_BLOCK_AND_NO_BUNKER_SESSION_AND_NORMAL_REBIRTH_GUI_READY",
+                InteractionPolicy = "NORMAL_REBIRTH_GUI_BUTTON_ONLY",
+                ConfirmationPolicy = "OBSERVED_LEADERSTATS_REBIRTH_INCREMENT",
+                DirectRebirthRemoteInvocation = false,
+            },
             FundsBlocked = State.AutomationBlockedFunds,
             Attempts = State.AutomationAttempts,
             RebirthResets = State.AutomationResets,
@@ -3902,6 +4323,12 @@ local function buildReport()
                 BunkerTransition = "PROXIMITY_PROMPT_WITH_DIRECT_POSITIONING",
                 BunkerPurchaseMovement = "DIRECT_LOCAL_CHARACTER_TELEPORT",
                 BunkerExitPolicy = "RESCAN_BUNKER_BEFORE_EXIT",
+                AutoRebirth = true,
+                AutoRebirthSameToggleAsPurchases = true,
+                AutoRebirthTarget = "PlayerGui.RebirthGui.Frame.Buttons.Rebirth",
+                AutoRebirthRequiresInteractable = true,
+                AutoRebirthDirectRemoteInvocation = false,
+                AutoRebirthConfirmation = "OBSERVED_REBIRTHS_INCREMENT",
                 DirectTeleport = true,
                 DirectTeleportScope = "MAIN_TYCOON_PURCHASE_BUTTONS_TEST_ONLY",
                 MoneyBypass = false,
@@ -3921,6 +4348,8 @@ local function buildReport()
             PeriodicFilePolicy = "OVERWRITE_SINGLE_LATEST_FILE",
             EmergencyFilePolicy = "OVERWRITE_SINGLE_LATEST_FILE_WITH_10S_DEDUPE",
             RebirthFilePolicy = "ONE_TIMESTAMPED_CRITICAL_SNAPSHOT",
+            EmergencySource = State.AutoSaveEmergencySource,
+            EmergencyDetail = State.AutoSaveEmergencyDetail,
         },
 
         StoragePolicy = {
@@ -3975,11 +4404,11 @@ local function autoSaveNow(reason, timestamped)
         return false, "WRITEFILE_UNAVAILABLE"
     end
 
-    local filename = "Tycoon_Purchase_Automator_V1_7_3_AutoSave_Latest.txt"
+    local filename = "Tycoon_Purchase_Automator_V1_7_4_AutoSave_Latest.txt"
 
     if timestamped then
         filename =
-            "Tycoon_Purchase_Automator_V1_7_3_AutoSave_" ..
+            "Tycoon_Purchase_Automator_V1_7_4_AutoSave_" ..
             reason ..
             "_" ..
             os.date("%Y%m%d_%H%M%S") ..
@@ -4044,7 +4473,7 @@ local function textLooksLikeDisconnect(message)
     return false
 end
 
-local function emergencyAutoSave(reason)
+local function emergencyAutoSave(reason, detail)
     local now = os.clock()
 
     -- One emergency save per shutdown/error burst.
@@ -4058,6 +4487,13 @@ local function emergencyAutoSave(reason)
     State.AutoSaveEmergencyLatched = true
     State.AutoSaveEmergencyClock = now
     State.AutoSaveEmergencyReason = reason
+    State.AutoSaveEmergencySource = tostring(reason)
+
+    local detailText = tostring(detail or "")
+    if #detailText > 240 then
+        detailText = string.sub(detailText, 1, 240) .. "..."
+    end
+    State.AutoSaveEmergencyDetail = detailText ~= "" and detailText or nil
 
     -- Emergency autosave overwrites one stable file instead of creating
     -- a new timestamped file for every error signal.
@@ -4080,7 +4516,7 @@ local function installAutoSaveWatchers()
     addConnection(GuiService.ErrorMessageChanged, function(message)
         if textLooksLikeDisconnect(message) then
             task.defer(function()
-                emergencyAutoSave("GUI_ERROR_OR_DISCONNECT")
+                emergencyAutoSave("GUI_ERROR_OR_DISCONNECT", message)
             end)
         end
     end)
@@ -4098,7 +4534,7 @@ local function installAutoSaveWatchers()
 
             if looksLikeError then
                 task.defer(function()
-                    emergencyAutoSave("ROBLOX_ERROR_PROMPT")
+                    emergencyAutoSave("ROBLOX_ERROR_PROMPT", safeFullName(child))
                 end)
             end
         end)
@@ -4121,7 +4557,7 @@ installAutoSaveWatchers()
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_7_2_" ..
+        "Tycoon_Purchase_Automator_V1_7_4_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
@@ -4310,7 +4746,7 @@ task.spawn(function()
     end
 end)
 
-UI.Status.Text = "AUTO V1.7.3 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "AUTO V1.7.4 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
 safeCall("UI_INITIAL_REFRESH", function()
     refreshUI()
 end)
