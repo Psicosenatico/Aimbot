@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - TELEPORT TEST V1.3 + DEV COLLECT
+PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - TELEPORT TEST V1.4 + SMART QUEUE
 COMPATIBILITY / STABILITY BUILD
 
 Purchase automation + diagnostics - authorized teleport test build.
@@ -8,7 +8,8 @@ onto ordinary MAIN_TYCOON purchase buttons instead of walking to them.
 Does not alter Money/Rebirths or fake Marketplace receipts.
 BUNKER transition remains the game's normal transition instead of long-distance teleport.
 Auto-collect uses only a dedicated developer/test RemoteFunction supplied by the companion server script.
-It is not Studio-only; it can run in a published server when the player is explicitly authorized server-side.
+If that endpoint is absent, the automator remembers insufficient-funds buttons and continues with other eligible targets.
+Known ButtonPurchased/ButtonCannotPurchase server-to-client responses are observed to avoid fixed multi-second waits.
 
 Purchase classes:
 - TYCOON_MONEY
@@ -40,8 +41,8 @@ local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "AUTO-TP-1.3"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorTeleportTestV1_3"
+local VERSION = "AUTO-TP-1.4"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorTeleportTestV1_4"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -116,6 +117,10 @@ local State = {
     AutomationAttempts = {},
     AutomationResets = {},
     AutomationCooldowns = {},
+    AutomationBlockedFunds = {},
+    AutomationServerSignal = nil,
+    AutomationServerSignalSeq = 0,
+    AutomationDevCollectUnavailable = false,
     AutomationLastRebirth = nil,
     AutomationRunId = 0,
     AutomationSuccessful = 0,
@@ -660,7 +665,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO TP V1.3 - teleport + dev collect"
+    version.Text = "AUTO TP V1.4 - smart queue + response"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -827,7 +832,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO TP V1.3 (.txt)"
+    export.Text = "Exportar relatorio AUTO TP V1.4 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -909,14 +914,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Automator TP V1.3] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator TP V1.4] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Automator TP V1.3] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator TP V1.4] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -2455,9 +2460,10 @@ end
 -- ============================================================
 
 local AUTO_MOVE_TIMEOUT = 18
-local AUTO_SERVER_WAIT = 6
-local AUTO_RETRY_COOLDOWN = 7
-local AUTO_IDLE_WAIT = 0.6
+local AUTO_SERVER_WAIT = 1.35
+local AUTO_RETRY_COOLDOWN = 2.5
+local AUTO_IDLE_WAIT = 0.22
+local AUTO_POST_RESULT_WAIT = 0.08
 local AUTO_ARRIVE_DISTANCE = 5.5
 local AUTO_COLLECT_MIN = 1000
 local AUTO_COLLECT_CONFIRM_TIMEOUT = 4
@@ -2597,8 +2603,13 @@ local function autoDevCollect()
         return false, "COLLECTOR_BELOW_THRESHOLD", amountBefore
     end
 
+    if State.AutomationDevCollectUnavailable then
+        return false, "DEV_COLLECT_DISABLED_FOR_RUN", amountBefore
+    end
+
     local remote, remoteReason = autoGetDevCollectRemote()
     if not remote then
+        State.AutomationDevCollectUnavailable = true
         autoRecord("DEV_COLLECT_UNAVAILABLE", {
             Reason = remoteReason,
             CollectorBefore = amountBefore,
@@ -2678,6 +2689,7 @@ local function autoDevCollect()
                 attempt.FinishedUnix = os.time()
                 attempt.FinishedElapsed = elapsed()
                 State.AutoCollectSuccessful = State.AutoCollectSuccessful + 1
+                State.AutomationBlockedFunds = {}
 
                 autoRecord("DEV_COLLECT_SUCCESS_OBSERVED", {
                     CollectAttemptId = attempt.Id,
@@ -2714,11 +2726,68 @@ local function autoDevCollect()
     return false, "COLLECTION_NOT_OBSERVED", observedAfter
 end
 
+
+local function autoBindServerResponseSignals()
+    local remotes = ReplicatedStorage:FindFirstChild("__remotes")
+    local tycoonService = remotes and remotes:FindFirstChild("TycoonService")
+    if not tycoonService then
+        return
+    end
+
+    local purchased = tycoonService:FindFirstChild("ButtonPurchased")
+    local rejected = tycoonService:FindFirstChild("ButtonCannotPurchase")
+
+    local function bind(remote, status)
+        if not remote or not remote:IsA("RemoteEvent") then
+            return
+        end
+
+        addConnection(remote.OnClientEvent, function(...)
+            if not State.AutomationEnabled or not State.AutomationTarget then
+                return
+            end
+
+            State.AutomationServerSignalSeq = State.AutomationServerSignalSeq + 1
+            State.AutomationServerSignal = {
+                Seq = State.AutomationServerSignalSeq,
+                Clock = os.clock(),
+                Status = status,
+                Remote = safeFullName(remote),
+                Target = State.AutomationTarget,
+                ArgsCount = select("#", ...),
+            }
+
+            autoRecord("SERVER_PURCHASE_RESPONSE_OBSERVED", {
+                Status = status,
+                Remote = safeFullName(remote),
+                Target = State.AutomationTarget,
+                SignalSeq = State.AutomationServerSignalSeq,
+            })
+        end)
+    end
+
+    bind(purchased, "ACCEPTED")
+    bind(rejected, "REJECTED")
+end
+
 local function autoWaitForAcceptance(buttonName, originalButton, timeout)
     timeout = timeout or AUTO_SERVER_WAIT
     local started = os.clock()
+    local startSeq = State.AutomationServerSignalSeq
 
     while State.Running and State.AutomationEnabled and os.clock() - started <= timeout do
+        local signal = State.AutomationServerSignal
+
+        if signal
+        and signal.Seq > startSeq
+        and signal.Target == buttonName then
+            if signal.Status == "ACCEPTED" then
+                return true, "SERVER_BUTTON_PURCHASED"
+            elseif signal.Status == "REJECTED" then
+                return false, "SERVER_BUTTON_CANNOT_PURCHASE"
+            end
+        end
+
         local buttonGone = not originalButton or not originalButton.Parent
         local purchaseExists = State.PurchasesFolder
             and State.PurchasesFolder:FindFirstChild(buttonName) ~= nil
@@ -2727,7 +2796,7 @@ local function autoWaitForAcceptance(buttonName, originalButton, timeout)
             return true, buttonGone and "BUTTON_REMOVED" or "PURCHASE_CREATED"
         end
 
-        task.wait(0.08)
+        task.wait(0.03)
     end
 
     return false, "NO_ACCEPTANCE_OBSERVED"
@@ -2850,9 +2919,15 @@ local function autoCandidateScore(record)
 
     if effectiveZone == State.CurrentZone then score = score - 35 end
     if effectiveZone == "MAIN_TYCOON" then score = score - 15 end
-    if price ~= nil and price == 0 then score = score - 25 end
-    if record.Type == "TYCOON_MONEY" then score = score - 10 end
-    if record.Type == "REBIRTH" then score = score - 5 end
+    if price ~= nil and price == 0 then score = score - 35 end
+
+    -- Rebirth purchases do not consume Money and should not be starved by
+    -- repeatedly rejected ordinary-money buttons.
+    if record.Type == "REBIRTH" then
+        score = score - 30
+    elseif record.Type == "TYCOON_MONEY" then
+        score = score - 10
+    end
 
     if required then score = score + required * 0.001 end
     if price then score = score + math.min(price, 9999999) * 0.0000001 end
@@ -2860,14 +2935,41 @@ local function autoCandidateScore(record)
     return score
 end
 
+local function autoRefreshFundsBlocks()
+    local money = State.LastMoney
+
+    for key, block in pairs(State.AutomationBlockedFunds) do
+        if not block then
+            State.AutomationBlockedFunds[key] = nil
+        else
+            local requiredPrice = tonumber(block.Price)
+            if money ~= nil and requiredPrice ~= nil and money >= requiredPrice then
+                State.AutomationBlockedFunds[key] = nil
+                autoRecord("FUNDS_BLOCK_RELEASED", {
+                    Key = key,
+                    Name = block.Name,
+                    Price = requiredPrice,
+                    Money = money,
+                    Reason = "BALANCE_NOW_SUFFICIENT",
+                })
+            end
+        end
+    end
+end
+
 local function autoSelectCandidate()
+    autoRefreshFundsBlocks()
+
     local candidates = buildAutomationCandidates().Eligible
     local now = os.clock()
     local filtered = {}
 
     for _, record in ipairs(candidates) do
-        local cooldownUntil = State.AutomationCooldowns[record.Path or record.Name] or 0
-        if now >= cooldownUntil then
+        local key = record.Path or record.Name
+        local cooldownUntil = State.AutomationCooldowns[key] or 0
+        local fundsBlocked = State.AutomationBlockedFunds[key] ~= nil
+
+        if now >= cooldownUntil and not fundsBlocked then
             table.insert(filtered, record)
         end
     end
@@ -3006,7 +3108,7 @@ local function autoAttemptPurchase(record)
             RebirthsAfter = attempt.RebirthsAfter,
         })
 
-        task.wait(0.35)
+        task.wait(AUTO_POST_RESULT_WAIT)
         return true, acceptanceReason
     end
 
@@ -3032,6 +3134,25 @@ local function autoAttemptPurchase(record)
     })
 
     if insufficientBalanceInferred then
+        local blockKey = record.Path or record.Name
+        State.AutomationBlockedFunds[blockKey] = {
+            Name = record.Name,
+            Path = record.Path,
+            Price = declaredPrice,
+            MoneyAtBlock = State.LastMoney,
+            BlockedUnix = os.time(),
+            BlockedElapsed = elapsed(),
+            Reason = "PURCHASE_REJECTED_WHILE_MONEY_BELOW_PRICE",
+        }
+
+        autoRecord("FUNDS_BLOCK_SAVED", {
+            Name = record.Name,
+            Path = record.Path,
+            Price = declaredPrice,
+            Money = State.LastMoney,
+            Reason = "DO_NOT_RETRY_UNTIL_BALANCE_SUFFICIENT_OR_COLLECTION_SUCCEEDS",
+        })
+
         local collectorAmount, collectorPath = autoCollectorAmount()
 
         autoRecord("AUTO_COLLECT_CHECK", {
@@ -3065,6 +3186,8 @@ local function autoHandleRebirth(oldValue, newValue)
     State.AutomationTarget = nil
     State.AutomationTargetStarted = nil
     State.AutomationCooldowns = {}
+    State.AutomationBlockedFunds = {}
+    State.AutomationServerSignal = nil
     State.Pending = {}
 
     local reset = {
@@ -3115,6 +3238,9 @@ local function setAutomation(enabled)
         State.Health.Automation = "ACTIVE"
         State.AutomationTarget = nil
         State.AutomationCooldowns = {}
+        State.AutomationBlockedFunds = {}
+        State.AutomationServerSignal = nil
+        State.AutomationDevCollectUnavailable = false
         State.AutomationLastRebirth = State.LastRebirths
 
         autoRecord("AUTOMATION_STARTED", {
@@ -3123,7 +3249,7 @@ local function setAutomation(enabled)
             Rebirths = State.LastRebirths,
             Floor = State.MainFloor,
             Zone = State.CurrentZone,
-            Policy = "MAIN_TYCOON purchases use test teleport; insufficient-balance recovery requests dedicated server-authorized DevCollect when stored coins >= 1000; no collector movement and no Money/Rebirth client edits.",
+            Policy = "Smart queue: immediate known server response when visible; rejected insufficient-money buttons are remembered until balance is sufficient; eligible REBIRTH purchases are prioritized; DevCollect remains dedicated server-authorized only.",
         })
     else
         autoRecord("AUTOMATION_STOPPED", {
@@ -3142,6 +3268,8 @@ local function setAutomation(enabled)
 
     safeCall("AUTOMATION_UI_REFRESH", refreshUI)
 end
+
+autoBindServerResponseSignals()
 
 task.spawn(function()
     while State.Running do
@@ -3292,6 +3420,8 @@ local function buildReport()
             AutoCollectSuccessful = State.AutoCollectSuccessful,
             AutoCollectFailed = State.AutoCollectFailed,
             AutoCollectAttempts = State.AutoCollectAttempts,
+            FundsBlocked = State.AutomationBlockedFunds,
+            DevCollectUnavailableForRun = State.AutomationDevCollectUnavailable,
             Attempts = State.AutomationAttempts,
             RebirthResets = State.AutomationResets,
             Policy = {
@@ -3352,7 +3482,7 @@ end
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_Teleport_Test_V1_3_" ..
+        "Tycoon_Purchase_Automator_Teleport_Test_V1_4_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
