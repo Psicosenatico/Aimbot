@@ -1,5 +1,5 @@
 --[[
-PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.6 + TOTEM COLLECT
+PSICOSENATICO - TYCOON PURCHASE AUTOMATOR - V1.6.1 + TOTEM COLLECT - STARTUP FIX
 COMPATIBILITY / STABILITY BUILD
 
 Purchase automation + diagnostics - authorized teleport test build.
@@ -41,8 +41,8 @@ local HttpService = game:GetService("HttpService")
 local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local VERSION = "AUTO-TP-1.6"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorTotemCollectV1_6"
+local VERSION = "AUTO-TP-1.6.1"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorTotemCollectV1_6_1"
 
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
@@ -128,9 +128,6 @@ local State = {
     AutomationRunId = 0,
     AutomationSuccessful = 0,
     AutomationFailed = 0,
-    AutoCollectAttempts = {},
-    AutoCollectSuccessful = 0,
-    AutoCollectFailed = 0,
 
     DataStats = {
         TotalEventsObserved = 0,
@@ -668,7 +665,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.6 - totem collect + smart queue"
+    version.Text = "AUTO V1.6.1 - totem collect + startup fix"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -835,7 +832,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.6 (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.6.1 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -917,14 +914,14 @@ end
 State.Player = waitForLocalPlayer(10)
 
 if not State.Player then
-    warn("[Tycoon Automator V1.6] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.6.1] LocalPlayer indisponivel.")
     return
 end
 
 local guiOk, guiResult = pcall(createGui)
 
 if not guiOk then
-    warn("[Tycoon Automator V1.6] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator V1.6.1] GUI ERROR: " .. tostring(guiResult))
     return
 end
 
@@ -2458,8 +2455,9 @@ end
 
 
 -- ============================================================
--- PURCHASE AUTOMATION V1
--- Normal movement only. No direct teleport, no Money/Rebirth edits.
+-- PURCHASE AUTOMATION V1.6.1
+-- MAIN_TYCOON purchase targets and collector use direct local-character positioning.
+-- No Money/Rebirth edits and no unknown purchase/collection remote invocation.
 -- ============================================================
 
 local AUTO_MOVE_TIMEOUT = 18
@@ -2470,6 +2468,9 @@ local AUTO_POST_RESULT_WAIT = 0.08
 local AUTO_ARRIVE_DISTANCE = 5.5
 local AUTO_COLLECT_MIN = 1000
 local AUTO_COLLECT_CONFIRM_TIMEOUT = 4
+
+-- Forward declaration used by the collector routine.
+local autoRefreshFundsBlocks
 
 local function autoRecord(kind, details)
     details = details or {}
@@ -2533,7 +2534,7 @@ local function autoTeleportToPart(targetPart)
 
     local distance = (root.Position - targetPart.Position).Magnitude
     if distance <= 7 then
-        return true, "TELEPORTED_TO_BUTTON"
+        return true, "TELEPORT_POSITION_CONFIRMED"
     end
 
     return false, "TELEPORT_NOT_CONFIRMED"
@@ -2949,7 +2950,7 @@ local function autoCandidateScore(record)
     return score
 end
 
-local function autoRefreshFundsBlocks()
+autoRefreshFundsBlocks = function()
     local money = State.LastMoney
 
     for key, block in pairs(State.AutomationBlockedFunds) do
@@ -3262,7 +3263,7 @@ local function setAutomation(enabled)
             Rebirths = State.LastRebirths,
             Floor = State.MainFloor,
             Zone = State.CurrentZone,
-            Policy = "Rejected insufficient-money buttons stay blocked; collector >=1000 teleports character to the local Tycoon collector; collection is confirmed only when observed wallet Money increases; blocked buttons are released only when affordable."
+            Policy = "Rejected insufficient-money buttons stay blocked; collector >=1000 teleports character to the local Tycoon collector; collection is confirmed only when observed wallet Money increases; blocked buttons are released only when affordable.",
         })
     else
         autoRecord("AUTOMATION_STOPPED", {
@@ -3430,9 +3431,6 @@ local function buildReport()
             CurrentTarget = State.AutomationTarget,
             SuccessfulAttempts = State.AutomationSuccessful,
             FailedAttempts = State.AutomationFailed,
-            AutoCollectSuccessful = State.AutoCollectSuccessful,
-            AutoCollectFailed = State.AutoCollectFailed,
-            AutoCollectAttempts = State.AutoCollectAttempts,
             TotemCollectAttempts = State.TotemCollectAttempts,
             TotemCollectSuccessful = State.TotemCollectSuccessful,
             TotemCollectFailed = State.TotemCollectFailed,
@@ -3501,7 +3499,7 @@ end
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_6_TotemCollect_" ..
+        "Tycoon_Purchase_Automator_V1_6_1_TotemCollect_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
 
@@ -3642,3 +3640,55 @@ task.spawn(function()
                     NewValue = rebirths,
                     Delta = rebirths - State.LastRebirths,
                 })
+
+                correlateStatChanges(
+                    State.LastMoney,
+                    money,
+                    State.LastRebirths,
+                    rebirths
+                )
+            end
+
+            if money ~= nil then
+                State.LastMoney = money
+            end
+
+            if rebirths ~= nil then
+                State.LastRebirths = rebirths
+            end
+        end)
+
+        task.wait(MONEY_INTERVAL)
+    end
+end)
+
+task.spawn(function()
+    while State.Running do
+        safeCall("TYCOON_LOOP", function()
+            reconsiderTycoon()
+
+            local floor, floorEvidence = detectMainFloor()
+            setMainFloor(floor, floorEvidence)
+
+            local zone, zoneEvidence = detectZoneByPosition()
+            setZone(zone, zoneEvidence)
+        end)
+
+        task.wait(TYCOON_INTERVAL)
+    end
+end)
+
+task.spawn(function()
+    while State.Running do
+        safeCall("UI_LOOP", function()
+            refreshUI()
+        end)
+
+        task.wait(0.5)
+    end
+end)
+
+UI.Status.Text = "AUTO V1.6.1 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
+safeCall("UI_INITIAL_REFRESH", function()
+    refreshUI()
+end)
