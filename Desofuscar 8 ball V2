@@ -1,0 +1,167 @@
+--[[
+8-BALL-X - Capturador do Payload Final V2
+
+EXECUÇÃO:
+  1) Entre no jogo.
+  2) Execute ESTE capturador primeiro.
+  3) Sem fechar o jogo, execute o loader original "Sinuca".
+  4) Faça o processo normal de chave do BloxHub, se solicitado.
+  5) Quando o backend entregar o script final, ele será salvo em:
+       8BALLX_10_payload_final_captured.txt
+  6) O payload final NÃO será executado pelo loadstring interceptado.
+
+O capturador ignora loadstrings normais e só captura quando o chunkname
+começa com "@BloxHub_". Assim, o loadstring externo usado para iniciar
+o próprio loader continua funcionando normalmente.
+]]
+
+local OUTPUT = "8BALLX_10_payload_final_captured.txt"
+local META   = "8BALLX_10_payload_final_meta.txt"
+
+local function log(msg)
+    print("[8BALLX-CAPTURE] " .. tostring(msg))
+end
+
+local function save(name, data)
+    if type(writefile) ~= "function" then
+        warn("[8BALLX-CAPTURE] writefile não está disponível.")
+        return false
+    end
+    local ok, err = pcall(writefile, name, tostring(data or ""))
+    if not ok then
+        warn("[8BALLX-CAPTURE] Falha ao salvar " .. name .. ": " .. tostring(err))
+        return false
+    end
+    return true
+end
+
+local function isTargetChunk(chunkname)
+    return type(chunkname) == "string"
+       and string.sub(chunkname, 1, 9) == "@BloxHub_"
+end
+
+local originalLoadstring = loadstring
+if type(originalLoadstring) ~= "function" then
+    error("[8BALLX-CAPTURE] loadstring não existe neste executor.")
+end
+
+local captureCount = 0
+
+local function intercepted(source, chunkname, ...)
+    if isTargetChunk(chunkname) then
+        captureCount = captureCount + 1
+
+        local text = type(source) == "string" and source or tostring(source)
+        local meta = table.concat({
+            "CAPTURE_OK",
+            "chunkname=" .. tostring(chunkname),
+            "bytes=" .. tostring(#text),
+            "capture_count=" .. tostring(captureCount),
+            "payload_executed=false"
+        }, "\n")
+
+        local ok1 = save(OUTPUT, text)
+        local ok2 = save(META, meta)
+
+        if ok1 then
+            log("PAYLOAD FINAL CAPTURADO: " .. tostring(#text) .. " bytes")
+            log("Arquivo: " .. OUTPUT)
+            log("O payload capturado NÃO foi executado.")
+        else
+            warn("[8BALLX-CAPTURE] Payload interceptado, mas não foi possível gravar o arquivo.")
+            if type(setclipboard) == "function" then
+                pcall(setclipboard, text)
+                log("Fallback: payload copiado para a área de transferência.")
+            end
+        end
+
+        -- Devolve uma função vazia para que a chamada `loadstring(... )()`
+        -- do loader não execute o payload final.
+        return function(...)
+            return nil
+        end
+    end
+
+    -- Qualquer outro loadstring segue normalmente, inclusive o loader externo.
+    return originalLoadstring(source, chunkname, ...)
+end
+
+local installed = false
+
+-- Preferência 1: hookfunction altera a função real vista pelo ambiente.
+if type(hookfunction) == "function" then
+    local ok, old = pcall(function()
+        local previous
+        previous = hookfunction(originalLoadstring, function(source, chunkname, ...)
+            if isTargetChunk(chunkname) then
+                captureCount = captureCount + 1
+
+                local text = type(source) == "string" and source or tostring(source)
+                local meta = table.concat({
+                    "CAPTURE_OK",
+                    "chunkname=" .. tostring(chunkname),
+                    "bytes=" .. tostring(#text),
+                    "capture_count=" .. tostring(captureCount),
+                    "payload_executed=false",
+                    "method=hookfunction"
+                }, "\n")
+
+                local ok1 = save(OUTPUT, text)
+                save(META, meta)
+
+                if ok1 then
+                    log("PAYLOAD FINAL CAPTURADO: " .. tostring(#text) .. " bytes")
+                    log("Arquivo: " .. OUTPUT)
+                    log("O payload capturado NÃO foi executado.")
+                elseif type(setclipboard) == "function" then
+                    pcall(setclipboard, text)
+                    log("Payload copiado para a área de transferência.")
+                end
+
+                return function(...)
+                    return nil
+                end
+            end
+
+            return previous(source, chunkname, ...)
+        end)
+        return previous
+    end)
+
+    if ok and type(old) == "function" then
+        installed = true
+        log("Interceptação instalada via hookfunction.")
+    end
+end
+
+-- Preferência 2: substituição do global, caso hookfunction não exista.
+if not installed then
+    local ok = pcall(function()
+        local env = (getgenv and getgenv()) or (getfenv and getfenv()) or _G
+        env.loadstring = intercepted
+
+        if type(getfenv) == "function" then
+            local fenv = getfenv()
+            if type(fenv) == "table" then
+                fenv.loadstring = intercepted
+            end
+        end
+
+        if type(_G) == "table" then
+            _G.loadstring = intercepted
+        end
+    end)
+
+    if ok then
+        installed = true
+        log("Interceptação instalada por substituição do global.")
+    end
+end
+
+if not installed then
+    error("[8BALLX-CAPTURE] Não foi possível interceptar loadstring neste executor.")
+end
+
+log("PRONTO.")
+log("Agora execute o loader original da Sinuca e faça a autenticação normalmente.")
+log("Somente o payload @BloxHub_* será capturado e bloqueado.")
