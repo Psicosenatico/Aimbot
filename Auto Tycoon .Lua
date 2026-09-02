@@ -8,8 +8,8 @@ local VirtualInputManager = nil
 pcall(function()
     VirtualInputManager = game:GetService("VirtualInputManager")
 end)
-local VERSION = "AUTO-TP-1.7.5.6"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_5_6"
+local VERSION = "AUTO-TP-1.7.5.7"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_5_7"
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
 local TYCOON_INTERVAL = 1.5
@@ -96,6 +96,11 @@ local State = {
     BunkerLastTransitionEvidence = nil,
     BunkerEnterPromptObservedClock = 0,
     BunkerExitPromptObservedClock = 0,
+    BunkerManualEnterCount = 0,
+    BunkerManualExitCount = 0,
+    BunkerCollectorExitAttempts = 0,
+    BunkerCollectorExitSuccessful = 0,
+    BunkerCollectorExitFailed = 0,
     BunkerSessionAnchorCFrame = nil,
     BunkerWalkAttempts = 0,
     BunkerWalkSuccessful = 0,
@@ -566,7 +571,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.7.5.6 - bunker prompt walk lock"
+    version.Text = "AUTO V1.7.5.7 - manual bunker sync + collector exit"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -719,7 +724,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.7.5.6 (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.7.5.7 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -789,12 +794,12 @@ local function createGui()
 end
 State.Player = waitForLocalPlayer(10)
 if not State.Player then
-    warn("[Tycoon Automator V1.7.5.6] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.7.5.7] LocalPlayer indisponivel.")
     return
 end
 local guiOk, guiResult = pcall(createGui)
 if not guiOk then
-    warn("[Tycoon Automator V1.7.5.6] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator V1.7.5.7] GUI ERROR: " .. tostring(guiResult))
     return
 end
 State.Health.Bootstrap = "GUI_OK"
@@ -1202,8 +1207,38 @@ local function watchTransitionPrompts(instance)
                     State.LastTransitionPrompt = item
                     if direction == "ENTER_BUNKER" then
                         State.BunkerEnterPromptObservedClock = item.Clock
+                        if not State.BunkerEnterInProgress then
+                            if not State.BunkerSessionActive then
+                                State.BunkerSessionId = State.BunkerSessionId + 1
+                            end
+                            State.BunkerManualEnterCount = State.BunkerManualEnterCount + 1
+                            State.BunkerSessionActive = true
+                            State.BunkerExitInProgress = false
+                            State.BunkerSessionStartedUnix = os.time()
+                            State.BunkerSessionStartedElapsed = elapsed()
+                            State.BunkerSessionReason = "MANUAL_ENTER_PROMPT_OBSERVED"
+                            setZone("BUNKER", "MANUAL_BUNKER_ENTER_PROMPT_OBSERVED")
+                            pushEvent("AUTOMATION", "BUNKER_MANUAL_SESSION_ADOPTED", {
+                                SessionId = State.BunkerSessionId,
+                                Prompt = item.Path,
+                                Policy = "MANUAL_ENTER_IS_ADOPTED_AS_ACTIVE_BUNKER_SESSION",
+                            })
+                        end
                     elseif direction == "EXIT_BUNKER" then
                         State.BunkerExitPromptObservedClock = item.Clock
+                        if not State.BunkerExitInProgress
+                        and (State.BunkerSessionActive or State.CurrentZone == "BUNKER") then
+                            State.BunkerManualExitCount = State.BunkerManualExitCount + 1
+                            State.BunkerSessionActive = false
+                            State.BunkerSessionReason = "MANUAL_EXIT_PROMPT_OBSERVED"
+                            State.BunkerSessionAnchorCFrame = nil
+                            setZone("MAIN_TYCOON", "MANUAL_BUNKER_EXIT_PROMPT_OBSERVED")
+                            pushEvent("AUTOMATION", "BUNKER_MANUAL_SESSION_RELEASED", {
+                                SessionId = State.BunkerSessionId,
+                                Prompt = item.Path,
+                                Policy = "MANUAL_EXIT_PROMPT_RELEASES_MANUAL_BUNKER_SESSION",
+                            })
+                        end
                     end
                     if State.Reading then
                         pushEvent("TRANSITION_PROMPT", direction, item)
@@ -2459,6 +2494,21 @@ local function autoCollectorTouchPart()
     return collector:FindFirstChildWhichIsA("BasePart", true)
 end
 local function autoTeleportToCollectorAndConfirm()
+    if State.BunkerSessionActive
+    or State.CurrentZone == "BUNKER"
+    or State.BunkerEnterInProgress
+    or State.BunkerExitInProgress then
+        autoRecord("TOTEM_COLLECT_BLOCKED_BY_BUNKER_STATE", {
+            SessionId = State.BunkerSessionId,
+            SessionActive = State.BunkerSessionActive,
+            Zone = State.CurrentZone,
+            EnterInProgress = State.BunkerEnterInProgress,
+            ExitInProgress = State.BunkerExitInProgress,
+            Policy = "COLLECTOR_TELEPORT_FORBIDDEN_UNTIL_EXIT_PROMPT_CONFIRMS_MAIN",
+        })
+        return false, "BUNKER_EXIT_REQUIRED_BEFORE_COLLECT"
+    end
+
     local collectorBefore, collectorPath = autoCollectorAmount()
     local moneyObject = findStat(MONEY_NAMES) or State.MoneyObject
     if moneyObject and moneyObject.Parent then
@@ -2923,6 +2973,64 @@ local function autoExitBunker()
     end
     return exited, reason
 end
+local function autoCollectWithBunkerExit()
+    local bunkerContext =
+        State.BunkerSessionActive
+        or State.CurrentZone == "BUNKER"
+        or State.BunkerEnterInProgress
+        or (
+            State.LastTransitionPrompt
+            and State.LastTransitionPrompt.Direction == "ENTER_BUNKER"
+            and (os.clock() - (State.LastTransitionPrompt.Clock or 0)) <= 30
+            and (State.BunkerExitPromptObservedClock or 0) < (State.LastTransitionPrompt.Clock or 0)
+        )
+
+    if bunkerContext then
+        State.BunkerCollectorExitAttempts = State.BunkerCollectorExitAttempts + 1
+        autoRecord("TOTEM_COLLECT_REQUIRES_BUNKER_EXIT", {
+            SessionId = State.BunkerSessionId,
+            SessionActive = State.BunkerSessionActive,
+            Zone = State.CurrentZone,
+            EnterInProgress = State.BunkerEnterInProgress,
+            LastTransitionDirection = State.LastTransitionPrompt
+                and State.LastTransitionPrompt.Direction
+                or nil,
+            Policy = "WALK_TO_EXIT_PROMPT; NEVER_TELEPORT_DIRECTLY_FROM_BUNKER_TO_COLLECTOR",
+        })
+
+        if not State.BunkerSessionActive then
+            if not State.BunkerSessionId or State.BunkerSessionId <= 0 then
+                State.BunkerSessionId = 1
+            end
+            State.BunkerSessionActive = true
+            State.BunkerSessionReason = "COLLECTOR_RECOVERED_BUNKER_CONTEXT"
+            setZone("BUNKER", "COLLECTOR_RECOVERED_BUNKER_CONTEXT_FROM_ENTER_PROMPT")
+        end
+
+        local exited, exitReason = autoExitBunker()
+        if not exited then
+            State.BunkerCollectorExitFailed = State.BunkerCollectorExitFailed + 1
+            autoRecord("TOTEM_COLLECT_BUNKER_EXIT_FAILED", {
+                SessionId = State.BunkerSessionId,
+                Reason = exitReason,
+                Policy = "NO_COLLECTOR_TELEPORT_WHEN_EXIT_PROMPT_NOT_CONFIRMED",
+            })
+            return false, "BUNKER_EXIT_FAILED_BEFORE_COLLECT:" .. tostring(exitReason)
+        end
+
+        State.BunkerCollectorExitSuccessful = State.BunkerCollectorExitSuccessful + 1
+        autoRecord("TOTEM_COLLECT_BUNKER_EXIT_CONFIRMED", {
+            SessionId = State.BunkerSessionId,
+            Reason = exitReason,
+            Zone = State.CurrentZone,
+            NextAction = "COLLECT_TOTEM_FROM_MAIN",
+        })
+        task.wait(0.15)
+    end
+
+    return autoTeleportToCollectorAndConfirm()
+end
+
 local function autoEffectiveZone(record)
     if normalize(record.Name) == "bunker"
     and (record.Dependency == nil or tostring(record.Dependency) == "") then
@@ -3048,7 +3156,7 @@ local function autoTryContinuousIdleCollect()
         CollectorPath = details and details.CollectorPath,
         Threshold = AUTO_COLLECT_MIN,
     })
-    local collected, collectReason = autoTeleportToCollectorAndConfirm()
+    local collected, collectReason = autoCollectWithBunkerExit()
     if collected then
         autoRefreshFundsBlocks()
         local _, cheapestAfter, cheapestNameAfter = autoBlockedFundsSummary()
@@ -3434,7 +3542,7 @@ local function autoAttemptPurchase(record)
             Trigger = "PURCHASE_REJECTED_AND_LOCAL_MONEY_BELOW_DECLARED_PRICE",
         })
         if collectorAmount ~= nil and collectorAmount >= AUTO_COLLECT_MIN then
-            local collected, collectReason = autoTeleportToCollectorAndConfirm()
+            local collected, collectReason = autoCollectWithBunkerExit()
             if collected then
                 autoRefreshFundsBlocks()
                 task.wait(AUTO_POST_RESULT_WAIT)
@@ -4373,7 +4481,12 @@ local function buildReport()
                 WalkAttempts = State.BunkerWalkAttempts,
                 WalkSuccessful = State.BunkerWalkSuccessful,
                 WalkFailed = State.BunkerWalkFailed,
-                Policy = "LOCK_BUNKER_UNTIL_ZERO_PHYSICALLY_PRESENT_ELIGIBLE_BUTTONS; ENTER_EXIT_PROMPTS_ONLY",
+                ManualEnterCount = State.BunkerManualEnterCount,
+                ManualExitCount = State.BunkerManualExitCount,
+                CollectorExitAttempts = State.BunkerCollectorExitAttempts,
+                CollectorExitSuccessful = State.BunkerCollectorExitSuccessful,
+                CollectorExitFailed = State.BunkerCollectorExitFailed,
+                Policy = "LOCK_BUNKER_UNTIL_ZERO_PHYSICALLY_PRESENT_ELIGIBLE_BUTTONS; MANUAL_ENTER_IS_ADOPTED; COLLECTOR_REQUIRES_EXIT_PROMPT",
             },
             AutoRebirth = {
                 EnabledWithAutomation = true,
@@ -4418,7 +4531,7 @@ local function buildReport()
                 ContinuousCollectorPolling = true,
                 ContinuousCollectorThreshold = 1000,
                 CollectorPollingOnlyWhenNoPurchaseCandidate = true,
-                AutoCollectMovement = "SAFE_WORLD_Y_TELEPORT_TO_COLLECTOR_WITH_SURFACE_CHECK_AND_ROLLBACK",
+                AutoCollectMovement = "IF_BUNKER_CONTEXT: WALK_TO_EXIT_PROMPT_AND_CONFIRM_MAIN; THEN_SAFE_TELEPORT_TO_COLLECTOR",
                 AutoCollectEndpoint = "PHYSICAL_TOTEM_TOUCH_BY_CHARACTER",
                 AutoCollectDirectRemoteInvocation = false,
                 AutoCollectUnknownGameRemoteInvocation = false,
@@ -4434,7 +4547,7 @@ local function buildReport()
                 AutoRebirthDirectRemoteInvocation = false,
                 AutoRebirthConfirmation = "OBSERVED_REBIRTHS_INCREMENT",
                 DirectTeleport = true,
-                DirectTeleportScope = "MAIN_TYCOON_ONLY; NEVER_USED_FOR_BUNKER_ENTER_EXIT_OR_BUNKER_PURCHASES",
+                DirectTeleportScope = "MAIN_TYCOON_ONLY; COLLECTOR_TELEPORT_HARD_BLOCKED_WHILE_BUNKER_CONTEXT_ACTIVE",
                 MoneyBypass = false,
                 RebirthBypass = false,
                 MarketplaceBypass = false,
@@ -4496,10 +4609,10 @@ local function autoSaveNow(reason, timestamped)
         State.AutoSaveLastReason = reason
         return false, "WRITEFILE_UNAVAILABLE"
     end
-    local filename = "Tycoon_Purchase_Automator_V1_7_5_6_AutoSave_Latest.txt"
+    local filename = "Tycoon_Purchase_Automator_V1_7_5_7_AutoSave_Latest.txt"
     if timestamped then
         filename =
-            "Tycoon_Purchase_Automator_V1_7_5_6_AutoSave_" ..
+            "Tycoon_Purchase_Automator_V1_7_5_7_AutoSave_" ..
             reason ..
             "_" ..
             os.date("%Y%m%d_%H%M%S") ..
@@ -4612,7 +4725,7 @@ installAutoSaveWatchers()
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_7_5_6_" ..
+        "Tycoon_Purchase_Automator_V1_7_5_7_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
     local saved = false
@@ -4763,7 +4876,7 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
-UI.Status.Text = "AUTO V1.7.5.6 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "AUTO V1.7.5.7 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
 safeCall("UI_INITIAL_REFRESH", function()
     refreshUI()
 end)
