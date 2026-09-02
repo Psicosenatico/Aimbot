@@ -1,0 +1,784 @@
+--[[
+    8BALL-X AIM EXTENDER — Standalone No-Key V15
+    Baseado no payload capturado "8BALL-X AIM EXTENDER v14 — Final".
+
+    ALTERAÇÕES DESTA VERSÃO:
+      - Sem BloxHub.
+      - Sem senha / key.
+      - Sem HttpGet.
+      - Sem loadstring remoto.
+      - Corrige recriação quando Beam.Parent == nil.
+      - Corrige leituras de Size/CFrame que antes escapavam do pcall.
+      - Usa RunService.RenderStepped em vez de spawn()/wait().
+      - Limpa GUI, partes e conexão de uma execução anterior.
+      - Interface local, compatível com toque/celular.
+      - Mantém controles via getgenv().Extend.
+
+    TRAJETÓRIAS USADAS PELO JOGO:
+      TrajectoryViz.TrajMainLine    -> branco
+      TrajectoryViz.TrajDeflectLine -> ciano
+      TrajectoryViz.TrajHitLine     -> amarelo
+]]
+
+-- ============================================================
+-- Serviços
+-- ============================================================
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ============================================================
+-- Limpeza de execução anterior
+-- ============================================================
+local ENV = (getgenv and getgenv()) or _G
+local STATE_KEY = "__PSICO_8BALL_AIM_EXTENDER_V15"
+
+local oldState = ENV[STATE_KEY]
+if type(oldState) == "table" then
+    pcall(function()
+        if oldState.connection then
+            oldState.connection:Disconnect()
+        end
+    end)
+
+    pcall(function()
+        if oldState.gui then
+            oldState.gui:Destroy()
+        end
+    end)
+
+    pcall(function()
+        if oldState.floatGui then
+            oldState.floatGui:Destroy()
+        end
+    end)
+
+    if type(oldState.pool) == "table" then
+        for _, part in pairs(oldState.pool) do
+            pcall(function()
+                if part then
+                    part:Destroy()
+                end
+            end)
+        end
+    end
+end
+
+-- Remove sobras pelo nome, caso a execução anterior tenha sido interrompida.
+for _, name in ipairs({ "AimMain", "AimDefl", "AimHit" }) do
+    local old = Workspace:FindFirstChild(name)
+    if old then
+        pcall(function()
+            old:Destroy()
+        end)
+    end
+end
+
+-- ============================================================
+-- Configuração
+-- ============================================================
+local cfg = {
+    on = true,
+    mult = 8,
+    thick = 0.08,
+    transparency = 0.18,
+}
+
+local COLORS = {
+    Color3.fromRGB(255, 255, 255), -- TrajMainLine
+    Color3.fromRGB(80, 220, 255),  -- TrajDeflectLine
+    Color3.fromRGB(255, 220, 60),  -- TrajHitLine
+}
+
+local BEAM_NAMES = {
+    "AimMain",
+    "AimDefl",
+    "AimHit",
+}
+
+local SOURCE_NAMES = {
+    "TrajMainLine",
+    "TrajDeflectLine",
+    "TrajHitLine",
+}
+
+local pool = {}
+local state = {
+    pool = pool,
+    connection = nil,
+    gui = nil,
+    floatGui = nil,
+    connections = {},
+}
+
+local function trackConnection(conn)
+    if conn then
+        table.insert(state.connections, conn)
+    end
+    return conn
+end
+
+ENV[STATE_KEY] = state
+
+-- ============================================================
+-- Utilidades seguras
+-- ============================================================
+local function clamp(n, minV, maxV)
+    n = tonumber(n) or minV
+    if n < minV then return minV end
+    if n > maxV then return maxV end
+    return n
+end
+
+local function safeParent(inst)
+    if not inst then
+        return nil, false
+    end
+
+    local ok, parent = pcall(function()
+        return inst.Parent
+    end)
+
+    return parent, ok
+end
+
+local function isAlive(inst)
+    local parent, ok = safeParent(inst)
+    return ok and parent ~= nil
+end
+
+local function safeProperty(inst, property)
+    if not inst then
+        return nil, false
+    end
+
+    local ok, value = pcall(function()
+        return inst[property]
+    end)
+
+    if not ok then
+        return nil, false
+    end
+
+    return value, true
+end
+
+local function safeSetTransparency(inst, value)
+    if not inst then return end
+    pcall(function()
+        inst.Transparency = value
+    end)
+end
+
+-- ============================================================
+-- Beam pool
+-- ============================================================
+local function createBeam(idx)
+    local old = pool[idx]
+    if old then
+        pcall(function()
+            old:Destroy()
+        end)
+    end
+
+    local b = Instance.new("Part")
+    b.Name = BEAM_NAMES[idx]
+    b.Anchored = true
+    b.CanCollide = false
+    b.CanQuery = false
+    b.CanTouch = false
+    b.CastShadow = false
+    b.Material = Enum.Material.Neon
+    b.Color = COLORS[idx]
+    b.Transparency = 1
+    b.Shape = Enum.PartType.Cylinder
+    b.Size = Vector3.new(1, cfg.thick, cfg.thick)
+    b.Parent = Workspace
+
+    pool[idx] = b
+    return b
+end
+
+local function getBeam(idx)
+    local b = pool[idx]
+
+    -- CORREÇÃO PRINCIPAL:
+    -- O original testava somente se pcall falhava.
+    -- Parent == nil retorna pcall=true, parent=nil e passava despercebido.
+    if not isAlive(b) then
+        pool[idx] = nil
+        b = createBeam(idx)
+    end
+
+    return b
+end
+
+local function hideOne(idx)
+    safeSetTransparency(pool[idx], 1)
+end
+
+local function hideAll()
+    for i = 1, 3 do
+        hideOne(i)
+    end
+end
+
+local function destroyAllBeams()
+    for i = 1, 3 do
+        local b = pool[i]
+        pool[i] = nil
+        if b then
+            pcall(function()
+                b:Destroy()
+            end)
+        end
+    end
+end
+
+-- ============================================================
+-- Overlay da linha estendida
+-- ============================================================
+local function overlay(idx, gameLine)
+    if not gameLine then
+        hideOne(idx)
+        return
+    end
+
+    local transparency, okTransparency = safeProperty(gameLine, "Transparency")
+    if not okTransparency or type(transparency) ~= "number" or transparency > 0.5 then
+        hideOne(idx)
+        return
+    end
+
+    -- CORREÇÃO:
+    -- O original fazia pcall(Size.X) e depois acessava Size.X novamente
+    -- fora da proteção.
+    local size, okSize = safeProperty(gameLine, "Size")
+    if not okSize or typeof(size) ~= "Vector3" then
+        hideOne(idx)
+        return
+    end
+
+    local L = size.X
+    if type(L) ~= "number" or L < 0.1 then
+        hideOne(idx)
+        return
+    end
+
+    -- CORREÇÃO:
+    -- CFrame também é lido uma única vez dentro do pcall.
+    local cf, okCF = safeProperty(gameLine, "CFrame")
+    if not okCF or typeof(cf) ~= "CFrame" then
+        hideOne(idx)
+        return
+    end
+
+    local dir = cf.RightVector
+    local mid = cf.Position
+
+    if dir.Magnitude < 0.001 then
+        hideOne(idx)
+        return
+    end
+
+    dir = dir.Unit
+
+    -- Mantém o início da linha original.
+    local startPos = mid - dir * L * 0.5
+
+    local okBeam, b = pcall(getBeam, idx)
+    if not okBeam or not b then
+        return
+    end
+
+    local newLen = math.max(0.1, L * cfg.mult)
+    local nMid = startPos + dir * (0.3 + newLen * 0.5)
+
+    pcall(function()
+        b.Color = COLORS[idx]
+        b.Size = Vector3.new(newLen, cfg.thick, cfg.thick)
+
+        -- Preserva a mesma estratégia geométrica do payload original.
+        b.CFrame =
+            CFrame.new(nMid, nMid + dir)
+            * CFrame.Angles(0, math.pi * 0.5, 0)
+
+        b.Transparency = cfg.transparency
+    end)
+end
+
+-- ============================================================
+-- Atualização
+-- ============================================================
+local ticker = 0
+
+local function findTrajectoryViz()
+    -- Mantém primeiro a localização utilizada pelo script original.
+    return Workspace:FindFirstChild("TrajectoryViz")
+end
+
+local function update()
+    if not cfg.on then
+        hideAll()
+        return
+    end
+
+    ticker += 1
+
+    -- Verificação periódica corrigida.
+    if ticker >= 120 then
+        ticker = 0
+
+        for i = 1, 3 do
+            if pool[i] and not isAlive(pool[i]) then
+                pool[i] = nil
+            end
+        end
+    end
+
+    local tv = findTrajectoryViz()
+    if not tv then
+        hideAll()
+        return
+    end
+
+    for i = 1, 3 do
+        overlay(i, tv:FindFirstChild(SOURCE_NAMES[i]))
+    end
+end
+
+state.connection = RunService.RenderStepped:Connect(function()
+    local ok, err = pcall(update)
+    if not ok then
+        -- Não interrompe o loop por um erro transitório do jogo.
+        warn("[8BALL-X V15] Update error:", err)
+        hideAll()
+    end
+end)
+
+-- ============================================================
+-- API para console / outros menus
+-- ============================================================
+local API = {}
+
+function API.on()
+    cfg.on = true
+    return cfg.on
+end
+
+function API.off()
+    cfg.on = false
+    hideAll()
+    return cfg.on
+end
+
+function API.toggle()
+    cfg.on = not cfg.on
+    if not cfg.on then
+        hideAll()
+    end
+    return cfg.on
+end
+
+function API.x(n)
+    cfg.mult = clamp(n or cfg.mult, 2, 15)
+    return cfg.mult
+end
+
+function API.thickness(n)
+    cfg.thick = clamp(n or cfg.thick, 0.04, 0.20)
+    return cfg.thick
+end
+
+function API.status()
+    local tv = Workspace:FindFirstChild("TrajectoryViz")
+
+    return {
+        on = cfg.on,
+        mult = cfg.mult,
+        thick = cfg.thick,
+        trajectoryViz = tv ~= nil,
+        main = tv and tv:FindFirstChild("TrajMainLine") ~= nil or false,
+        deflect = tv and tv:FindFirstChild("TrajDeflectLine") ~= nil or false,
+        hit = tv and tv:FindFirstChild("TrajHitLine") ~= nil or false,
+    }
+end
+
+function API.destroy()
+    cfg.on = false
+
+    pcall(function()
+        if state.connection then
+            state.connection:Disconnect()
+            state.connection = nil
+        end
+    end)
+
+    for _, conn in ipairs(state.connections) do
+        pcall(function()
+            conn:Disconnect()
+        end)
+    end
+    table.clear(state.connections)
+
+    destroyAllBeams()
+
+    pcall(function()
+        if state.gui then
+            state.gui:Destroy()
+            state.gui = nil
+        end
+    end)
+
+    pcall(function()
+        if state.floatGui then
+            state.floatGui:Destroy()
+            state.floatGui = nil
+        end
+    end)
+
+    ENV[STATE_KEY] = nil
+end
+
+ENV.Extend = API
+
+-- ============================================================
+-- Interface local — sem biblioteca externa / sem key
+-- ============================================================
+local guiParent = nil
+
+pcall(function()
+    if type(gethui) == "function" then
+        guiParent = gethui()
+    end
+end)
+
+if not guiParent then
+    pcall(function()
+        guiParent = game:GetService("CoreGui")
+    end)
+end
+
+if not guiParent and LocalPlayer then
+    guiParent = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+end
+
+local function round(obj, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius or 10)
+    c.Parent = obj
+    return c
+end
+
+local function stroke(obj, thickness, transparency)
+    local s = Instance.new("UIStroke")
+    s.Thickness = thickness or 1
+    s.Transparency = transparency or 0
+    s.Color = Color3.fromRGB(75, 120, 180)
+    s.Parent = obj
+    return s
+end
+
+local function makeButton(parent, text, size, pos)
+    local b = Instance.new("TextButton")
+    b.AutoButtonColor = true
+    b.BackgroundColor3 = Color3.fromRGB(28, 42, 64)
+    b.BorderSizePixel = 0
+    b.Size = size
+    b.Position = pos
+    b.Font = Enum.Font.GothamSemibold
+    b.Text = text
+    b.TextColor3 = Color3.fromRGB(235, 240, 248)
+    b.TextSize = 14
+    b.Parent = parent
+    round(b, 8)
+    return b
+end
+
+local function makeLabel(parent, text, size, pos, textSize)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Size = size
+    l.Position = pos
+    l.Font = Enum.Font.Gotham
+    l.Text = text
+    l.TextColor3 = Color3.fromRGB(225, 231, 240)
+    l.TextSize = textSize or 14
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = parent
+    return l
+end
+
+if guiParent then
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "Psico8BallAimExtenderV15"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = false
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent = guiParent
+    state.gui = gui
+
+    local frame = Instance.new("Frame")
+    frame.Name = "Main"
+    frame.AnchorPoint = Vector2.new(0.5, 0.5)
+    frame.Position = UDim2.fromScale(0.5, 0.5)
+    frame.Size = UDim2.new(0, 390, 0, 250)
+    frame.BackgroundColor3 = Color3.fromRGB(15, 22, 34)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Parent = gui
+    round(frame, 14)
+    stroke(frame, 1, 0.25)
+
+    local title = makeLabel(
+        frame,
+        "8BALL-X | Aim Extender — No Key",
+        UDim2.new(1, -96, 0, 34),
+        UDim2.new(0, 14, 0, 8),
+        16
+    )
+    title.Font = Enum.Font.GothamBold
+
+    local close = makeButton(
+        frame,
+        "×",
+        UDim2.new(0, 36, 0, 30),
+        UDim2.new(1, -44, 0, 8)
+    )
+    close.TextSize = 22
+
+    local minimize = makeButton(
+        frame,
+        "—",
+        UDim2.new(0, 36, 0, 30),
+        UDim2.new(1, -84, 0, 8)
+    )
+    minimize.TextSize = 20
+
+    local statusLabel = makeLabel(
+        frame,
+        "",
+        UDim2.new(1, -28, 0, 24),
+        UDim2.new(0, 14, 0, 48),
+        13
+    )
+
+    local enableButton = makeButton(
+        frame,
+        "",
+        UDim2.new(1, -28, 0, 38),
+        UDim2.new(0, 14, 0, 78)
+    )
+
+    local multText = makeLabel(
+        frame,
+        "",
+        UDim2.new(0, 190, 0, 34),
+        UDim2.new(0, 14, 0, 128),
+        14
+    )
+
+    local multMinus = makeButton(
+        frame,
+        "−",
+        UDim2.new(0, 52, 0, 34),
+        UDim2.new(1, -128, 0, 126)
+    )
+
+    local multPlus = makeButton(
+        frame,
+        "+",
+        UDim2.new(0, 52, 0, 34),
+        UDim2.new(1, -68, 0, 126)
+    )
+
+    local thickText = makeLabel(
+        frame,
+        "",
+        UDim2.new(0, 190, 0, 34),
+        UDim2.new(0, 14, 0, 170),
+        14
+    )
+
+    local thickMinus = makeButton(
+        frame,
+        "−",
+        UDim2.new(0, 52, 0, 34),
+        UDim2.new(1, -128, 0, 168)
+    )
+
+    local thickPlus = makeButton(
+        frame,
+        "+",
+        UDim2.new(0, 52, 0, 34),
+        UDim2.new(1, -68, 0, 168)
+    )
+
+    local reset = makeButton(
+        frame,
+        "Restaurar padrões",
+        UDim2.new(1, -28, 0, 34),
+        UDim2.new(0, 14, 1, -46)
+    )
+
+    local function refreshUI()
+        enableButton.Text = cfg.on and "Aim Extender: ATIVADO" or "Aim Extender: DESATIVADO"
+        multText.Text = string.format("Multiplicador: %.0fx", cfg.mult)
+        thickText.Text = string.format("Espessura: %.2f", cfg.thick)
+
+        local tv = Workspace:FindFirstChild("TrajectoryViz")
+        if tv then
+            local found = 0
+            for _, sourceName in ipairs(SOURCE_NAMES) do
+                if tv:FindFirstChild(sourceName) then
+                    found += 1
+                end
+            end
+            statusLabel.Text = string.format("TrajectoryViz detectado • %d/3 linhas", found)
+        else
+            statusLabel.Text = "Aguardando Workspace.TrajectoryViz..."
+        end
+    end
+
+    enableButton.Activated:Connect(function()
+        API.toggle()
+        refreshUI()
+    end)
+
+    multMinus.Activated:Connect(function()
+        API.x(cfg.mult - 1)
+        refreshUI()
+    end)
+
+    multPlus.Activated:Connect(function()
+        API.x(cfg.mult + 1)
+        refreshUI()
+    end)
+
+    thickMinus.Activated:Connect(function()
+        API.thickness(cfg.thick - 0.01)
+        refreshUI()
+    end)
+
+    thickPlus.Activated:Connect(function()
+        API.thickness(cfg.thick + 0.01)
+        refreshUI()
+    end)
+
+    reset.Activated:Connect(function()
+        cfg.mult = 8
+        cfg.thick = 0.08
+        cfg.on = true
+        refreshUI()
+    end)
+
+    close.Activated:Connect(function()
+        API.destroy()
+    end)
+
+    -- ========================================================
+    -- Botão flutuante para restaurar o menu
+    -- ========================================================
+    local float = Instance.new("TextButton")
+    float.Name = "FloatingButton"
+    float.Size = UDim2.new(0, 58, 0, 58)
+    float.Position = UDim2.new(0, 22, 0.5, -29)
+    float.BackgroundColor3 = Color3.fromRGB(22, 48, 80)
+    float.BorderSizePixel = 0
+    float.Text = "8B"
+    float.Font = Enum.Font.GothamBold
+    float.TextColor3 = Color3.fromRGB(245, 248, 255)
+    float.TextSize = 17
+    float.Visible = false
+    float.Active = true
+    float.Parent = gui
+    round(float, 29)
+    stroke(float, 1, 0.2)
+
+    local function setMinimized(isMinimized)
+        frame.Visible = not isMinimized
+        float.Visible = isMinimized
+    end
+
+    minimize.Activated:Connect(function()
+        setMinimized(true)
+    end)
+
+    float.Activated:Connect(function()
+        setMinimized(false)
+    end)
+
+    -- ========================================================
+    -- Drag genérico para mouse e toque
+    -- ========================================================
+    local function makeDraggable(guiObject)
+        local dragging = false
+        local dragInput = nil
+        local dragStart = nil
+        local startPos = nil
+
+        guiObject.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+
+                dragging = true
+                dragStart = input.Position
+                startPos = guiObject.Position
+
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then
+                        dragging = false
+                    end
+                end)
+            end
+        end)
+
+        guiObject.InputChanged:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseMovement
+                or input.UserInputType == Enum.UserInputType.Touch then
+                dragInput = input
+            end
+        end)
+
+        trackConnection(UserInputService.InputChanged:Connect(function(input)
+            if dragging and input == dragInput and dragStart and startPos then
+                local delta = input.Position - dragStart
+                guiObject.Position = UDim2.new(
+                    startPos.X.Scale,
+                    startPos.X.Offset + delta.X,
+                    startPos.Y.Scale,
+                    startPos.Y.Offset + delta.Y
+                )
+            end
+        end))
+    end
+
+    makeDraggable(frame)
+    makeDraggable(float)
+
+    -- RightShift continua disponível quando houver teclado.
+    trackConnection(UserInputService.InputBegan:Connect(function(input, processed)
+        if processed then return end
+
+        if input.KeyCode == Enum.KeyCode.RightShift then
+            setMinimized(frame.Visible)
+        end
+    end))
+
+    -- Atualiza somente o texto de diagnóstico algumas vezes por segundo.
+    task.spawn(function()
+        while gui.Parent do
+            pcall(refreshUI)
+            task.wait(0.5)
+        end
+    end)
+
+    refreshUI()
+end
+
+print("[8BALL-X V15] Aim Extender standalone carregado.")
+print("[8BALL-X V15] Sem key, sem BloxHub e sem carregamento remoto.")
+print("[8BALL-X V15] API: getgenv().Extend.on()/off()/toggle()/x(n)/thickness(n)/status()/destroy()")
