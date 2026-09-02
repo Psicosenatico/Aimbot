@@ -1247,23 +1247,23 @@ local function GetJokerIconAsset()
     end
 
     local fileName =
-        "Psicosenatico_Joker_Icon.png"
+        "Psicosenatico_Floating_Face_Updated.png"
 
     local ok = pcall(
         function()
 
-            local shouldWrite = true
-
-            if type(isfile) == "function" then
-                shouldWrite = not isfile(fileName)
+            if type(delfile) == "function"
+            and type(isfile) == "function"
+            and isfile(fileName) then
+                pcall(function()
+                    delfile(fileName)
+                end)
             end
 
-            if shouldWrite then
-                writefile(
-                    fileName,
-                    DecodeBase64(JOKER_ICON_B64)
-                )
-            end
+            writefile(
+                fileName,
+                DecodeBase64(JOKER_ICON_B64)
+            )
         end
     )
 
