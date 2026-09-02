@@ -1,8 +1,12 @@
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
 
-local GUI_NAME = "MAM2_XGRSScanner_V5"
-local PREFIX = "MAM2_XGRS_V5"
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer and (LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 10))
+
+local GUI_NAME = "MAM2_XGRSScanner_V51"
+local PREFIX = "MAM2_XGRS_V51"
 
 local running = false
 local startedAt = 0
@@ -13,6 +17,8 @@ local watchedText = {}
 local semanticObjects = {}
 local semanticIndex = {}
 local MAX_EVENTS = 1200
+local checkpointScheduled = false
+local checkpointSaved = false
 
 local ROOT_NAMES = {
     ["XGRS_UniversalLoader"] = true,
@@ -175,6 +181,8 @@ local function attachTextWatcher(obj, root)
     connections[#connections + 1] = conn
 end
 
+local saveReport
+
 local function registerRoot(obj)
     if trackedRoots[obj] then return end
     trackedRoots[obj] = true
@@ -186,6 +194,20 @@ local function registerRoot(obj)
     })
 
     rememberSemantic(obj, obj)
+
+    -- Quando o HUD final aparece, salva UM checkpoint leve alguns segundos depois.
+    -- O scanner continua rodando e ainda pode ser finalizado manualmente.
+    if obj.Name == "PlayerHUD_Overlay" and not checkpointScheduled then
+        checkpointScheduled = true
+        task.delay(8, function()
+            if running and not checkpointSaved then
+                checkpointSaved = true
+                pcall(function()
+                    saveReport("checkpoint")
+                end)
+            end
+        end)
+    end
 end
 
 local function handleAdded(obj)
@@ -359,9 +381,9 @@ local function makeTxt(report)
     return table.concat(lines, "\n")
 end
 
-local function saveReport()
+saveReport = function(suffix)
     local report = {
-        version = "MAM2 XGRS Injection Scanner V5",
+        version = "MAM2 XGRS Injection Scanner V5.1",
         startedUnix = events[1] and events[1].unix or unix(),
         endedUnix = unix(),
         duration = now() - startedAt,
@@ -377,9 +399,10 @@ local function saveReport()
             "UniverseCrystalEsp",
         },
         notes = {
-            "CoreGui only.",
+            "Observation target: CoreGui only.",
+            "Scanner UI is hosted in PlayerGui only to avoid XGRS CoreGui cleanup.",
+            "PlayerGui contents are NOT monitored.",
             "No ReplicatedStorage.",
-            "No PlayerGui.",
             "No recursive full-tree scan.",
             "No periodic full-state capture.",
             "Purely visual classes are ignored.",
@@ -391,8 +414,9 @@ local function saveReport()
     local txt = makeTxt(report)
 
     local stamp = os.date("!%Y%m%d_%H%M%S")
-    local jsonName = PREFIX .. "_" .. stamp .. ".json"
-    local txtName = PREFIX .. "_" .. stamp .. "_report.txt"
+    local tag = suffix and ("_" .. suffix) or ""
+    local jsonName = PREFIX .. "_" .. stamp .. tag .. ".json"
+    local txtName = PREFIX .. "_" .. stamp .. tag .. "_report.txt"
 
     local jsonOK = false
     local txtOK = false
@@ -427,6 +451,8 @@ local function startScanner()
     watchedText = {}
     semanticObjects = {}
     semanticIndex = {}
+    checkpointScheduled = false
+    checkpointSaved = false
 
     startedAt = now()
     running = true
@@ -447,13 +473,19 @@ local function stopScanner()
     running = false
     disconnectAll()
 
-    return saveReport()
+    return saveReport("final")
 end
 
--- Interface simples
+-- Interface isolada do CoreGui observado.
+-- Preferimos PlayerGui para que a limpeza/injeção do XGRS em CoreGui
+-- não remova o botão do scanner.
 pcall(function()
-    local old = CoreGui:FindFirstChild(GUI_NAME)
-    if old then old:Destroy() end
+    if PlayerGui then
+        local old = PlayerGui:FindFirstChild(GUI_NAME)
+        if old then old:Destroy() end
+    end
+    local oldCore = CoreGui:FindFirstChild(GUI_NAME)
+    if oldCore then oldCore:Destroy() end
 end)
 
 local gui = Instance.new("ScreenGui")
@@ -461,14 +493,10 @@ gui.Name = GUI_NAME
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 
-local parented = false
-pcall(function()
-    if gethui then
-        gui.Parent = gethui()
-        parented = true
-    end
-end)
-if not parented then
+if PlayerGui then
+    gui.Parent = PlayerGui
+else
+    -- fallback apenas se PlayerGui não estiver disponível
     gui.Parent = CoreGui
 end
 
@@ -487,7 +515,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1,-20,0,40)
 title.Position = UDim2.fromOffset(10,8)
 title.BackgroundTransparency = 1
-title.Text = "MAM2 XGRS Scanner V5"
+title.Text = "MAM2 XGRS Scanner V5.1"
 title.TextColor3 = Color3.fromRGB(245,245,245)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 19
@@ -538,9 +566,9 @@ button.MouseButton1Click:Connect(function()
             status.Text = "Falha ao salvar"
         end
 
-        print("MAM2 V5 JSON:", jsonName, jsonOK)
-        print("MAM2 V5 TXT:", txtName, txtOK)
+        print("MAM2 V5.1 JSON:", jsonName, jsonOK)
+        print("MAM2 V5.1 TXT:", txtName, txtOK)
     end
 end)
 
-print("MAM2 XGRS Injection Scanner V5 carregado.")
+print("MAM2 XGRS Injection Scanner V5.1 carregado.")
