@@ -1,219 +1,427 @@
---[[
-    Mine a Mountain 2 — Extrator Estático Multicamadas V2
-    Objetivo:
-      - Baixar e salvar camadas remotas para análise.
-      - NÃO executar nenhum conteúdo remoto recebido.
-      - Identificar URLs, loaders, referências a key/premium/free e cache.
-      - Encerrar com relatório e lista de candidatos.
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
 
-    Observação:
-      Este extrator é somente para inspeção estática.
-      Ele NÃO remove, altera ou contorna validação de chave/acesso premium.
-]]
+local LocalPlayer = Players.LocalPlayer
 
-local PREFIX = "MAM2_V2"
-local MAX_LAYERS = 6
-local MAX_BYTES = 2 * 1024 * 1024
-local START_URL = "https://api.xgrs.lol/storage/xgrs-loader"
+local GUI_NAME = "MAM2_RuntimeScanner_V3"
+local PREFIX = "MAM2_RUNTIME"
+local running = false
+local startedAt = 0
+local connections = {}
+local events = {}
+local snapshots = {}
+local seenInstances = {}
+local lastGuiCount = 0
 
-local seenUrls = {}
-local report = {}
-local candidates = {}
-local saved = {}
-
-local function push(t, s)
-    t[#t + 1] = tostring(s)
+local function now()
+    return os.clock()
 end
 
-local function safeWrite(path, data)
-    if not writefile then
-        return false, "writefile indisponível"
-    end
-    local ok, err = pcall(writefile, path, data)
-    return ok, err
+local function unix()
+    return os.time()
 end
 
-local function rollingHash(s)
-    local h = 2166136261
-    for i = 1, #s do
-        h = bit32.bxor(h, string.byte(s, i))
-        h = (h * 16777619) % 4294967296
-    end
-    return string.format("%08X", h)
+local function safeStr(v)
+    local ok, s = pcall(tostring, v)
+    return ok and s or "<tostring error>"
 end
 
-local function countPlain(haystack, needle)
-    local n, pos = 0, 1
-    while true do
-        local a, b = string.find(haystack, needle, pos, true)
-        if not a then break end
-        n += 1
-        pos = b + 1
-    end
-    return n
-end
-
-local function addCandidate(kind, value)
-    if not value or value == "" then return end
-    local key = kind .. "|" .. tostring(value)
-    if candidates[key] then return end
-    candidates[key] = true
-    push(report, string.format("  [%s] %s", kind, value))
-end
-
-local function scanInteresting(layer, body)
-    local low = body:lower()
-    local tags = {
-        {"loadstring", "loadstring"}, {"HttpGet", "httpget"},
-        {"writefile", "writefile"}, {"readfile", "readfile"},
-        {"delfile", "delfile"}, {"makefolder", "makefolder"},
-        {"key", "key"}, {"premium", "premium"}, {"free", "free"},
-        {"loader", "loader"}, {"luarmor", "luarmor"}, {"xgrs", "xgrs"}
+local function pushEvent(kind, data)
+    if not running then return end
+    events[#events + 1] = {
+        t = now() - startedAt,
+        unix = unix(),
+        kind = kind,
+        data = data,
     }
-    for _, item in ipairs(tags) do
-        local n = countPlain(low, item[2])
-        if n > 0 then
-            push(report, string.format("  %-22s : %d", item[1], n))
-        end
-    end
-
-    for url in body:gmatch('https?://[^%s"\']+') do
-        addCandidate("URL_LAYER_" .. layer, url)
-    end
-    for host in body:gmatch('([%w%-_]+%.luarmor%.net)') do
-        addCandidate("HOST_LAYER_" .. layer, host)
-    end
-    for host in body:gmatch('([%w%-_]+%.xgrs%.lol)') do
-        addCandidate("HOST_LAYER_" .. layer, host)
-    end
-    for file in body:gmatch('([%w%-%._]+%.lua)') do
-        addCandidate("LUA_LAYER_" .. layer, file)
-    end
 end
 
-local function fetch(url)
-    local ok, data = pcall(function()
-        return game:HttpGet(url)
+local function instancePath(inst)
+    local ok, full = pcall(function()
+        return inst:GetFullName()
     end)
-    if not ok then return nil, tostring(data) end
-    if type(data) ~= "string" then return nil, "resposta não textual" end
-    if #data > MAX_BYTES then return nil, "resposta acima do limite de segurança" end
-    return data
+    return ok and full or safeStr(inst)
 end
 
-local function chooseNextUrl(body)
-    local u = body:match('HttpGet%s*%(%s*["\'](https?://.-)["\']')
-    if u and not seenUrls[u] then return u end
+local interestingWords = {
+    "xgrs", "key", "premium", "free", "loader", "inject",
+    "crystal", "duper", "auth", "license", "luarmor",
+}
 
-    for url in body:gmatch('https?://[^%s"\']+') do
-        url = url:gsub('[%)%;,%]]+$', '')
-        if url:find(".lua", 1, true) and not seenUrls[url] then
-            return url
+local function textLooksInteresting(text)
+    if type(text) ~= "string" then return false end
+    local low = text:lower()
+    for _, w in ipairs(interestingWords) do
+        if low:find(w, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function inspectTextObject(obj)
+    local ok, text = pcall(function()
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+            return obj.Text
+        end
+    end)
+    if ok and text and textLooksInteresting(text) then
+        pushEvent("TEXT_SEEN", {
+            path = instancePath(obj),
+            class = obj.ClassName,
+            text = text,
+        })
+    end
+end
+
+local function inspectInstance(obj, reason)
+    if not running or not obj then return end
+    local id = tostring(obj)
+    if seenInstances[id] then return end
+    seenInstances[id] = true
+
+    local path = instancePath(obj)
+    local name = safeStr(obj.Name)
+    local className = safeStr(obj.ClassName)
+
+    if textLooksInteresting(name) or className:find("Remote") or className:find("Bindable") then
+        pushEvent("INSTANCE_SEEN", {
+            reason = reason,
+            path = path,
+            name = name,
+            class = className,
+        })
+    end
+
+    inspectTextObject(obj)
+end
+
+local function scanContainer(root, label)
+    local ok, descendants = pcall(function()
+        return root:GetDescendants()
+    end)
+    if not ok then return end
+
+    for _, obj in ipairs(descendants) do
+        inspectInstance(obj, "scan:" .. label)
+    end
+end
+
+local function snapshot(reason)
+    if not running then return end
+
+    local snap = {
+        t = now() - startedAt,
+        unix = unix(),
+        reason = reason,
+        playerGui = {},
+        coreGui = {},
+        replicatedStorage = {},
+    }
+
+    local function collect(root, bucket)
+        local ok, children = pcall(function()
+            return root:GetChildren()
+        end)
+        if not ok then return end
+
+        for _, obj in ipairs(children) do
+            bucket[#bucket + 1] = {
+                name = safeStr(obj.Name),
+                class = safeStr(obj.ClassName),
+                path = instancePath(obj),
+            }
         end
     end
 
-    if body:find("cdn.luarmor.net", 1, true) and body:find("v4_init_marbeg.lua", 1, true) then
-        local u2 = "https://cdn.luarmor.net/v4_init_marbeg.lua"
-        if not seenUrls[u2] then return u2 end
+    if LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") then
+        collect(LocalPlayer.PlayerGui, snap.playerGui)
     end
-    return nil
+    collect(CoreGui, snap.coreGui)
+    collect(ReplicatedStorage, snap.replicatedStorage)
+
+    snapshots[#snapshots + 1] = snap
 end
 
-push(report, "Mine a Mountain 2 — Extrator Estático Multicamadas V2")
-push(report, "Início.")
-push(report, "IMPORTANTE: nenhum payload recebido será executado.")
-push(report, "Este extrator não remove/contorna validação de chave ou acesso premium.")
-push(report, "")
+local function disconnectAll()
+    for _, c in ipairs(connections) do
+        pcall(function() c:Disconnect() end)
+    end
+    connections = {}
+end
 
-local url = START_URL
-for layer = 1, MAX_LAYERS do
-    if not url or seenUrls[url] then break end
-    seenUrls[url] = true
+local function jsonEncodeSafe(data)
+    local ok, result = pcall(function()
+        return HttpService:JSONEncode(data)
+    end)
+    if ok then return result end
+    return '{"error":"JSONEncode failed"}'
+end
 
-    push(report, string.format("=== CAMADA %d ===", layer))
-    push(report, "URL: " .. url)
+local function saveReport()
+    local report = {
+        version = "MAM2 Runtime Scanner V3",
+        purpose = "Client-observable runtime collection only",
+        startedUnix = events[1] and events[1].unix or unix(),
+        endedUnix = unix(),
+        duration = now() - startedAt,
+        eventCount = #events,
+        snapshotCount = #snapshots,
+        events = events,
+        snapshots = snapshots,
+        notes = {
+            "No premium/key bypass is implemented.",
+            "No remote response is forged.",
+            "No downloaded payload is modified or executed by this collector.",
+        }
+    }
 
-    local body, err = fetch(url)
-    if not body then
-        push(report, "ERRO: " .. tostring(err))
-        push(report, "")
-        break
+    local stamp = os.date("!%Y%m%d_%H%M%S")
+    local jsonName = PREFIX .. "_" .. stamp .. ".json"
+    local txtName = PREFIX .. "_" .. stamp .. "_report.txt"
+
+    local okJson, errJson = false, "writefile unavailable"
+    local okTxt, errTxt = false, "writefile unavailable"
+
+    if writefile then
+        okJson, errJson = pcall(writefile, jsonName, jsonEncodeSafe(report))
+
+        local lines = {
+            "Mine a Mountain 2 — Runtime Scanner V3",
+            "Eventos: " .. tostring(#events),
+            "Snapshots: " .. tostring(#snapshots),
+            "Duração: " .. string.format("%.2fs", now() - startedAt),
+            "",
+            "Ocorrências relevantes:"
+        }
+
+        for _, ev in ipairs(events) do
+            if ev.kind == "TEXT_SEEN" then
+                lines[#lines + 1] = string.format(
+                    "[%.2fs] %s | %s",
+                    ev.t or 0,
+                    ev.data and ev.data.path or "?",
+                    ev.data and ev.data.text or "?"
+                )
+            elseif ev.kind == "INSTANCE_SEEN" then
+                lines[#lines + 1] = string.format(
+                    "[%.2fs] %s | %s | %s",
+                    ev.t or 0,
+                    ev.data and ev.data.class or "?",
+                    ev.data and ev.data.path or "?",
+                    ev.data and ev.data.reason or "?"
+                )
+            else
+                lines[#lines + 1] = string.format(
+                    "[%.2fs] %s",
+                    ev.t or 0,
+                    ev.kind or "?"
+                )
+            end
+        end
+
+        okTxt, errTxt = pcall(writefile, txtName, table.concat(lines, "\n"))
     end
 
-    local lineCount = 1
-    for _ in body:gmatch("\n") do lineCount += 1 end
-    push(report, "Bytes: " .. #body)
-    push(report, "Hash rolling: " .. rollingHash(body))
-    push(report, "Linhas: " .. lineCount)
-    scanInteresting(layer, body)
-
-    local rawPath = string.format("%s_%02d_layer_raw.txt", PREFIX, layer)
-    local okWrite, writeErr = safeWrite(rawPath, body)
-    if okWrite then
-        push(saved, rawPath)
-        push(report, "Salvo em: " .. rawPath)
-    else
-        push(report, "Falha ao salvar: " .. tostring(writeErr))
+    if setclipboard then
+        pcall(setclipboard, jsonEncodeSafe(report))
     end
 
-    local interestingLines = {}
-    local idx = 0
-    for line in (body .. "\n"):gmatch("(.-)\n") do
-        idx += 1
-        local low = line:lower()
-        if low:find("key", 1, true) or low:find("premium", 1, true)
-            or low:find("free", 1, true) or low:find("loadstring", 1, true)
-            or low:find("httpget", 1, true) or low:find("writefile", 1, true)
-            or low:find("readfile", 1, true) or low:find("luarmor", 1, true)
-            or low:find("xgrs", 1, true) then
-            push(interestingLines, string.format("[%d] %s", idx, line))
+    return okJson or okTxt, jsonName, txtName, tostring(errJson), tostring(errTxt)
+end
+
+local function startScanner()
+    if running then return end
+
+    events = {}
+    snapshots = {}
+    seenInstances = {}
+    connections = {}
+    startedAt = now()
+    running = true
+
+    pushEvent("SCAN_START", {
+        placeId = game.PlaceId,
+        jobId = game.JobId,
+    })
+
+    snapshot("start")
+
+    local function watchRoot(root, label)
+        if not root then return end
+
+        scanContainer(root, label)
+
+        connections[#connections + 1] = root.DescendantAdded:Connect(function(obj)
+            inspectInstance(obj, "added:" .. label)
+
+            if textLooksInteresting(obj.Name) or obj:IsA("ScreenGui") then
+                task.defer(function()
+                    if running then
+                        snapshot("descendant_added:" .. label)
+                    end
+                end)
+            end
+
+            if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+                local ok, conn = pcall(function()
+                    return obj:GetPropertyChangedSignal("Text"):Connect(function()
+                        if running and textLooksInteresting(obj.Text) then
+                            pushEvent("TEXT_CHANGED", {
+                                path = instancePath(obj),
+                                class = obj.ClassName,
+                                text = obj.Text,
+                            })
+                        end
+                    end)
+                end)
+                if ok and conn then
+                    connections[#connections + 1] = conn
+                end
+            end
+        end)
+    end
+
+    watchRoot(CoreGui, "CoreGui")
+    watchRoot(ReplicatedStorage, "ReplicatedStorage")
+
+    if LocalPlayer then
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then
+            watchRoot(pg, "PlayerGui")
         end
     end
 
-    if #interestingLines > 0 then
-        local mapPath = string.format("%s_%02d_map.txt", PREFIX, layer)
-        local okMap = safeWrite(mapPath, table.concat(interestingLines, "\n"))
-        if okMap then push(saved, mapPath) end
+    task.spawn(function()
+        while running do
+            task.wait(2)
+            if not running then break end
+
+            local count = 0
+            pcall(function()
+                count += #CoreGui:GetChildren()
+            end)
+            pcall(function()
+                if LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") then
+                    count += #LocalPlayer.PlayerGui:GetChildren()
+                end
+            end)
+
+            if count ~= lastGuiCount then
+                pushEvent("GUI_COUNT_CHANGED", {
+                    previous = lastGuiCount,
+                    current = count,
+                })
+                lastGuiCount = count
+                snapshot("gui_count_changed")
+            end
+        end
+    end)
+end
+
+local function stopScanner()
+    if not running then
+        return false, nil, nil
     end
 
-    local nextUrl = chooseNextUrl(body)
-    if nextUrl then
-        push(report, "Próxima URL: " .. nextUrl)
-        push(report, "")
-        url = nextUrl
+    pushEvent("SCAN_STOP", {})
+    snapshot("stop")
+    running = false
+    disconnectAll()
+
+    local ok, jsonName, txtName = saveReport()
+    return ok, jsonName, txtName
+end
+
+-- GUI
+pcall(function()
+    local old = CoreGui:FindFirstChild(GUI_NAME)
+    if old then old:Destroy() end
+end)
+
+local gui = Instance.new("ScreenGui")
+gui.Name = GUI_NAME
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+
+local parentOk = false
+pcall(function()
+    if gethui then
+        gui.Parent = gethui()
+        parentOk = true
+    end
+end)
+if not parentOk then
+    gui.Parent = CoreGui
+end
+
+local frame = Instance.new("Frame")
+frame.Name = "Main"
+frame.Size = UDim2.fromOffset(300, 150)
+frame.Position = UDim2.new(0.5, -150, 0.5, -75)
+frame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+frame.BorderSizePixel = 0
+frame.Parent = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 14)
+corner.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -20, 0, 40)
+title.Position = UDim2.fromOffset(10, 8)
+title.BackgroundTransparency = 1
+title.Text = "Mine a Mountain Scanner"
+title.TextColor3 = Color3.fromRGB(245, 245, 245)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 20
+title.Parent = frame
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -20, 0, 26)
+status.Position = UDim2.fromOffset(10, 46)
+status.BackgroundTransparency = 1
+status.Text = "Status: parado"
+status.TextColor3 = Color3.fromRGB(190, 190, 200)
+status.Font = Enum.Font.Gotham
+status.TextSize = 14
+status.Parent = frame
+
+local button = Instance.new("TextButton")
+button.Size = UDim2.new(1, -30, 0, 54)
+button.Position = UDim2.fromOffset(15, 82)
+button.BackgroundColor3 = Color3.fromRGB(32, 92, 220)
+button.BorderSizePixel = 0
+button.Text = "Iniciar Scam"
+button.TextColor3 = Color3.fromRGB(255, 255, 255)
+button.Font = Enum.Font.GothamBold
+button.TextSize = 18
+button.Parent = frame
+
+local bcorner = Instance.new("UICorner")
+bcorner.CornerRadius = UDim.new(0, 12)
+bcorner.Parent = button
+
+button.MouseButton1Click:Connect(function()
+    if not running then
+        startScanner()
+        button.Text = "Finalizar Scam"
+        status.Text = "Status: coletando..."
     else
-        push(report, "Nenhuma próxima URL estática confiável encontrada.")
-        push(report, "A cadeia automática foi encerrada sem executar o conteúdo.")
-        push(report, "")
-        break
+        status.Text = "Status: salvando..."
+        local ok, jsonName, txtName = stopScanner()
+
+        button.Text = "Iniciar Scam"
+
+        if ok then
+            status.Text = "Salvo: " .. tostring(txtName)
+        else
+            status.Text = "Falha ao salvar arquivo"
+        end
     end
-end
+end)
 
-push(report, "=== RESUMO ===")
-local seenCount = 0
-for _ in pairs(seenUrls) do seenCount += 1 end
-push(report, "Camadas obtidas: " .. seenCount)
-
-local candidateLines = {}
-for k in pairs(candidates) do
-    local kind, value = k:match("^(.-)|(.+)$")
-    push(candidateLines, string.format("[%s] %s", kind or "CANDIDATE", value or k))
-end
-table.sort(candidateLines)
-
-local candidatePath = PREFIX .. "_candidates.txt"
-safeWrite(candidatePath, table.concat(candidateLines, "\n"))
-push(saved, candidatePath)
-
-push(report, "URLs/candidatos: " .. #candidateLines)
-push(report, "Nenhum conteúdo baixado foi passado para loadstring.")
-push(report, "")
-push(report, "Arquivos gerados:")
-for _, p in ipairs(saved) do push(report, "  " .. p) end
-
-local reportPath = PREFIX .. "_00_report.txt"
-safeWrite(reportPath, table.concat(report, "\n"))
-
-if setclipboard then pcall(setclipboard, table.concat(report, "\n")) end
-print(table.concat(report, "\n"))
-print("Extrator V2 concluído. Relatório: " .. reportPath)
+print("MAM2 Runtime Scanner V3 carregado.")
