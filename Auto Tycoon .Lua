@@ -8,8 +8,8 @@ local VirtualInputManager = nil
 pcall(function()
     VirtualInputManager = game:GetService("VirtualInputManager")
 end)
-local VERSION = "AUTO-TP-1.7.5.10"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_5_10"
+local VERSION = "AUTO-TP-1.7.5.11"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_5_11"
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
 local TYCOON_INTERVAL = 1.5
@@ -92,7 +92,6 @@ local State = {
     BunkerEnterCooldownUntil = 0,
     BunkerExitInProgress = false,
     BunkerSuppressedMainDetections = 0,
-    BunkerLastTransitionConfirmClock = 0,
     BunkerLastTransitionEvidence = nil,
     BunkerEnterPromptObservedClock = 0,
     BunkerExitPromptObservedClock = 0,
@@ -110,16 +109,17 @@ local State = {
     BunkerLastRawPhysicalZone = "UNKNOWN",
     BunkerLastRawPhysicalEvidence = nil,
     BunkerLastCompletedSessionId = 0,
-    BunkerSessionAnchorCFrame = nil,
     BunkerTransitionFreezeActive = false,
     BunkerTransitionFreezeDirection = nil,
     BunkerTransitionFreezeStartedClock = 0,
     BunkerTransitionFreezeReason = nil,
     BunkerTransitionFreezeCount = 0,
     BunkerTransitionFreezeReleased = 0,
-    BunkerWalkAttempts = 0,
-    BunkerWalkSuccessful = 0,
-    BunkerWalkFailed = 0,
+    BunkerTransitionOriginPosition = nil,
+    BunkerTransitionSourcePart = nil,
+    BunkerTransitionSourcePath = nil,
+    BunkerTransitionLastDisplacement = 0,
+    BunkerTransitionConfirmMode = nil,
     AutoRebirthServerReady = false,
     AutoRebirthServerSignalSeen = false,
     AutoRebirthButtonsLeft = nil,
@@ -586,7 +586,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.7.5.10 - bunker exit-only teleport lock"
+    version.Text = "AUTO V1.7.5.11 - bunker transition authority fix"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -739,7 +739,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.7.5.10 (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.7.5.11 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -809,12 +809,12 @@ local function createGui()
 end
 State.Player = waitForLocalPlayer(10)
 if not State.Player then
-    warn("[Tycoon Automator V1.7.5.10] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.7.5.11] LocalPlayer indisponivel.")
     return
 end
 local guiOk, guiResult = pcall(createGui)
 if not guiOk then
-    warn("[Tycoon Automator V1.7.5.10] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator V1.7.5.11] GUI ERROR: " .. tostring(guiResult))
     return
 end
 State.Health.Bootstrap = "GUI_OK"
@@ -851,7 +851,7 @@ local function describeButton(button)
     if string.find(normalize(dependency), "bunker", 1, true)
     or string.find(normalize(name), "bunker", 1, true) then
         info.Zone = "BUNKER"
-        info.MovementPolicy = "USE_GAME_TRANSITION"
+        info.MovementPolicy = "LOCAL_SAFE_TELEPORT_IN_BUNKER; CROSS_ZONE_VIA_GAME_PROMPTS"
     else
         info.Zone = "MAIN_TYCOON"
         info.MovementPolicy = "NORMAL_LOCAL_ACCESS"
@@ -891,7 +891,7 @@ local function describePurchase(purchase)
     if string.find(normalize(dependency), "bunker", 1, true)
     or string.find(normalize(name), "bunker", 1, true) then
         info.Zone = "BUNKER"
-        info.MovementPolicy = "USE_GAME_TRANSITION"
+        info.MovementPolicy = "LOCAL_SAFE_TELEPORT_IN_BUNKER; CROSS_ZONE_VIA_GAME_PROMPTS"
     else
         info.Zone = "MAIN_TYCOON"
         info.MovementPolicy = "NORMAL_LOCAL_ACCESS"
@@ -1098,105 +1098,19 @@ local function detectZoneByPosition()
     local nearestBunker = math.huge
     local nearestMain = math.huge
 
-    local function inspectFolder(folder, isButtons)
-        if not folder then
-            return
-        end
+    -- Zone detection intentionally uses BUTTONS ONLY.
+    -- Purchased Bunker weapons often lose their original Dependency metadata
+    -- and were historically misclassified as MAIN_TYCOON. They must never
+    -- participate in physical zone confirmation.
+    if State.ButtonsFolder then
         local count = 0
-        for _, child in ipairs(folder:GetChildren()) do
+        for _, child in ipairs(State.ButtonsFolder:GetChildren()) do
             count = count + 1
             if count > 120 then
                 break
             end
             if child:IsA("Model") or child:IsA("Folder") then
-                local info
-                if isButtons then
-                    info = State.ButtonCache[child.Name] or describeButton(child)
-                else
-                    local cachedButton = State.ButtonCache[child.Name]
-                    info = cachedButton or describePurchase(child)
-                end
-                local position = modelPosition(child)
-                if position then
-                    local distance = (root.Position - position).Magnitude
-                    local nameNorm = normalize(info and info.Name)
-                    local dependencyNorm = normalize(info and info.Dependency)
-                    local rootBunker = nameNorm == "bunker" and dependencyNorm == ""
-                    local logicalZone = rootBunker and "MAIN_TYCOON" or inferLogicalZone(info)
-                    if logicalZone == "BUNKER" then
-                        if distance < nearestBunker then
-                            nearestBunker = distance
-                        end
-                    else
-                        if distance < nearestMain then
-                            nearestMain = distance
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    inspectFolder(State.ButtonsFolder, true)
-    inspectFolder(State.PurchasesFolder, false)
-
-    if bunkerTransitionArmed
-    and nearestBunker <= 90
-    and nearestBunker < nearestMain then
-        return "BUNKER",
-            "armed Bunker interior proximity=" .. tostring(math.floor(nearestBunker)) .. " studs"
-    end
-
-    if nearestMain <= 180 then
-        if not bunkerTransitionArmed and nearestBunker <= 90 then
-            return "MAIN_TYCOON",
-                "Bunker proximity ignored until Enter transition; main=" ..
-                tostring(math.floor(nearestMain)) .. " bunker=" ..
-                tostring(math.floor(nearestBunker))
-        end
-        return "MAIN_TYCOON",
-            "nearest main Tycoon object=" .. tostring(math.floor(nearestMain)) .. " studs"
-    end
-
-    if bunkerTransitionArmed and nearestBunker <= 180 then
-        return "BUNKER",
-            "armed near Bunker interior objects=" .. tostring(math.floor(nearestBunker)) .. " studs"
-    end
-
-    if not bunkerTransitionArmed and nearestBunker < math.huge then
-        return "MAIN_TYCOON",
-            "Bunker proximity ignored because no Enter transition/session is active"
-    end
-
-    return "OUTSIDE_TYCOON", "far from known Tycoon/Bunker purchase objects"
-end
-local function detectRawPhysicalZoneByPosition()
-    local character = State.Player and State.Player.Character
-    local root = character and character:FindFirstChild("HumanoidRootPart")
-    if not root then
-        return "UNKNOWN", "HumanoidRootPart unavailable"
-    end
-
-    local nearestBunker = math.huge
-    local nearestMain = math.huge
-
-    local function inspectFolder(folder, isButtons)
-        if not folder then
-            return
-        end
-        local count = 0
-        for _, child in ipairs(folder:GetChildren()) do
-            count = count + 1
-            if count > 120 then
-                break
-            end
-            if child:IsA("Model") or child:IsA("Folder") then
-                local info
-                if isButtons then
-                    info = State.ButtonCache[child.Name] or describeButton(child)
-                else
-                    info = State.ButtonCache[child.Name] or describePurchase(child)
-                end
+                local info = State.ButtonCache[child.Name] or describeButton(child)
                 local position = modelPosition(child)
                 if position then
                     local distance = (root.Position - position).Magnitude
@@ -1214,41 +1128,115 @@ local function detectRawPhysicalZoneByPosition()
         end
     end
 
-    inspectFolder(State.ButtonsFolder, true)
-    inspectFolder(State.PurchasesFolder, false)
+    if bunkerTransitionArmed
+    and nearestBunker <= 90
+    and nearestBunker < nearestMain then
+        return "BUNKER",
+            "buttons-only armed Bunker proximity=" .. tostring(math.floor(nearestBunker)) .. " studs"
+    end
+
+    if nearestMain <= 180 then
+        if not bunkerTransitionArmed and nearestBunker <= 90 then
+            return "MAIN_TYCOON",
+                "buttons-only Bunker proximity ignored until Enter transition; main=" ..
+                tostring(math.floor(nearestMain)) .. " bunker=" ..
+                tostring(math.floor(nearestBunker))
+        end
+        return "MAIN_TYCOON",
+            "buttons-only nearest main=" .. tostring(math.floor(nearestMain)) .. " studs"
+    end
+
+    if bunkerTransitionArmed and nearestBunker <= 180 then
+        return "BUNKER",
+            "buttons-only armed near Bunker buttons=" .. tostring(math.floor(nearestBunker)) .. " studs"
+    end
+
+    if not bunkerTransitionArmed and nearestBunker < math.huge then
+        return "MAIN_TYCOON",
+            "buttons-only Bunker proximity ignored because no Enter transition/session is active"
+    end
+
+    return "OUTSIDE_TYCOON", "far from known Tycoon/Bunker buttons"
+end
+
+local function detectRawPhysicalZoneByPosition()
+    local character = State.Player and State.Player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then
+        return "UNKNOWN", "HumanoidRootPart unavailable"
+    end
+
+    local nearestBunker = math.huge
+    local nearestMain = math.huge
+
+    -- RAW confirmation also uses BUTTONS ONLY. Do not inspect Purchases:
+    -- an already-purchased Bunker gun can look like a MAIN purchase because
+    -- its purchase model no longer carries Dependency="Bunker".
+    if State.ButtonsFolder then
+        local count = 0
+        for _, child in ipairs(State.ButtonsFolder:GetChildren()) do
+            count = count + 1
+            if count > 120 then
+                break
+            end
+            if child:IsA("Model") or child:IsA("Folder") then
+                local info = State.ButtonCache[child.Name] or describeButton(child)
+                local position = modelPosition(child)
+                if position then
+                    local distance = (root.Position - position).Magnitude
+                    local nameNorm = normalize(info and info.Name)
+                    local dependencyNorm = normalize(info and info.Dependency)
+                    local rootBunker = nameNorm == "bunker" and dependencyNorm == ""
+                    local logicalZone = rootBunker and "MAIN_TYCOON" or inferLogicalZone(info)
+                    if logicalZone == "BUNKER" then
+                        nearestBunker = math.min(nearestBunker, distance)
+                    else
+                        nearestMain = math.min(nearestMain, distance)
+                    end
+                end
+            end
+        end
+    end
 
     if nearestMain < math.huge and nearestBunker < math.huge then
-        if nearestMain <= 180 and nearestMain + 12 < nearestBunker then
+        -- Do not give MAIN priority merely because both zones have nearby
+        -- objects. The old priority rule could return MAIN even when Bunker was closer, e.g. Bunker=10, Main=13.
+        -- The physically nearest button set wins.
+        if nearestBunker < nearestMain and nearestBunker <= 180 then
+            return "BUNKER",
+                "raw buttons-only nearest bunker=" .. tostring(math.floor(nearestBunker)) ..
+                " main=" .. tostring(math.floor(nearestMain))
+        end
+        if nearestMain < nearestBunker and nearestMain <= 180 then
             return "MAIN_TYCOON",
-                "raw nearest main=" .. tostring(math.floor(nearestMain)) ..
+                "raw buttons-only nearest main=" .. tostring(math.floor(nearestMain)) ..
                 " bunker=" .. tostring(math.floor(nearestBunker))
         end
-        if nearestBunker <= 120 and nearestBunker + 12 < nearestMain then
-            return "BUNKER",
-                "raw nearest bunker=" .. tostring(math.floor(nearestBunker)) ..
-                " main=" .. tostring(math.floor(nearestMain))
+        if nearestMain == nearestBunker and nearestMain <= 70 then
+            return "UNKNOWN",
+                "raw buttons-only exact tie=" .. tostring(math.floor(nearestMain))
         end
     end
 
-    if nearestMain <= 70 then
-        return "MAIN_TYCOON",
-            "raw strong main proximity=" .. tostring(math.floor(nearestMain))
-    end
     if nearestBunker <= 70 then
         return "BUNKER",
-            "raw strong bunker proximity=" .. tostring(math.floor(nearestBunker))
+            "raw buttons-only strong bunker=" .. tostring(math.floor(nearestBunker))
+    end
+    if nearestMain <= 70 then
+        return "MAIN_TYCOON",
+            "raw buttons-only strong main=" .. tostring(math.floor(nearestMain))
     end
     if nearestMain <= 180 and nearestBunker > 180 then
         return "MAIN_TYCOON",
-            "raw main-only proximity=" .. tostring(math.floor(nearestMain))
+            "raw buttons-only main-only=" .. tostring(math.floor(nearestMain))
     end
     if nearestBunker <= 180 and nearestMain > 180 then
         return "BUNKER",
-            "raw bunker-only proximity=" .. tostring(math.floor(nearestBunker))
+            "raw buttons-only bunker-only=" .. tostring(math.floor(nearestBunker))
     end
 
     return "UNKNOWN",
-        "raw zone ambiguous main=" ..
+        "raw buttons-only ambiguous main=" ..
         tostring(nearestMain < math.huge and math.floor(nearestMain) or "inf") ..
         " bunker=" ..
         tostring(nearestBunker < math.huge and math.floor(nearestBunker) or "inf")
@@ -1268,6 +1256,19 @@ local function classifyTransitionPrompt(prompt)
         or string.find(action, "leave", 1, true)
         or string.find(action, "return", 1, true)) then
         return "EXIT_BUNKER"
+    end
+    return nil
+end
+local function transitionPromptPart(prompt)
+    if not prompt then
+        return nil
+    end
+    local current = prompt.Parent
+    while current and current ~= workspace do
+        if current:IsA("BasePart") then
+            return current
+        end
+        current = current.Parent
     end
     return nil
 end
@@ -1320,6 +1321,15 @@ local function watchTransitionPrompts(instance)
                             State.BunkerSessionStartedUnix = os.time()
                             State.BunkerSessionStartedElapsed = elapsed()
                             State.BunkerSessionReason = "MANUAL_ENTER_PROMPT_WAITING_PHYSICAL_CONFIRMATION"
+                            local transitionCharacter = State.Player and State.Player.Character
+                            local transitionRoot = transitionCharacter
+                                and transitionCharacter:FindFirstChild("HumanoidRootPart")
+                            State.BunkerTransitionOriginPosition = transitionRoot and transitionRoot.Position or nil
+                            State.BunkerTransitionSourcePart = transitionPromptPart(prompt)
+                            State.BunkerTransitionSourcePath = State.BunkerTransitionSourcePart
+                                and safeFullName(State.BunkerTransitionSourcePart)
+                                or nil
+                            State.BunkerTransitionLastDisplacement = 0
                             autoSetBunkerTransitionFreeze(
                                 true,
                                 "ENTER_BUNKER",
@@ -1338,6 +1348,15 @@ local function watchTransitionPrompts(instance)
                         if not wasAutoExit then
                             State.BunkerManualExitCount = State.BunkerManualExitCount + 1
                             State.BunkerExitInProgress = true
+                            local transitionCharacter = State.Player and State.Player.Character
+                            local transitionRoot = transitionCharacter
+                                and transitionCharacter:FindFirstChild("HumanoidRootPart")
+                            State.BunkerTransitionOriginPosition = transitionRoot and transitionRoot.Position or nil
+                            State.BunkerTransitionSourcePart = transitionPromptPart(prompt)
+                            State.BunkerTransitionSourcePath = State.BunkerTransitionSourcePart
+                                and safeFullName(State.BunkerTransitionSourcePart)
+                                or nil
+                            State.BunkerTransitionLastDisplacement = 0
                             autoSetBunkerTransitionFreeze(
                                 true,
                                 "EXIT_BUNKER",
@@ -1963,6 +1982,10 @@ local function onPurchaseAdded(purchase)
     local name = purchase.Name
     local pending = pendingFor(name)
     local info = describePurchase(purchase)
+    if pending.Button and pending.Button.Zone then
+        info.Zone = pending.Button.Zone
+        info.MovementPolicy = pending.Button.MovementPolicy
+    end
     watchTransitionPrompts(purchase)
     pending.Purchase = info
     pending.PurchaseCreatedAt = os.clock()
@@ -2165,7 +2188,7 @@ buildAutomationCandidates = function()
                 Zone = info.Zone or inferLogicalZone(info),
                 MovementPolicy = info.MovementPolicy or
                     (inferLogicalZone(info) == "BUNKER"
-                        and "USE_GAME_TRANSITION"
+                        and "LOCAL_SAFE_TELEPORT_IN_BUNKER; CROSS_ZONE_VIA_GAME_PROMPTS"
                         or "NORMAL_LOCAL_ACCESS"),
                 Price = info.Price or info.Cost,
                 Rebirths = info.RequiredRebirths or info.Rebirths,
@@ -2252,12 +2275,10 @@ local function setReading(enabled)
         refreshUI()
     end)
 end
-local AUTO_MOVE_TIMEOUT = 18
 local AUTO_SERVER_WAIT = 1.35
 local AUTO_RETRY_COOLDOWN = 2.5
 local AUTO_IDLE_WAIT = 0.22
 local AUTO_POST_RESULT_WAIT = 0.08
-local AUTO_ARRIVE_DISTANCE = 5.5
 local AUTO_COLLECT_MIN = 1000
 local AUTO_COLLECT_CONFIRM_TIMEOUT = 4
 local AUTO_COLLECT_RECHECK_INTERVAL = 0.30
@@ -2270,6 +2291,7 @@ local BUNKER_PENDING_RETRY_WAIT = 0.65
 local BUNKER_EXIT_PROMPT_DISCOVERY_TIMEOUT = 2.5
 local BUNKER_EXIT_FAILURE_COOLDOWN = 4.0
 local BUNKER_TRANSITION_FREEZE_TIMEOUT = 10.0
+local BUNKER_TRANSITION_MIN_DISPLACEMENT = 60
 local AUTO_REBIRTH_CONFIRM_TIMEOUT = 5
 local AUTO_REBIRTH_RETRY_COOLDOWN = 8
 local AUTOSAVE_INTERVAL = 15
@@ -2334,7 +2356,15 @@ autoSetBunkerTransitionFreeze = function(active, direction, reason)
             PreviousReason = previousReason,
             ReleaseReason = tostring(reason or "TRANSITION_RESOLVED"),
             Duration = duration,
+            LastDisplacement = State.BunkerTransitionLastDisplacement,
+            ConfirmMode = State.BunkerTransitionConfirmMode,
+            SourcePart = State.BunkerTransitionSourcePath,
         })
+        State.BunkerTransitionOriginPosition = nil
+        State.BunkerTransitionSourcePart = nil
+        State.BunkerTransitionSourcePath = nil
+        State.BunkerTransitionLastDisplacement = 0
+        State.BunkerTransitionConfirmMode = nil
     end
 end
 
@@ -2350,28 +2380,92 @@ autoUpdateBunkerTransitionFreeze = function(source)
     local direction = State.BunkerTransitionFreezeDirection
     local age = os.clock() - (State.BunkerTransitionFreezeStartedClock or os.clock())
 
-    if direction == "ENTER_BUNKER" and rawZone == "BUNKER" then
+    local _, _, root = autoGetCharacter()
+    local displacement = nil
+    if root and State.BunkerTransitionOriginPosition then
+        displacement = (root.Position - State.BunkerTransitionOriginPosition).Magnitude
+        State.BunkerTransitionLastDisplacement = displacement
+    end
+
+    local sourceDistance = nil
+    local sourcePart = State.BunkerTransitionSourcePart
+    if root and sourcePart and sourcePart.Parent and sourcePart:IsDescendantOf(workspace) then
+        sourceDistance = (root.Position - sourcePart.Position).Magnitude
+    end
+
+    -- During transition freeze there are no script teleports. Therefore a
+    -- large displacement away from the source prompt is direct evidence that
+    -- the game's Enter/Exit transition moved the character, even if a legacy
+    -- object classifier still reports the wrong logical zone.
+    local displacementConfirmed =
+        displacement ~= nil
+        and displacement >= BUNKER_TRANSITION_MIN_DISPLACEMENT
+        and (sourceDistance == nil or sourceDistance >= BUNKER_TRANSITION_MIN_DISPLACEMENT)
+
+    local rawTargetConfirmed = false
+    if direction == "ENTER_BUNKER" then
+        rawTargetConfirmed =
+            rawZone == "BUNKER"
+            and displacement ~= nil
+            and displacement >= 20
+            and (sourceDistance == nil or sourceDistance >= 20)
+    elseif direction == "EXIT_BUNKER" then
+        rawTargetConfirmed =
+            rawZone == "MAIN_TYCOON"
+            and displacement ~= nil
+            and displacement >= 20
+            and (sourceDistance == nil or sourceDistance >= 20)
+    end
+
+    if direction == "ENTER_BUNKER"
+    and (displacementConfirmed or rawTargetConfirmed) then
+        local confirmMode = displacementConfirmed
+            and "GAME_TRANSITION_DISPLACEMENT"
+            or "RAW_BUTTON_ZONE_PLUS_DISPLACEMENT"
+        local confirmationEvidence =
+            confirmMode ..
+            "; displacement=" .. tostring(displacement and math.floor(displacement * 10) / 10 or "nil") ..
+            "; sourceDistance=" .. tostring(sourceDistance and math.floor(sourceDistance * 10) / 10 or "nil") ..
+            "; raw=" .. tostring(rawZone) ..
+            "; rawEvidence=" .. tostring(rawEvidence)
+
+        State.BunkerTransitionConfirmMode = confirmMode
         State.BunkerEnterInProgress = false
         State.BunkerEnterCooldownUntil = 0
-        setZone("BUNKER", "BUNKER_ENTER_RAW_PHYSICAL_CONFIRMED: " .. tostring(rawEvidence))
-        autoCaptureCurrentSafePosition("BUNKER_ENTER_RAW_PHYSICAL_CONFIRMED")
+        setZone("BUNKER", "BUNKER_ENTER_CONFIRMED: " .. confirmationEvidence)
+        autoCaptureCurrentSafePosition("BUNKER_ENTER_CONFIRMED")
         autoSetBunkerTransitionFreeze(false, nil, "ENTER_PHYSICAL_BUNKER_CONFIRMED")
         autoRecord("BUNKER_ENTER_TRANSITION_CONFIRMED", {
             Source = tostring(source or "UNKNOWN"),
+            ConfirmedZone = "BUNKER",
             RawZone = rawZone,
-            Evidence = rawEvidence,
+            Evidence = confirmationEvidence,
+            Displacement = displacement,
+            SourceDistance = sourceDistance,
+            ConfirmMode = confirmMode,
             Age = age,
         })
-        return true, rawZone, rawEvidence
+        return true, "BUNKER", confirmationEvidence
     end
 
-    if direction == "EXIT_BUNKER" and rawZone == "MAIN_TYCOON" then
+    if direction == "EXIT_BUNKER"
+    and (displacementConfirmed or rawTargetConfirmed) then
+        local confirmMode = displacementConfirmed
+            and "GAME_TRANSITION_DISPLACEMENT"
+            or "RAW_BUTTON_ZONE_PLUS_DISPLACEMENT"
+        local confirmationEvidence =
+            confirmMode ..
+            "; displacement=" .. tostring(displacement and math.floor(displacement * 10) / 10 or "nil") ..
+            "; sourceDistance=" .. tostring(sourceDistance and math.floor(sourceDistance * 10) / 10 or "nil") ..
+            "; raw=" .. tostring(rawZone) ..
+            "; rawEvidence=" .. tostring(rawEvidence)
+
         local completedSession = State.BunkerSessionId
+        State.BunkerTransitionConfirmMode = confirmMode
         State.BunkerSessionActive = false
         State.BunkerExitInProgress = false
         State.BunkerEnterInProgress = false
-        State.BunkerSessionAnchorCFrame = nil
-        State.BunkerSessionReason = "EXIT_RAW_PHYSICAL_MAIN_CONFIRMED"
+        State.BunkerSessionReason = "EXIT_GAME_TRANSITION_CONFIRMED"
         State.BunkerLastCompletedSessionId = math.max(
             State.BunkerLastCompletedSessionId or 0,
             completedSession or 0
@@ -2381,17 +2475,21 @@ autoUpdateBunkerTransitionFreeze = function(source)
             State.BunkerExitSettleUntil or 0,
             os.clock() + 0.35
         )
-        setZone("MAIN_TYCOON", "BUNKER_EXIT_RAW_PHYSICAL_CONFIRMED: " .. tostring(rawEvidence))
-        autoCaptureCurrentSafePosition("BUNKER_EXIT_RAW_PHYSICAL_CONFIRMED")
+        setZone("MAIN_TYCOON", "BUNKER_EXIT_CONFIRMED: " .. confirmationEvidence)
+        autoCaptureCurrentSafePosition("BUNKER_EXIT_CONFIRMED")
         autoSetBunkerTransitionFreeze(false, nil, "EXIT_PHYSICAL_MAIN_CONFIRMED")
         autoRecord("BUNKER_EXIT_TRANSITION_CONFIRMED", {
             Source = tostring(source or "UNKNOWN"),
             SessionId = completedSession,
+            ConfirmedZone = "MAIN_TYCOON",
             RawZone = rawZone,
-            Evidence = rawEvidence,
+            Evidence = confirmationEvidence,
+            Displacement = displacement,
+            SourceDistance = sourceDistance,
+            ConfirmMode = confirmMode,
             Age = age,
         })
-        return true, rawZone, rawEvidence
+        return true, "MAIN_TYCOON", confirmationEvidence
     end
 
     if age >= BUNKER_TRANSITION_FREEZE_TIMEOUT then
@@ -2433,7 +2531,6 @@ local function autoReconcileBunkerPhysicalState(source)
         State.BunkerSessionActive = false
         State.BunkerExitInProgress = false
         State.BunkerEnterInProgress = false
-        State.BunkerSessionAnchorCFrame = nil
         State.BunkerSessionReason = "PHYSICAL_MAIN_RECONCILED"
         State.BunkerExitRetryUntil = 0
         State.BunkerExitSettleUntil = math.max(
@@ -3015,17 +3112,7 @@ local function autoFindBunkerPrompt(actionText)
     return nil
 end
 local function autoPromptPart(prompt)
-    if not prompt then
-        return nil
-    end
-    local current = prompt.Parent
-    while current and current ~= workspace do
-        if current:IsA("BasePart") then
-            return current
-        end
-        current = current.Parent
-    end
-    return nil
+    return transitionPromptPart(prompt)
 end
 local function autoTriggerBunkerPrompt(prompt, targetZone, labelPrefix)
     if not prompt then
@@ -3074,6 +3161,11 @@ local function autoTriggerBunkerPrompt(prompt, targetZone, labelPrefix)
     end
     local transitionOrigin = originRoot.Position
     local transitionStartedClock = os.clock()
+    State.BunkerTransitionOriginPosition = transitionOrigin
+    State.BunkerTransitionSourcePart = part
+    State.BunkerTransitionSourcePath = safeFullName(part)
+    State.BunkerTransitionLastDisplacement = 0
+    State.BunkerTransitionConfirmMode = nil
 
     local transition = {
         Id = #State.BunkerTransitionLog + 1,
@@ -3142,7 +3234,7 @@ local function autoTriggerBunkerPrompt(prompt, targetZone, labelPrefix)
         local resolved, rawZone, rawEvidence =
             autoUpdateBunkerTransitionFreeze(labelPrefix .. "_WAIT")
         if resolved and rawZone == targetZone then
-            local _, currentHumanoid, currentRoot = autoGetCharacter()
+            local _, _, currentRoot = autoGetCharacter()
             local displacement = currentRoot
                 and (currentRoot.Position - transitionOrigin).Magnitude
                 or nil
@@ -3157,12 +3249,7 @@ local function autoTriggerBunkerPrompt(prompt, targetZone, labelPrefix)
                     and (State.BunkerExitPromptObservedClock or 0) >= transitionStartedClock - 0.10
             transition.PhysicalEvidence = rawEvidence
             transition.ActivationMethod = activationMethod
-            State.BunkerLastTransitionConfirmClock = os.clock()
             State.BunkerLastTransitionEvidence = tostring(rawEvidence)
-            if targetZone == "BUNKER" and currentRoot and currentHumanoid
-            and currentHumanoid.Health > 0 then
-                State.BunkerSessionAnchorCFrame = currentRoot.CFrame
-            end
             autoRecord(labelPrefix .. "_ZONE_CONFIRMED", {
                 TransitionId = transition.Id,
                 FromZone = transition.FromZone,
@@ -3398,6 +3485,12 @@ local function autoExitBunker()
     end
     local originPosition = originRoot.Position
     local transitionStartedClock = os.clock()
+    State.BunkerTransitionOriginPosition = originPosition
+    State.BunkerTransitionSourcePart = part
+    State.BunkerTransitionSourcePath = safeFullName(part)
+    State.BunkerTransitionLastDisplacement = 0
+    State.BunkerTransitionConfirmMode = nil
+
     local transition = {
         Id = #State.BunkerTransitionLog + 1,
         FromZone = State.CurrentZone,
@@ -3462,7 +3555,7 @@ local function autoExitBunker()
         local resolved, nowRawZone, nowRawEvidence =
             autoUpdateBunkerTransitionFreeze("AUTO_EXIT_WAIT")
         if resolved and nowRawZone == "MAIN_TYCOON" then
-            local _, currentHumanoid, currentRoot = autoGetCharacter()
+            local _, _, currentRoot = autoGetCharacter()
             local displacement = currentRoot
                 and (currentRoot.Position - originPosition).Magnitude
                 or nil
@@ -3821,7 +3914,6 @@ local function autoEnsureBunkerSessionPhysical()
         State.BunkerExitInProgress = false
         State.BunkerEnterInProgress = false
         State.BunkerSessionReason = "REAL_EXIT_PROMPT_ALREADY_OBSERVED"
-        State.BunkerSessionAnchorCFrame = nil
         setZone("MAIN_TYCOON", "REAL_EXIT_PROMPT_ALREADY_OBSERVED")
         return false, "BUNKER_SESSION_ALREADY_EXITED"
     end
@@ -3956,10 +4048,6 @@ local function autoAttemptPurchase(record)
             })
             if effectiveZone == "BUNKER" then
                 autoCaptureCurrentSafePosition("BUNKER_PURCHASE_ACCEPTED:" .. tostring(record.Name))
-                local _, _, bunkerRoot = autoGetCharacter()
-                if bunkerRoot then
-                    State.BunkerSessionAnchorCFrame = bunkerRoot.CFrame
-                end
                 task.wait(BUNKER_PURCHASE_SETTLE)
             else
                 task.wait(AUTO_POST_RESULT_WAIT)
@@ -4025,10 +4113,6 @@ local function autoAttemptPurchase(record)
         })
         if effectiveZone == "BUNKER" then
             autoCaptureCurrentSafePosition("BUNKER_PURCHASE_CONFIRMED:" .. tostring(record.Name))
-            local _, _, bunkerRoot = autoGetCharacter()
-            if bunkerRoot then
-                State.BunkerSessionAnchorCFrame = bunkerRoot.CFrame
-            end
             task.wait(BUNKER_PURCHASE_SETTLE)
         else
             task.wait(AUTO_POST_RESULT_WAIT)
@@ -4645,7 +4729,11 @@ local function autoHandleRebirth(oldValue, newValue)
     State.BunkerTransitionFreezeDirection = nil
     State.BunkerTransitionFreezeStartedClock = 0
     State.BunkerTransitionFreezeReason = nil
-    State.BunkerSessionAnchorCFrame = nil
+    State.BunkerTransitionOriginPosition = nil
+    State.BunkerTransitionSourcePart = nil
+    State.BunkerTransitionSourcePath = nil
+    State.BunkerTransitionLastDisplacement = 0
+    State.BunkerTransitionConfirmMode = nil
     State.BunkerSessionReason = "REBIRTH_RESET"
     State.BunkerSessionStartedUnix = nil
     State.BunkerSessionStartedElapsed = nil
@@ -4753,6 +4841,11 @@ local function setAutomation(enabled)
         State.BunkerTransitionFreezeDirection = nil
         State.BunkerTransitionFreezeStartedClock = 0
         State.BunkerTransitionFreezeReason = nil
+        State.BunkerTransitionOriginPosition = nil
+        State.BunkerTransitionSourcePart = nil
+        State.BunkerTransitionSourcePath = nil
+        State.BunkerTransitionLastDisplacement = 0
+        State.BunkerTransitionConfirmMode = nil
         autoRefreshFundsBlocks()
         State.AutomationServerSignal = nil
         State.AutomationLastRebirth = State.LastRebirths
@@ -4989,10 +5082,10 @@ local function buildReport()
             FloorTransitions = State.FloorTransitions,
             StageUnlocks = State.StageUnlocks,
             MovementSafetyPolicy = {
-                Bunker = "USE_GAME_TRANSITION_ONLY",
+                Bunker = "LOCAL_SAFE_TELEPORT_TO_ENTER_PROMPT_ELIGIBLE_PURCHASES_AND_EXIT_PROMPT; CROSS_ZONE_ONLY_BY_REAL_GAME_PROMPTS",
                 MainTycoonDirectTeleport = "SAFE_WORLD_Y_WITH_SURFACE_CHECK",
-                LongDistanceBunkerTeleport = "DO_NOT_USE",
-                Reason = "All physical repositioning uses world-Y offset, surface validation, post-check and rollback on instability.",
+                LongDistanceBunkerTeleport = "NEVER_CROSS_ZONE_DIRECTLY",
+                Reason = "Local repositioning may use safe teleport; after Enter/Exit activation all script teleports freeze until the game transition is physically confirmed.",
             },
         },
         InitialButtons = State.InitialButtons,
@@ -5026,13 +5119,13 @@ local function buildReport()
                 SuppressedMainDetections = State.BunkerSuppressedMainDetections,
                 EnterPromptObservedClock = State.BunkerEnterPromptObservedClock,
                 ExitPromptObservedClock = State.BunkerExitPromptObservedClock,
-                WalkAttempts = State.BunkerWalkAttempts,
-                WalkSuccessful = State.BunkerWalkSuccessful,
-                WalkFailed = State.BunkerWalkFailed,
                 TransitionFreezeActive = State.BunkerTransitionFreezeActive,
                 TransitionFreezeDirection = State.BunkerTransitionFreezeDirection,
                 TransitionFreezeCount = State.BunkerTransitionFreezeCount,
                 TransitionFreezeReleased = State.BunkerTransitionFreezeReleased,
+                TransitionLastDisplacement = State.BunkerTransitionLastDisplacement,
+                TransitionConfirmMode = State.BunkerTransitionConfirmMode,
+                TransitionSourcePath = State.BunkerTransitionSourcePath,
                 ManualEnterCount = State.BunkerManualEnterCount,
                 ManualExitCount = State.BunkerManualExitCount,
                 CollectorExitAttempts = State.BunkerCollectorExitAttempts,
@@ -5046,7 +5139,7 @@ local function buildReport()
                 LastRawPhysicalEvidence = State.BunkerLastRawPhysicalEvidence,
                 MainTeleportBlocks = State.BunkerMainTeleportBlocks,
                 LastCompletedSessionId = State.BunkerLastCompletedSessionId,
-                Policy = "LOCK_BUNKER_UNTIL_ZERO_PHYSICALLY_PRESENT_ELIGIBLE_BUTTONS; BUNKER PURCHASES TELEPORT LOCALLY; ENTER_EXIT ACTIVATION FREEZES ALL TELEPORTS UNTIL PHYSICAL ZONE CONFIRMATION",
+                Policy = "LOCK_BUNKER_UNTIL_ZERO_PHYSICALLY_PRESENT_ELIGIBLE_BUTTONS; BUNKER PURCHASES TELEPORT LOCALLY; ENTER_EXIT ACTIVATION FREEZES ALL TELEPORTS UNTIL BUTTONS_ONLY_OR_GAME_DISPLACEMENT_TRANSITION_CONFIRMATION",
             },
             AutoRebirth = {
                 EnabledWithAutomation = true,
@@ -5169,10 +5262,10 @@ local function autoSaveNow(reason, timestamped)
         State.AutoSaveLastReason = reason
         return false, "WRITEFILE_UNAVAILABLE"
     end
-    local filename = "Tycoon_Purchase_Automator_V1_7_5_10_AutoSave_Latest.txt"
+    local filename = "Tycoon_Purchase_Automator_V1_7_5_11_AutoSave_Latest.txt"
     if timestamped then
         filename =
-            "Tycoon_Purchase_Automator_V1_7_5_10_AutoSave_" ..
+            "Tycoon_Purchase_Automator_V1_7_5_11_AutoSave_" ..
             reason ..
             "_" ..
             os.date("%Y%m%d_%H%M%S") ..
@@ -5285,7 +5378,7 @@ installAutoSaveWatchers()
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_7_5_10_" ..
+        "Tycoon_Purchase_Automator_V1_7_5_11_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
     local saved = false
@@ -5422,8 +5515,10 @@ task.spawn(function()
             reconsiderTycoon()
             local floor, floorEvidence = detectMainFloor()
             setMainFloor(floor, floorEvidence)
-            local zone, zoneEvidence = detectZoneByPosition()
-            setZone(zone, zoneEvidence)
+            if not State.BunkerTransitionFreezeActive then
+                local zone, zoneEvidence = detectZoneByPosition()
+                setZone(zone, zoneEvidence)
+            end
         end)
         task.wait(TYCOON_INTERVAL)
     end
@@ -5436,7 +5531,7 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
-UI.Status.Text = "AUTO V1.7.5.10 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "AUTO V1.7.5.11 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
 safeCall("UI_INITIAL_REFRESH", function()
     refreshUI()
 end)
