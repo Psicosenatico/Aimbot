@@ -1,621 +1,275 @@
 local START_URL = "https://api.xgrs.lol/storage/xgrs-loader"
-local PREFIX = "MAM2_V2"
+local MAX_LAYERS = 8
 
--- ============================================================
--- Sinal imediato: se isto aparecer, o chunk começou a rodar.
--- ============================================================
-print("[MAM2-V2] INICIO DO CAPTURADOR")
-warn("[MAM2-V2] INICIO DO CAPTURADOR")
-
-pcall(function()
-    game:GetService("StarterGui"):SetCore("SendNotification", {
-        Title = "MAM2 Capturador V2",
-        Text = "Iniciado. Preparando captura...",
-        Duration = 5
-    })
-end)
-
--- ============================================================
--- Utilidades sem dependências externas
--- ============================================================
-local function safeGlobal(name)
-    local ok, value = pcall(function()
-        return _G and _G[name]
-    end)
-    if ok then
-        return value
-    end
-    return nil
-end
-
-local function getEnvironment()
-    local ok, env = pcall(function()
-        local gg = safeGlobal("getgenv")
-        if type(gg) == "function" then
-            local e = gg()
-            if type(e) == "table" then
-                return e
-            end
-        end
-
-        if type(_G) == "table" then
-            return _G
-        end
-
-        return {}
-    end)
-
-    if ok and type(env) == "table" then
-        return env
-    end
-
-    return {}
-end
-
-local env = getEnvironment()
-
-local function getFunction(name)
-    local v = nil
-
-    pcall(function()
-        v = env[name]
-    end)
-
-    if type(v) == "function" then
-        return v
-    end
-
-    pcall(function()
-        if type(_G) == "table" then
-            v = _G[name]
-        end
-    end)
-
-    if type(v) == "function" then
-        return v
-    end
-
-    return nil
-end
-
-local writefileFn = getFunction("writefile")
-local readfileFn = getFunction("readfile")
-local isfileFn = getFunction("isfile")
-local hookfunctionFn = getFunction("hookfunction")
-local originalLoadstring = getFunction("loadstring")
-
-local function safeWrite(name, data)
-    if type(writefileFn) ~= "function" then
-        return false, "writefile indisponivel"
-    end
-
-    local ok, err = pcall(function()
-        writefileFn(name, tostring(data or ""))
-    end)
-
-    if ok then
-        return true
-    end
-
-    return false, tostring(err)
-end
-
-local function safeRead(name)
-    if type(readfileFn) ~= "function" then
-        return nil
-    end
-
-    local ok, data = pcall(function()
-        if type(isfileFn) == "function" then
-            local exists = isfileFn(name)
-            if not exists then
-                return nil
-            end
-        end
-        return readfileFn(name)
-    end)
-
-    if ok and type(data) == "string" then
-        return data
-    end
-
-    return nil
-end
-
-local function appendFile(name, line)
-    local old = safeRead(name) or ""
-    safeWrite(name, old .. tostring(line) .. "\n")
-end
-
-local INDEX_FILE = PREFIX .. "_00_index.txt"
+local report = {}
+local candidates = {}
+local seenCandidate = {}
+local visitedUrls = {}
 
 local function log(msg)
     msg = tostring(msg)
-    print("[MAM2-V2] " .. msg)
-    appendFile(INDEX_FILE, msg)
+    report[#report + 1] = msg
+    print("[MAM2-EXTRACT] " .. msg)
 end
 
-local function redact(text)
-    text = tostring(text or "")
-
-    text = text:gsub("([?&][Kk][Ee][Yy]=)[^&%s]+", "%1<REDACTED>")
-    text = text:gsub("([?&][Tt][Oo][Kk][Ee][Nn]=)[^&%s]+", "%1<REDACTED>")
-    text = text:gsub("([?&][Ll][Ii][Cc][Ee][Nn][Ss][Ee]=)[^&%s]+", "%1<REDACTED>")
-    text = text:gsub("([?&][Aa][Uu][Tt][Hh]=)[^&%s]+", "%1<REDACTED>")
-
-    text = text:gsub('("[Kk][Ee][Yy]"%s*:%s*")[^"]+(")', '%1<REDACTED>%2')
-    text = text:gsub('("[Tt][Oo][Kk][Ee][Nn]"%s*:%s*")[^"]+(")', '%1<REDACTED>%2')
-    text = text:gsub('("[Ll][Ii][Cc][Ee][Nn][Ss][Ee]"%s*:%s*")[^"]+(")', '%1<REDACTED>%2')
-    text = text:gsub('("[Aa][Uu][Tt][Hh]"%s*:%s*")[^"]+(")', '%1<REDACTED>%2')
-
-    return text
-end
-
-local function rollingHash(s)
-    s = tostring(s or "")
-    local h = 2166136261
-
-    for i = 1, #s do
-        h = (h * 131 + string.byte(s, i)) % 4294967296
+local function save(name, data)
+    if type(writefile) ~= "function" then
+        warn("[MAM2-EXTRACT] writefile indisponível: " .. tostring(name))
+        return false
     end
 
-    return string.format("%08X", h)
-end
-
--- ============================================================
--- Diagnóstico ANTES dos hooks
--- ============================================================
-local capabilities = {}
-
-local function cap(name, value)
-    capabilities[#capabilities + 1] =
-        string.format("%-20s = %s", name, tostring(value))
-end
-
-cap("getgenv", type(safeGlobal("getgenv")) == "function")
-cap("_G_table", type(_G) == "table")
-cap("loadstring", type(originalLoadstring) == "function")
-cap("hookfunction", type(hookfunctionFn) == "function")
-cap("writefile", type(writefileFn) == "function")
-cap("readfile", type(readfileFn) == "function")
-cap("isfile", type(isfileFn) == "function")
-cap("request", type(getFunction("request")) == "function")
-cap("http_request", type(getFunction("http_request")) == "function")
-
-local synRequest = nil
-pcall(function()
-    local synTable = env.syn
-    if type(synTable) == "table" and type(synTable.request) == "function" then
-        synRequest = synTable.request
+    local ok, err = pcall(writefile, name, tostring(data or ""))
+    if not ok then
+        warn("[MAM2-EXTRACT] falha ao salvar " .. tostring(name) .. ": " .. tostring(err))
+        return false
     end
-end)
-cap("syn.request", type(synRequest) == "function")
 
-safeWrite(PREFIX .. "_00_capabilities.txt", table.concat(capabilities, "\n"))
-log("Diagnostico inicial salvo.")
-for _, line in ipairs(capabilities) do
-    print("[MAM2-V2] " .. line)
+    return true
 end
 
--- ============================================================
--- Estado local
--- ============================================================
-local state = {
-    loadCount = 0,
-    requestCount = 0,
-    loadHookMethod = "none",
-    requestHooks = 0
-}
-
-pcall(function()
-    env.__MAM2_RUNTIME_CAPTURE_V2 = state
-end)
-
--- ============================================================
--- Captura de loadstring
--- ============================================================
-local function saveLoadstring(source, chunkname, method)
-    if type(source) ~= "string" then
+local function addCandidate(kind, value)
+    if type(value) ~= "string" or value == "" then
         return
     end
 
-    state.loadCount = state.loadCount + 1
-    local id = state.loadCount
-
-    local rawName =
-        string.format("%s_LS_%02d_raw.txt", PREFIX, id)
-
-    local metaName =
-        string.format("%s_LS_%02d_meta.txt", PREFIX, id)
-
-    safeWrite(rawName, source)
-
-    local meta = table.concat({
-        "type=loadstring",
-        "method=" .. tostring(method or "unknown"),
-        "chunkname=" .. redact(chunkname or "<nil>"),
-        "bytes=" .. tostring(#source),
-        "hash=" .. rollingHash(source)
-    }, "\n")
-
-    safeWrite(metaName, meta)
-
-    log(string.format(
-        "LOADSTRING #%02d | %d bytes | chunk=%s | %s",
-        id,
-        #source,
-        redact(chunkname or "<nil>"),
-        rawName
-    ))
-end
-
-local loadHookInstalled = false
-
-if type(originalLoadstring) == "function"
-and type(hookfunctionFn) == "function" then
-
-    local previous = nil
-
-    local okHook, hookResult = pcall(function()
-        previous = hookfunctionFn(
-            originalLoadstring,
-            function(source, chunkname, ...)
-                pcall(saveLoadstring, source, chunkname, "hookfunction")
-
-                if type(previous) == "function" then
-                    return previous(source, chunkname, ...)
-                end
-
-                return originalLoadstring(source, chunkname, ...)
-            end
-        )
-
-        return previous
-    end)
-
-    if okHook and type(hookResult) == "function" then
-        loadHookInstalled = true
-        state.loadHookMethod = "hookfunction"
-        log("Hook de loadstring instalado via hookfunction.")
-    else
-        log("hookfunction(loadstring) falhou, mas o capturador continuara.")
-        log("Detalhe: " .. tostring(hookResult))
-    end
-end
-
--- Fallback global seguro.
-if not loadHookInstalled and type(originalLoadstring) == "function" then
-    local wrapped = function(source, chunkname, ...)
-        pcall(saveLoadstring, source, chunkname, "global-wrapper")
-        return originalLoadstring(source, chunkname, ...)
+    local key = tostring(kind) .. "\0" .. value
+    if seenCandidate[key] then
+        return
     end
 
-    local wrote = false
+    seenCandidate[key] = true
+    candidates[#candidates + 1] = "[" .. tostring(kind) .. "] " .. value
+end
 
-    local okEnv = pcall(function()
-        env.loadstring = wrapped
-        wrote = (env.loadstring == wrapped)
-    end)
-
-    local okG = pcall(function()
-        if type(_G) == "table" then
-            _G.loadstring = wrapped
-            wrote = wrote or (_G.loadstring == wrapped)
-        end
-    end)
-
-    if (okEnv or okG) and wrote then
-        loadHookInstalled = true
-        state.loadHookMethod = "global-wrapper"
-        log("Fallback global de loadstring instalado.")
-    else
-        log("Nao foi possivel substituir loadstring global.")
+local function rollingHash(s)
+    local h = 2166136261
+    for i = 1, #s do
+        h = (h * 131 + string.byte(s, i)) % 4294967296
     end
+    return string.format("%08X", h)
 end
 
-if not loadHookInstalled then
-    log("AVISO: loadstrings posteriores podem nao ser interceptados.")
-end
+local function countPlain(haystack, needle)
+    local total = 0
+    local pos = 1
 
--- ============================================================
--- Captura de requests
--- ============================================================
-local hookedRequestFns = {}
-
-local function alreadyHooked(fn)
-    for _, existing in ipairs(hookedRequestFns) do
-        if existing == fn then
-            return true
-        end
-    end
-    return false
-end
-
-local function registerHooked(fn)
-    hookedRequestFns[#hookedRequestFns + 1] = fn
-end
-
-local function summarizeRequestArg(arg)
-    if type(arg) == "string" then
-        return "url=" .. redact(arg)
-    end
-
-    if type(arg) == "table" then
-        local lines = {}
-        local url = arg.Url or arg.URL or arg.url
-        local method = arg.Method or arg.method
-
-        if url then
-            lines[#lines + 1] = "url=" .. redact(url)
+    while true do
+        local a, b = string.find(haystack, needle, pos, true)
+        if not a then
+            break
         end
 
-        if method then
-            lines[#lines + 1] = "method=" .. tostring(method)
-        end
-
-        local body = arg.Body or arg.body
-        if type(body) == "string" then
-            lines[#lines + 1] =
-                "request_body_bytes=" .. tostring(#body)
-        end
-
-        return table.concat(lines, "\n")
+        total = total + 1
+        pos = b + 1
     end
 
-    return "arg_type=" .. type(arg)
+    return total
 end
 
-local function saveRequest(arg, response, label)
-    state.requestCount = state.requestCount + 1
-    local id = state.requestCount
-
-    local metaName =
-        string.format("%s_REQ_%02d_meta.txt", PREFIX, id)
-
-    local bodyName =
-        string.format("%s_REQ_%02d_response.txt", PREFIX, id)
-
-    local status = nil
-    local body = nil
-
-    if type(response) == "table" then
-        status =
-            response.StatusCode
-            or response.Status
-            or response.status
-
-        body =
-            response.Body
-            or response.body
-
-    elseif type(response) == "string" then
-        body = response
-    end
-
-    local meta = table.concat({
-        "type=request",
-        "label=" .. tostring(label),
-        summarizeRequestArg(arg),
-        "status=" .. tostring(status or "<unknown>"),
-        "response_bytes=" ..
-            tostring(type(body) == "string" and #body or 0)
-    }, "\n")
-
-    safeWrite(metaName, meta)
-
-    if type(body) == "string" and #body > 0 then
-        safeWrite(bodyName, body)
-    end
-
-    log(string.format(
-        "REQUEST #%02d | %s | response=%d bytes",
-        id,
-        tostring(label),
-        type(body) == "string" and #body or 0
-    ))
-end
-
-local function tryHookRequest(fn, label, setter)
-    if type(fn) ~= "function" then
-        return false
-    end
-
-    if alreadyHooked(fn) then
-        log("Request alias ignorado para evitar hook duplicado: " .. label)
-        return false
-    end
-
-    if type(hookfunctionFn) == "function" then
-        local previous = nil
-
-        local ok, result = pcall(function()
-            previous = hookfunctionFn(fn, function(arg, ...)
-                local response
-
-                if type(previous) == "function" then
-                    response = previous(arg, ...)
-                else
-                    response = fn(arg, ...)
-                end
-
-                pcall(saveRequest, arg, response, label)
-                return response
-            end)
-
-            return previous
-        end)
-
-        if ok and type(result) == "function" then
-            registerHooked(fn)
-            state.requestHooks = state.requestHooks + 1
-            log("Hook request instalado: " .. label)
-            return true
-        end
-
-        log("Hook request falhou em " .. label .. ": " .. tostring(result))
-    end
-
-    -- Fallback por substituição, se houver setter.
-    if type(setter) == "function" then
-        local wrapped = function(arg, ...)
-            local response = fn(arg, ...)
-            pcall(saveRequest, arg, response, label)
-            return response
-        end
-
-        local okSet = pcall(function()
-            setter(wrapped)
-        end)
-
-        if okSet then
-            registerHooked(fn)
-            state.requestHooks = state.requestHooks + 1
-            log("Wrapper request instalado: " .. label)
-            return true
-        end
-    end
-
-    return false
-end
-
-local requestFn = getFunction("request")
-local httpRequestFn = getFunction("http_request")
-
-tryHookRequest(
-    requestFn,
+local PROBES = {
+    "loadstring",
+    "HttpGet",
     "request",
-    function(wrapped)
-        env.request = wrapped
-        if type(_G) == "table" then
-            _G.request = wrapped
-        end
-    end
-)
-
-tryHookRequest(
-    httpRequestFn,
     "http_request",
-    function(wrapped)
-        env.http_request = wrapped
-        if type(_G) == "table" then
-            _G.http_request = wrapped
+    "syn.request",
+    "getgenv",
+    "getfenv",
+    "setfenv",
+    "hookfunction",
+    "hookmetamethod",
+    "getrawmetatable",
+    "getnamecallmethod",
+    "getgc",
+    "debug",
+    "getconstants",
+    "getprotos",
+    "getupvalues",
+    "writefile",
+    "readfile",
+    "isfile",
+    "delfile",
+    "setclipboard",
+    "key",
+    "Key",
+    "KEY",
+    "getkey",
+    "get-key",
+    "check-key",
+    "premium",
+    "free",
+    "auth",
+    "token",
+    "license",
+    "Workspace",
+    "Players",
+    "ReplicatedStorage",
+    "RunService",
+    "UserInputService",
+    "TweenService",
+    "HttpService",
+    "RemoteEvent",
+    "RemoteFunction",
+    "FireServer",
+    "InvokeServer",
+    "Raycast",
+    "VirtualInputManager",
+    "VirtualUser",
+}
+
+local function scanLayer(layer, src, url)
+    log("")
+    log("=== CAMADA " .. tostring(layer) .. " ===")
+    log("URL: " .. tostring(url))
+    log("Bytes: " .. tostring(#src))
+    log("Hash rolling: " .. rollingHash(src))
+    log("Linhas: " .. tostring(select(2, src:gsub("\n", "\n")) + 1))
+
+    local hits = 0
+    for _, probe in ipairs(PROBES) do
+        local n = countPlain(src, probe)
+        if n > 0 then
+            hits = hits + 1
+            log(string.format("  %-24s : %d", probe, n))
         end
     end
-)
 
-if type(synRequest) == "function" then
-    tryHookRequest(
-        synRequest,
-        "syn.request",
-        function(wrapped)
-            if type(env.syn) == "table" then
-                env.syn.request = wrapped
-            end
+    if hits == 0 then
+        log("Nenhum indicador da lista apareceu em texto claro.")
+    end
+
+    -- URLs normais em texto claro.
+    for found in src:gmatch("https?://[^%s\"'%)%]%}<>]+") do
+        addCandidate("URL_LAYER_" .. tostring(layer), found)
+    end
+
+    -- Strings que parecem domínios.
+    for host in src:gmatch("[%w_%-]+%.[%a][%w%.%-_]+") do
+        if #host >= 6 then
+            addCandidate("HOST_LAYER_" .. tostring(layer), host)
         end
-    )
+    end
 end
 
--- ============================================================
--- Download controlado da primeira camada
--- ============================================================
-log("Baixando xgrs-loader diretamente...")
+local function extractDirectLoaderUrl(src)
+    -- Casos mais comuns:
+    -- loadstring(game:HttpGet("https://..."))()
+    -- loadstring(game:HttpGet('https://...'))()
+    -- loadstring(game.HttpGet(game,"https://..."))()
 
-local loaderSource = nil
-local fetchError = nil
+    local u =
+        src:match('HttpGet%s*%(%s*"([^"]+)"%s*%)')
+        or src:match("HttpGet%s*%(%s*'([^']+)'%s*%)")
+        or src:match('HttpGet%s*%(%s*game%s*,%s*"([^"]+)"%s*%)')
+        or src:match("HttpGet%s*%(%s*game%s*,%s*'([^']+)'%s*%)")
 
-local okFetch, fetchResult = pcall(function()
-    return game:HttpGet(START_URL)
-end)
+    if not u then
+        return nil
+    end
 
-if okFetch and type(fetchResult) == "string" then
-    loaderSource = fetchResult
+    -- Só segue automaticamente quando o conteúdo realmente se parece
+    -- com um loader pequeno/simples. Payloads reais são apenas salvos.
+    local compact = src:gsub("%s+", "")
 
-    safeWrite(
-        PREFIX .. "_01_xgrs_loader_raw.txt",
-        loaderSource
-    )
+    local hasLoad = compact:find("loadstring", 1, true) ~= nil
+    local hasHttp = compact:find("HttpGet", 1, true) ~= nil
 
-    safeWrite(
-        PREFIX .. "_01_xgrs_loader_meta.txt",
-        table.concat({
-            "url=" .. START_URL,
-            "bytes=" .. tostring(#loaderSource),
-            "hash=" .. rollingHash(loaderSource)
-        }, "\n")
-    )
+    if hasLoad and hasHttp and #src <= 5000 then
+        return u
+    end
 
-    log(
-        "xgrs-loader obtido e salvo: "
-        .. tostring(#loaderSource)
-        .. " bytes"
-    )
-else
-    fetchError = tostring(fetchResult)
-    log("FALHA ao baixar xgrs-loader: " .. fetchError)
+    return nil
 end
 
--- ============================================================
--- Executa a camada inicial usando o loadstring ORIGINAL.
--- Assim não dependemos do loader de 70 bytes do usuário.
--- ============================================================
-if type(loaderSource) == "string" then
-    if type(originalLoadstring) ~= "function" then
-        log("ERRO: loadstring original nao esta disponivel.")
+local function fetch(url)
+    local ok, result = pcall(function()
+        return game:HttpGet(url)
+    end)
+
+    if not ok then
+        return nil, tostring(result)
+    end
+
+    if type(result) ~= "string" then
+        return nil, "HttpGet retornou tipo " .. typeof(result)
+    end
+
+    return result, nil
+end
+
+log("Mine a Mountain 2 — Extrator Estático Multicamadas V1")
+log("Início.")
+log("IMPORTANTE: nenhum payload recebido será executado.")
+
+local currentUrl = START_URL
+local finalLayer = 0
+
+for layer = 1, MAX_LAYERS do
+    if visitedUrls[currentUrl] then
+        log("")
+        log("Loop de URL detectado: " .. tostring(currentUrl))
+        break
+    end
+
+    visitedUrls[currentUrl] = true
+
+    local src, err = fetch(currentUrl)
+    if not src then
+        log("")
+        log("ERRO ao baixar camada " .. tostring(layer) .. ": " .. tostring(err))
+        break
+    end
+
+    finalLayer = layer
+
+    local fileName = string.format("MAM2_%02d_layer_raw.txt", layer)
+    local saved = save(fileName, src)
+
+    scanLayer(layer, src, currentUrl)
+
+    if saved then
+        log("Salvo em: " .. fileName)
+    end
+
+    local nextUrl = extractDirectLoaderUrl(src)
+
+    if nextUrl and nextUrl ~= currentUrl then
+        log("Outra camada de loader detectada.")
+        log("Próxima URL: " .. tostring(nextUrl))
+        addCandidate("FOLLOW_LAYER_" .. tostring(layer), nextUrl)
+        currentUrl = nextUrl
     else
-        log("Compilando xgrs-loader salvo...")
-
-        local okCompile, fnOrErr = pcall(
-            originalLoadstring,
-            loaderSource,
-            "@MAM2_XGRS_LOADER"
-        )
-
-        if not okCompile or type(fnOrErr) ~= "function" then
-            log("ERRO de compilacao: " .. tostring(fnOrErr))
-        else
-            log("Compilacao OK. Iniciando xgrs-loader...")
-            pcall(function()
-                game:GetService("StarterGui"):SetCore(
-                    "SendNotification",
-                    {
-                        Title = "MAM2 Capturador V2",
-                        Text = "Captura pronta. Loader iniciado.",
-                        Duration = 5
-                    }
-                )
-            end)
-
-            local okRun, runErr = pcall(fnOrErr)
-
-            if okRun then
-                log("xgrs-loader retornou sem erro Lua imediato.")
-            else
-                log("xgrs-loader terminou com erro: " .. tostring(runErr))
-            end
-        end
+        log("")
+        log("Camada " .. tostring(layer) .. " tratada como payload final/complexo.")
+        log("A cadeia automática foi encerrada sem executar o conteúdo.")
+        break
     end
 end
 
--- ============================================================
--- Resumo
--- ============================================================
-safeWrite(
-    PREFIX .. "_99_summary.txt",
-    table.concat({
-        "capture_version=2",
-        "start_url=" .. START_URL,
-        "load_hook_method=" .. tostring(state.loadHookMethod),
-        "request_hooks=" .. tostring(state.requestHooks),
-        "loadstrings_captured=" .. tostring(state.loadCount),
-        "requests_captured=" .. tostring(state.requestCount),
-        "initial_loader_saved=" ..
-            tostring(type(loaderSource) == "string"),
-        "initial_loader_bytes=" ..
-            tostring(type(loaderSource) == "string" and #loaderSource or 0),
-        "fetch_error=" .. tostring(fetchError or "<none>")
-    }, "\n")
-)
+table.sort(candidates)
 
-log("V2 finalizou a etapa de inicializacao.")
-log("Se o menu de key apareceu, autentique normalmente.")
-log("Depois use o script e envie todos os arquivos MAM2_V2_*.")
+save("MAM2_candidates.txt", table.concat(candidates, "\n"))
+
+log("")
+log("=== RESUMO ===")
+log("Camadas obtidas: " .. tostring(finalLayer))
+log("URLs/candidatos: " .. tostring(#candidates))
+log("Nenhum conteúdo baixado foi passado para loadstring.")
+log("")
+log("Envie para análise:")
+for i = 1, finalLayer do
+    log(string.format("  MAM2_%02d_layer_raw.txt", i))
+end
+log("  MAM2_00_report.txt")
+log("  MAM2_candidates.txt")
+
+save("MAM2_00_report.txt", table.concat(report, "\n"))
+
+if type(writefile) ~= "function" then
+    local summary = table.concat(report, "\n")
+    if type(setclipboard) == "function" then
+        pcall(setclipboard, summary)
+        warn("[MAM2-EXTRACT] writefile não existe; relatório copiado para a área de transferência.")
+    end
+else
+    print("[MAM2-EXTRACT] CONCLUÍDO.")
+end
