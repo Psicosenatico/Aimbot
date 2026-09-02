@@ -1,30 +1,34 @@
 local Players = game:GetService("Players")
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
 
-local GUI_NAME = "MAM2_RuntimeScanner_V4"
-local PREFIX = "MAM2_RUNTIME_V4"
+local GUI_NAME = "MAM2_RuntimeScanner_V42"
+local PREFIX = "MAM2_RUNTIME_V42"
 
 local running = false
 local startedAt = 0
-local connections = {}
 local events = {}
-local snapshots = {}
-local watchedTextObjects = {}
-local watchedGuiObjects = {}
-local seenInstances = {}
-local snapshotId = 0
+local connections = {}
+local watchedText = {}
+local watchedGui = {}
+local injectedObjects = {}
+local createdRoots = {}
 
 local TARGET_WORDS = {
-    "xgrs","free","premium","key","loader","inject","crystal","duper",
-    "luarmor","playerhud","universal","toggle","time left","infinity"
-}
-
-local TARGET_NAME_WORDS = {
-    "xgrs","playerhud","inject","crystal","universal","loader","toggle"
+    "xgrs",
+    "playerhud",
+    "inject",
+    "universal",
+    "loader",
+    "free",
+    "premium",
+    "time left",
+    "infinity",
+    "crystal",
+    "duper",
 }
 
 local function now()
@@ -37,66 +41,7 @@ end
 
 local function safeString(v)
     local ok, s = pcall(tostring, v)
-    if ok then return s end
-    return "<tostring-error>"
-end
-
-local function sanitize(v, depth)
-    depth = depth or 0
-    if depth > 7 then
-        return "<max-depth>"
-    end
-
-    local tv = typeof(v)
-
-    if v == nil then
-        return nil
-    elseif tv == "string" or tv == "number" or tv == "boolean" then
-        return v
-    elseif tv == "Instance" then
-        local ok, full = pcall(function() return v:GetFullName() end)
-        return ok and full or safeString(v)
-    elseif tv == "Color3" then
-        return {r=v.R, g=v.G, b=v.B}
-    elseif tv == "UDim2" then
-        return {
-            xScale=v.X.Scale, xOffset=v.X.Offset,
-            yScale=v.Y.Scale, yOffset=v.Y.Offset
-        }
-    elseif tv == "UDim" then
-        return {scale=v.Scale, offset=v.Offset}
-    elseif tv == "Vector2" then
-        return {x=v.X, y=v.Y}
-    elseif tv == "Vector3" then
-        return {x=v.X, y=v.Y, z=v.Z}
-    elseif tv == "EnumItem" then
-        return safeString(v)
-    elseif tv == "table" then
-        local out = {}
-        local isArray = true
-        local maxIndex = 0
-
-        for k in pairs(v) do
-            if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
-                isArray = false
-                break
-            end
-            if k > maxIndex then maxIndex = k end
-        end
-
-        if isArray then
-            for i = 1, maxIndex do
-                out[i] = sanitize(v[i], depth + 1)
-            end
-        else
-            for k, val in pairs(v) do
-                out[safeString(k)] = sanitize(val, depth + 1)
-            end
-        end
-        return out
-    end
-
-    return safeString(v)
+    return ok and s or "<error>"
 end
 
 local function pathOf(inst)
@@ -106,18 +51,82 @@ local function pathOf(inst)
     return ok and p or safeString(inst)
 end
 
-local function lowerContainsAny(s, words)
-    if type(s) ~= "string" then return false end
-    local low = string.lower(s)
-    for _, w in ipairs(words) do
-        if string.find(low, w, 1, true) then
+local function containsTarget(text)
+    if type(text) ~= "string" then
+        return false
+    end
+    local low = text:lower()
+    for _, word in ipairs(TARGET_WORDS) do
+        if low:find(word, 1, true) then
             return true
         end
     end
     return false
 end
 
-local function pushEvent(kind, data)
+local function getText(obj)
+    local ok, text = pcall(function()
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+            return obj.Text
+        end
+    end)
+    return ok and text or nil
+end
+
+local function isRelevant(obj)
+    if not obj then return false end
+
+    local name = safeString(obj.Name)
+    if containsTarget(name) then
+        return true
+    end
+
+    local text = getText(obj)
+    if containsTarget(text) then
+        return true
+    end
+
+    local parent = obj.Parent
+    local depth = 0
+    while parent and depth < 8 do
+        if containsTarget(safeString(parent.Name)) then
+            return true
+        end
+        parent = parent.Parent
+        depth += 1
+    end
+
+    return false
+end
+
+local function sanitize(v)
+    local tv = typeof(v)
+    if v == nil or tv == "string" or tv == "number" or tv == "boolean" then
+        return v
+    elseif tv == "Color3" then
+        return {r=v.R, g=v.G, b=v.B}
+    elseif tv == "UDim2" then
+        return {
+            xScale=v.X.Scale, xOffset=v.X.Offset,
+            yScale=v.Y.Scale, yOffset=v.Y.Offset
+        }
+    elseif tv == "Vector2" then
+        return {x=v.X, y=v.Y}
+    elseif tv == "EnumItem" then
+        return safeString(v)
+    elseif tv == "Instance" then
+        return pathOf(v)
+    elseif tv == "table" then
+        local out = {}
+        for k, val in pairs(v) do
+            out[safeString(k)] = sanitize(val)
+        end
+        return out
+    end
+    return safeString(v)
+end
+
+local function push(kind, data)
     if not running then return end
     events[#events + 1] = {
         t = now() - startedAt,
@@ -127,245 +136,157 @@ local function pushEvent(kind, data)
     }
 end
 
-local function getText(obj)
-    local ok, value = pcall(function()
-        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
-            return obj.Text
-        end
-        return nil
-    end)
-    return ok and value or nil
-end
-
-local function getAttributesSafe(obj)
-    local ok, attrs = pcall(function()
-        return obj:GetAttributes()
-    end)
-    return ok and sanitize(attrs) or {}
-end
-
-local function getGuiProps(obj)
-    local out = {
+local function objectInfo(obj)
+    local info = {
         name = obj.Name,
         class = obj.ClassName,
         path = pathOf(obj),
-        attributes = getAttributesSafe(obj),
     }
+
+    local text = getText(obj)
+    if text ~= nil then
+        info.text = text
+    end
 
     pcall(function()
         if obj:IsA("GuiObject") then
-            out.visible = obj.Visible
-            out.active = obj.Active
-            out.position = sanitize(obj.Position)
-            out.size = sanitize(obj.Size)
-            out.anchorPoint = sanitize(obj.AnchorPoint)
-            out.zIndex = obj.ZIndex
-            out.backgroundTransparency = obj.BackgroundTransparency
-            out.backgroundColor3 = sanitize(obj.BackgroundColor3)
+            info.visible = obj.Visible
+            info.position = sanitize(obj.Position)
+            info.size = sanitize(obj.Size)
         end
     end)
 
     pcall(function()
         if obj:IsA("ScreenGui") then
-            out.enabled = obj.Enabled
-            out.displayOrder = obj.DisplayOrder
-            out.ignoreGuiInset = obj.IgnoreGuiInset
+            info.enabled = obj.Enabled
+            info.displayOrder = obj.DisplayOrder
         end
     end)
 
-    local text = getText(obj)
-    if text ~= nil then
-        out.text = text
-        pcall(function()
-            out.textSize = obj.TextSize
-            out.textTransparency = obj.TextTransparency
-            out.textColor3 = sanitize(obj.TextColor3)
-            out.richText = obj.RichText
-        end)
-    end
-
-    return out
-end
-
-local function isTargetObject(obj)
-    local name = safeString(obj.Name)
-    local path = pathOf(obj)
-    local text = getText(obj)
-
-    return lowerContainsAny(name, TARGET_NAME_WORDS)
-        or lowerContainsAny(path, TARGET_NAME_WORDS)
-        or lowerContainsAny(text, TARGET_WORDS)
+    return info
 end
 
 local function attachTextWatcher(obj)
-    if watchedTextObjects[obj] then return end
+    if watchedText[obj] then return end
     if not (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
         return
     end
 
-    watchedTextObjects[obj] = true
+    watchedText[obj] = true
     local lastText = getText(obj)
 
-    local ok, conn = pcall(function()
-        return obj:GetPropertyChangedSignal("Text"):Connect(function()
-            if not running then return end
-            local newText = getText(obj)
-            if newText ~= lastText then
-                pushEvent("TEXT_CHANGED", {
-                    path = pathOf(obj),
-                    class = obj.ClassName,
-                    oldText = lastText,
-                    newText = newText,
-                    targetMatch = isTargetObject(obj),
-                })
-                lastText = newText
-            end
-        end)
+    local conn = obj:GetPropertyChangedSignal("Text"):Connect(function()
+        if not running then return end
+
+        local newText = getText(obj)
+        if newText ~= lastText and (isRelevant(obj) or containsTarget(newText) or containsTarget(lastText)) then
+            push("TEXT_CHANGED", {
+                path = pathOf(obj),
+                class = obj.ClassName,
+                oldText = lastText,
+                newText = newText,
+            })
+        end
+        lastText = newText
     end)
 
-    if ok and conn then
+    connections[#connections + 1] = conn
+end
+
+local function attachGuiWatchers(obj)
+    if watchedGui[obj] then return end
+    if not (obj:IsA("GuiObject") or obj:IsA("ScreenGui")) then return end
+
+    watchedGui[obj] = true
+
+    local props = obj:IsA("ScreenGui")
+        and {"Enabled"}
+        or {"Visible"}
+
+    for _, prop in ipairs(props) do
+        local conn = obj:GetPropertyChangedSignal(prop):Connect(function()
+            if not running or not isRelevant(obj) then return end
+
+            local value
+            pcall(function() value = obj[prop] end)
+
+            push("GUI_PROPERTY_CHANGED", {
+                path = pathOf(obj),
+                class = obj.ClassName,
+                property = prop,
+                value = sanitize(value),
+            })
+        end)
+
         connections[#connections + 1] = conn
     end
 end
 
-local function attachGuiPropertyWatchers(obj)
-    if watchedGuiObjects[obj] then return end
-    if not (obj:IsA("GuiObject") or obj:IsA("ScreenGui")) then return end
-    watchedGuiObjects[obj] = true
+local function inspectNewObject(obj, source)
+    if not running then return end
 
-    local props = {}
-    if obj:IsA("GuiObject") then
-        props = {"Visible", "Position", "Size", "BackgroundTransparency"}
-    elseif obj:IsA("ScreenGui") then
-        props = {"Enabled", "DisplayOrder"}
-    end
+    -- DescendantAdded só entrega objetos criados/adicionados após o início.
+    injectedObjects[obj] = true
 
-    for _, prop in ipairs(props) do
-        local ok, conn = pcall(function()
-            return obj:GetPropertyChangedSignal(prop):Connect(function()
-                if not running then return end
-                if isTargetObject(obj) then
-                    local value
-                    pcall(function() value = obj[prop] end)
-                    pushEvent("GUI_PROPERTY_CHANGED", {
-                        path = pathOf(obj),
-                        class = obj.ClassName,
-                        property = prop,
-                        value = sanitize(value),
-                    })
-                end
-            end)
-        end)
-        if ok and conn then
-            connections[#connections + 1] = conn
+    attachTextWatcher(obj)
+    attachGuiWatchers(obj)
+
+    if isRelevant(obj) then
+        push("OBJECT_ADDED", {
+            source = source,
+            object = objectInfo(obj),
+        })
+
+        if obj:IsA("ScreenGui") or obj:IsA("Folder") then
+            createdRoots[obj] = true
         end
     end
 end
 
-local function inspectInstance(obj, reason)
-    if not obj then return end
+local function watchRoot(root, label)
+    if not root then return end
 
-    attachTextWatcher(obj)
-    attachGuiPropertyWatchers(obj)
+    local addConn = root.DescendantAdded:Connect(function(obj)
+        inspectNewObject(obj, label)
+    end)
+    connections[#connections + 1] = addConn
 
-    if not running then return end
+    local removeConn = root.DescendantRemoving:Connect(function(obj)
+        if not running then return end
+        if not injectedObjects[obj] then return end
 
-    local key = safeString(obj)
-    if seenInstances[key] then return end
-    seenInstances[key] = true
-
-    local target = isTargetObject(obj)
-
-    if target
-        or obj:IsA("RemoteEvent")
-        or obj:IsA("RemoteFunction")
-        or obj:IsA("BindableEvent")
-        or obj:IsA("BindableFunction")
-    then
-        pushEvent("INSTANCE_SEEN", {
-            reason = reason,
-            targetMatch = target,
-            object = getGuiProps(obj),
-        })
-    end
+        if isRelevant(obj) then
+            push("OBJECT_REMOVING", {
+                source = label,
+                object = objectInfo(obj),
+            })
+        end
+    end)
+    connections[#connections + 1] = removeConn
 end
 
-local function collectTargetHierarchy()
-    local out = {}
+local function captureRelevantTree()
+    local tree = {}
 
-    local function scan(root)
-        local ok, descendants = pcall(function()
-            return root:GetDescendants()
-        end)
-        if not ok then return end
+    for root in pairs(createdRoots) do
+        if root and root.Parent then
+            tree[#tree + 1] = objectInfo(root)
 
-        for _, obj in ipairs(descendants) do
-            if isTargetObject(obj) then
-                out[#out + 1] = getGuiProps(obj)
+            local ok, descendants = pcall(function()
+                return root:GetDescendants()
+            end)
+
+            if ok then
+                for _, obj in ipairs(descendants) do
+                    if isRelevant(obj) then
+                        tree[#tree + 1] = objectInfo(obj)
+                    end
+                end
             end
         end
     end
 
-    scan(CoreGui)
-
-    if LocalPlayer then
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if pg then
-            scan(pg)
-        end
-    end
-
-    return out
-end
-
-local function collectTopLevel(root)
-    local out = {}
-    local ok, children = pcall(function()
-        return root:GetChildren()
-    end)
-    if not ok then return out end
-
-    for _, obj in ipairs(children) do
-        out[#out + 1] = {
-            name = obj.Name,
-            class = obj.ClassName,
-            path = pathOf(obj),
-            attributes = getAttributesSafe(obj),
-        }
-    end
-    return out
-end
-
-local function snapshot(reason)
-    if not running then return end
-
-    snapshotId += 1
-
-    local snap = {
-        id = snapshotId,
-        t = now() - startedAt,
-        unix = unix(),
-        reason = reason,
-        xgrsHierarchy = collectTargetHierarchy(),
-        coreGuiTop = collectTopLevel(CoreGui),
-        replicatedStorageTop = collectTopLevel(ReplicatedStorage),
-        playerGuiTop = {},
-    }
-
-    if LocalPlayer then
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if pg then
-            snap.playerGuiTop = collectTopLevel(pg)
-        end
-    end
-
-    snapshots[#snapshots + 1] = sanitize(snap)
-
-    pushEvent("SNAPSHOT", {
-        id = snapshotId,
-        reason = reason,
-        targetCount = #snap.xgrsHierarchy,
-    })
+    return tree
 end
 
 local function disconnectAll()
@@ -375,259 +296,150 @@ local function disconnectAll()
     connections = {}
 end
 
-local function watchRoot(root, label)
-    if not root then return end
+local function saveReport()
+    local report = {
+        version = "MAM2 Runtime Scanner V4.2 Ultra Lite",
+        startedUnix = events[1] and events[1].unix or unix(),
+        endedUnix = unix(),
+        duration = now() - startedAt,
+        eventCount = #events,
+        events = events,
+        finalInjectedTree = captureRelevantTree(),
+        notes = {
+            "Monitors only objects created after scanner start.",
+            "ReplicatedStorage is not monitored.",
+            "No periodic snapshots.",
+            "No initial GetDescendants scan and no full-game runtime scan.",
+        }
+    }
 
-    local ok, descendants = pcall(function()
-        return root:GetDescendants()
+    local clean = sanitize(report)
+    local encoded
+
+    local jsonOk, jsonErr = pcall(function()
+        encoded = HttpService:JSONEncode(clean)
     end)
-    if ok then
-        for _, obj in ipairs(descendants) do
-            inspectInstance(obj, "initial_scan:" .. label)
-        end
-    end
 
-    local addConn = root.DescendantAdded:Connect(function(obj)
-        inspectInstance(obj, "added:" .. label)
+    local stamp = os.date("!%Y%m%d_%H%M%S")
+    local jsonName = PREFIX .. "_" .. stamp .. ".json"
+    local txtName = PREFIX .. "_" .. stamp .. "_report.txt"
 
-        if isTargetObject(obj) then
-            pushEvent("TARGET_ADDED", {
-                root = label,
-                object = getGuiProps(obj),
-            })
+    local lines = {
+        "Mine a Mountain 2 - Runtime Scanner V4.1 Lite",
+        "Eventos: " .. tostring(#events),
+        "Duracao: " .. string.format("%.2fs", report.duration),
+        "",
+        "=== EVENTOS ===",
+    }
 
-            task.defer(function()
-                task.wait(0.15)
-                if running then
-                    snapshot("target_added:" .. obj.Name)
-                end
-            end)
-        end
-    end)
-    connections[#connections + 1] = addConn
-
-    local remConn = root.DescendantRemoving:Connect(function(obj)
-        if not running then return end
-
-        if isTargetObject(obj) then
-            pushEvent("TARGET_REMOVING", {
-                root = label,
-                object = getGuiProps(obj),
-            })
-        end
-    end)
-    connections[#connections + 1] = remConn
-end
-
-local function jsonEncodeStrict(data)
-    local clean = sanitize(data)
-    local ok, encoded = pcall(function()
-        return HttpService:JSONEncode(clean)
-    end)
-    if ok then
-        return encoded, nil
-    end
-    return nil, safeString(encoded)
-end
-
-local function buildTxtReport(report)
-    local lines = {}
-
-    lines[#lines + 1] = "Mine a Mountain 2 — Runtime Scanner V4"
-    lines[#lines + 1] = "Eventos: " .. tostring(#report.events)
-    lines[#lines + 1] = "Snapshots: " .. tostring(#report.snapshots)
-    lines[#lines + 1] = "Duracao: " .. string.format("%.2fs", report.duration or 0)
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "=== EVENTOS ==="
-
-    for _, ev in ipairs(report.events) do
-        local t = tonumber(ev.t) or 0
+    for _, ev in ipairs(events) do
         local d = ev.data or {}
 
         if ev.kind == "TEXT_CHANGED" then
             lines[#lines + 1] = string.format(
                 "[%.2fs] TEXT_CHANGED | %s | %s -> %s",
-                t,
+                ev.t or 0,
                 safeString(d.path),
                 safeString(d.oldText),
                 safeString(d.newText)
             )
-
-        elseif ev.kind == "TARGET_ADDED" or ev.kind == "TARGET_REMOVING" then
+        elseif ev.kind == "OBJECT_ADDED" or ev.kind == "OBJECT_REMOVING" then
             local o = d.object or {}
             lines[#lines + 1] = string.format(
-                "[%.2fs] %s | %s | %s",
-                t,
+                "[%.2fs] %s | %s | %s | %s",
+                ev.t or 0,
                 ev.kind,
-                safeString(o.class),
-                safeString(o.path)
-            )
-
-        elseif ev.kind == "INSTANCE_SEEN" then
-            local o = d.object or {}
-            lines[#lines + 1] = string.format(
-                "[%.2fs] INSTANCE_SEEN | %s | %s | %s",
-                t,
                 safeString(o.class),
                 safeString(o.path),
                 safeString(o.text or "")
             )
-
         elseif ev.kind == "GUI_PROPERTY_CHANGED" then
             lines[#lines + 1] = string.format(
                 "[%.2fs] GUI_PROPERTY_CHANGED | %s | %s=%s",
-                t,
+                ev.t or 0,
                 safeString(d.path),
                 safeString(d.property),
                 safeString(d.value)
             )
-
-        elseif ev.kind == "SNAPSHOT" then
-            lines[#lines + 1] = string.format(
-                "[%.2fs] SNAPSHOT | id=%s | reason=%s | targets=%s",
-                t,
-                safeString(d.id),
-                safeString(d.reason),
-                safeString(d.targetCount)
-            )
-
         else
             lines[#lines + 1] = string.format(
                 "[%.2fs] %s",
-                t,
+                ev.t or 0,
                 safeString(ev.kind)
             )
         end
     end
 
     lines[#lines + 1] = ""
-    lines[#lines + 1] = "=== SNAPSHOTS / HIERARQUIA XGRS ==="
+    lines[#lines + 1] = "=== ARVORE FINAL INJETADA ==="
 
-    for _, snap in ipairs(report.snapshots) do
+    for _, obj in ipairs(report.finalInjectedTree) do
         lines[#lines + 1] = string.format(
-            "SNAPSHOT #%s | %.2fs | %s | alvos=%d",
-            safeString(snap.id),
-            tonumber(snap.t) or 0,
-            safeString(snap.reason),
-            #(snap.xgrsHierarchy or {})
+            "%s | %s | %s",
+            safeString(obj.class),
+            safeString(obj.path),
+            safeString(obj.text or "")
         )
-
-        for _, obj in ipairs(snap.xgrsHierarchy or {}) do
-            lines[#lines + 1] = string.format(
-                "  %s | %s | text=%s | visible=%s | enabled=%s",
-                safeString(obj.class),
-                safeString(obj.path),
-                safeString(obj.text or ""),
-                safeString(obj.visible),
-                safeString(obj.enabled)
-            )
-        end
     end
 
-    return table.concat(lines, "\n")
-end
+    local txt = table.concat(lines, "\n")
 
-local function saveReport()
-    local duration = now() - startedAt
-
-    local report = sanitize({
-        version = "MAM2 Runtime Scanner V4",
-        startedUnix = events[1] and events[1].unix or unix(),
-        endedUnix = unix(),
-        duration = duration,
-        eventCount = #events,
-        snapshotCount = #snapshots,
-        events = events,
-        snapshots = snapshots,
-        notes = {
-            "Client-observable runtime collection.",
-            "TEXT_CHANGED includes oldText/newText/path.",
-            "XGRS target hierarchy captured in snapshots.",
-        }
-    })
-
-    local stamp = os.date("!%Y%m%d_%H%M%S")
-    local jsonName = PREFIX .. "_" .. stamp .. ".json"
-    local txtName = PREFIX .. "_" .. stamp .. "_report.txt"
-
-    local encoded, jsonErr = jsonEncodeStrict(report)
-    local txt = buildTxtReport(report)
-
-    local jsonOK = false
-    local txtOK = false
+    local jsonSaved = false
+    local txtSaved = false
 
     if writefile then
-        if encoded then
-            jsonOK = pcall(writefile, jsonName, encoded)
-        else
+        if jsonOk and encoded then
+            jsonSaved = pcall(writefile, jsonName, encoded)
+        end
+        txtSaved = pcall(writefile, txtName, txt)
+
+        if not jsonOk then
             pcall(writefile, PREFIX .. "_" .. stamp .. "_json_error.txt", safeString(jsonErr))
         end
-
-        txtOK = pcall(writefile, txtName, txt)
     end
 
     if setclipboard then
         pcall(setclipboard, encoded or txt)
     end
 
-    return jsonOK, txtOK, jsonName, txtName, jsonErr
+    return jsonSaved, txtSaved, jsonName, txtName
 end
 
 local function startScanner()
     if running then return end
 
-    running = true
-    startedAt = now()
-
-    connections = {}
     events = {}
-    snapshots = {}
-    watchedTextObjects = {}
-    watchedGuiObjects = {}
-    seenInstances = {}
-    snapshotId = 0
+    connections = {}
+    watchedText = {}
+    watchedGui = {}
+    injectedObjects = {}
+    createdRoots = {}
 
-    pushEvent("SCAN_START", {
-        placeId = game.PlaceId,
-        jobId = game.JobId,
-    })
+    -- Nenhuma varredura inicial: só escutamos objetos adicionados daqui em diante.
+    startedAt = now()
+    running = true
 
+    push("SCAN_START", {})
+
+    -- Só escuta novas criações; não varre os conteúdos atuais.
     watchRoot(CoreGui, "CoreGui")
-    watchRoot(ReplicatedStorage, "ReplicatedStorage")
-
-    if LocalPlayer then
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if pg then
-            watchRoot(pg, "PlayerGui")
-        end
+    if PlayerGui then
+        watchRoot(PlayerGui, "PlayerGui")
     end
-
-    snapshot("start")
-
-    task.spawn(function()
-        while running do
-            task.wait(2)
-            if running then
-                snapshot("periodic")
-            end
-        end
-    end)
 end
 
 local function stopScanner()
     if not running then
-        return false, false, nil, nil, "not running"
+        return false, false, nil, nil
     end
 
-    pushEvent("SCAN_STOP", {})
-    snapshot("stop")
+    push("SCAN_STOP", {})
     running = false
     disconnectAll()
-
     return saveReport()
 end
 
--- Interface
+-- GUI
 pcall(function()
     local old = CoreGui:FindFirstChild(GUI_NAME)
     if old then old:Destroy() end
@@ -656,15 +468,15 @@ frame.BackgroundColor3 = Color3.fromRGB(20,20,24)
 frame.BorderSizePixel = 0
 frame.Parent = gui
 
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0,14)
-corner.Parent = frame
+local fc = Instance.new("UICorner")
+fc.CornerRadius = UDim.new(0,14)
+fc.Parent = frame
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1,-20,0,40)
 title.Position = UDim2.fromOffset(10,8)
 title.BackgroundTransparency = 1
-title.Text = "MAM2 Runtime Scanner V4"
+title.Text = "MAM2 Scanner V4.2 Ultra Lite"
 title.TextColor3 = Color3.fromRGB(245,245,245)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 19
@@ -678,7 +490,6 @@ status.Text = "Status: parado"
 status.TextColor3 = Color3.fromRGB(190,190,200)
 status.Font = Enum.Font.Gotham
 status.TextSize = 14
-status.TextWrapped = true
 status.Parent = frame
 
 local button = Instance.new("TextButton")
@@ -700,24 +511,23 @@ button.MouseButton1Click:Connect(function()
     if not running then
         startScanner()
         button.Text = "Finalizar Scam"
-        status.Text = "Status: coletando XGRS..."
+        status.Text = "Status: aguardando injecao..."
     else
         status.Text = "Status: salvando..."
-        local jsonOK, txtOK, jsonName, txtName, jsonErr = stopScanner()
-
+        local jsonOK, txtOK, jsonName, txtName = stopScanner()
         button.Text = "Iniciar Scam"
 
         if jsonOK and txtOK then
             status.Text = "Salvo JSON + TXT"
         elseif txtOK then
-            status.Text = "TXT salvo; JSON falhou: " .. safeString(jsonErr)
+            status.Text = "TXT salvo"
         else
             status.Text = "Falha ao salvar"
         end
 
-        print("MAM2 V4 JSON:", jsonName, jsonOK)
-        print("MAM2 V4 TXT:", txtName, txtOK)
+        print("MAM2 V4.2 JSON:", jsonName, jsonOK)
+        print("MAM2 V4.2 TXT:", txtName, txtOK)
     end
 end)
 
-print("MAM2 Runtime Scanner V4 carregado.")
+print("MAM2 Runtime Scanner V4.2 Ultra Lite carregado.")
