@@ -1,0 +1,450 @@
+--[[
+    Sinuca / 8-BALL-X - Extrator Estatico V1
+    Objetivo: obter material para desofuscacao SEM executar o payload remoto.
+
+    IMPORTANTE:
+      * Este script baixa o payload com game:HttpGet.
+      * Ele NAO chama a funcao compilada do payload.
+      * loadstring/load e usado somente para COMPILAR, quando disponivel,
+        permitindo tentar ler constantes/prototipos via APIs de debug.
+      * Todos os arquivos gerados usam extensao .txt.
+]]
+
+local URL = "https://raw.githubusercontent.com/ArtChivegroup/Roblox/refs/heads/main/script/8-BALL-X(Obfuscation).lua"
+
+local function now()
+    local ok, v = pcall(function()
+        return os.date("!%Y-%m-%dT%H:%M:%SZ")
+    end)
+    return ok and tostring(v) or tostring(os.clock())
+end
+
+local function safe_tostring(v)
+    local ok, s = pcall(tostring, v)
+    if ok then return s end
+    return "<tostring error>"
+end
+
+local function rolling_hash(s)
+    -- Hash simples e deterministico; nao e criptografico.
+    local h = 2166136261
+    for i = 1, #s do
+        h = (h * 131 + string.byte(s, i)) % 4294967296
+    end
+    return string.format("%08X", h)
+end
+
+local written = {}
+local function save(name, data)
+    data = tostring(data or "")
+    if type(writefile) == "function" then
+        local ok, err = pcall(writefile, name, data)
+        if ok then
+            written[#written + 1] = name
+            return true
+        end
+        warn("[8BALLX-DUMP] writefile falhou em " .. name .. ": " .. safe_tostring(err))
+    end
+    return false
+end
+
+local report = {}
+local function log(s)
+    report[#report + 1] = tostring(s)
+    print("[8BALLX-DUMP] " .. tostring(s))
+end
+
+log("Inicio: " .. now())
+log("URL: " .. URL)
+
+-- 1) BAIXAR, MAS NAO EXECUTAR
+local okFetch, srcOrErr = pcall(function()
+    return game:HttpGet(URL)
+end)
+
+if not okFetch or type(srcOrErr) ~= "string" then
+    log("ERRO AO BAIXAR: " .. safe_tostring(srcOrErr))
+    save("8BALLX_05_report.txt", table.concat(report, "\n"))
+    error("Nao foi possivel baixar o payload.")
+end
+
+local src = srcOrErr
+log("Payload obtido.")
+log("Bytes: " .. #src)
+log("Hash rolling: " .. rolling_hash(src))
+log("Linhas: " .. select(2, src:gsub("\n", "\n")) + 1)
+
+save("8BALLX_01_raw_obfuscated.txt", src)
+
+-- 2) CONTAGEM DE INDICADORES EM TEXTO CLARO
+local probes = {
+    "getfenv", "setfenv",
+    "string.byte", "string.char", "string.sub", "string.gsub", "string.rep",
+    "table.insert", "table.concat",
+    "math.floor", "bit32.bxor", "bit.bxor",
+    "tonumber", "unpack", "select",
+    "pcall", "xpcall", "coroutine", "debug",
+    "newproxy", "setmetatable", "getmetatable",
+    "rawget", "rawset", "rawequal", "collectgarbage", "os.clock",
+    "loadstring", "require",
+    "game", "GetService", "Workspace", "Players", "RunService",
+    "ReplicatedStorage", "UserInputService", "TweenService", "HttpService",
+    "Lighting", "CurrentCamera", "LocalPlayer",
+    "RemoteEvent", "RemoteFunction", "FireServer", "InvokeServer",
+    "Drawing", "hookfunction", "hookmetamethod", "getrawmetatable",
+    "getnamecallmethod", "checkcaller", "getgc", "getgenv",
+    "request", "http_request", "syn.request", "HttpGet",
+    "writefile", "readfile", "setclipboard",
+    "VALERIAHUB", "8-BALL X", "Solution Finder", "Auto Aim", "Ghost Ball"
+}
+
+local function count_plain(haystack, needle)
+    local n, pos = 0, 1
+    while true do
+        local a, b = string.find(haystack, needle, pos, true)
+        if not a then break end
+        n = n + 1
+        pos = b + 1
+    end
+    return n
+end
+
+log("")
+log("=== INDICADORES EM TEXTO CLARO ===")
+for _, p in ipairs(probes) do
+    local n = count_plain(src, p)
+    if n > 0 then
+        log(string.format("%-28s : %d", p, n))
+    end
+end
+
+-- 3) PARSER CONSERVADOR DE STRINGS ENTRE ASPAS
+local function parse_quoted_strings(s)
+    local out = {}
+    local i, n = 1, #s
+    while i <= n do
+        local q = s:sub(i, i)
+        if q == "'" or q == '"' then
+            local start = i
+            i = i + 1
+            local buf = {}
+            while i <= n do
+                local c = s:sub(i, i)
+                if c == "\\" then
+                    if i < n then
+                        buf[#buf + 1] = c
+                        buf[#buf + 1] = s:sub(i + 1, i + 1)
+                        i = i + 2
+                    else
+                        buf[#buf + 1] = c
+                        i = i + 1
+                    end
+                elseif c == q then
+                    out[#out + 1] = {
+                        raw = table.concat(buf),
+                        quote = q,
+                        start_pos = start,
+                        end_pos = i
+                    }
+                    i = i + 1
+                    break
+                else
+                    buf[#buf + 1] = c
+                    i = i + 1
+                end
+            end
+        else
+            i = i + 1
+        end
+    end
+    return out
+end
+
+local function unescape_luaish(s)
+    -- Tenta somente escapes comuns, decimal e hex.
+    s = s:gsub("\\x(%x%x)", function(h)
+        local v = tonumber(h, 16)
+        return v and string.char(v) or "\\x" .. h
+    end)
+
+    s = s:gsub("\\(%d%d?%d?)", function(d)
+        local v = tonumber(d, 10)
+        if v and v >= 0 and v <= 255 then
+            return string.char(v)
+        end
+        return "\\" .. d
+    end)
+
+    local map = {
+        ["n"] = "\n", ["r"] = "\r", ["t"] = "\t",
+        ["b"] = "\b", ["f"] = "\f", ["v"] = "\v",
+        ["\\"] = "\\", ['"'] = '"', ["'"] = "'"
+    }
+    s = s:gsub("\\(.)", function(c)
+        return map[c] or ("\\" .. c)
+    end)
+    return s
+end
+
+local function printable_ratio(s)
+    if #s == 0 then return 1 end
+    local good = 0
+    for i = 1, #s do
+        local b = string.byte(s, i)
+        if b == 9 or b == 10 or b == 13 or (b >= 32 and b <= 126) then
+            good = good + 1
+        end
+    end
+    return good / #s
+end
+
+local strings = parse_quoted_strings(src)
+log("")
+log("Strings entre aspas encontradas: " .. #strings)
+
+local stringLines = {}
+for idx, item in ipairs(strings) do
+    local dec = unescape_luaish(item.raw)
+    local ratio = printable_ratio(dec)
+    stringLines[#stringLines + 1] = string.format(
+        "[%05d] pos=%d..%d raw_len=%d dec_len=%d printable=%.3f\nRAW: %s\nDEC: %s\n",
+        idx, item.start_pos, item.end_pos, #item.raw, #dec, ratio,
+        item.raw, dec
+    )
+end
+save("8BALLX_03_static_strings.txt", table.concat(stringLines, "\n"))
+
+-- 4) EXTRACAO DE URLs / DOMINIOS / CAMINHOS APARENTES DE STRINGS DECODIFICADAS
+local candidates = {}
+local seenCandidate = {}
+
+local function add_candidate(tag, value)
+    if type(value) ~= "string" or #value < 4 then return end
+    local key = tag .. "\0" .. value
+    if seenCandidate[key] then return end
+    seenCandidate[key] = true
+    candidates[#candidates + 1] = "[" .. tag .. "] " .. value
+end
+
+for _, item in ipairs(strings) do
+    local vals = {item.raw, unescape_luaish(item.raw)}
+    for _, v in ipairs(vals) do
+        for url in v:gmatch("https?://[^%s\"'<>]+") do
+            add_candidate("URL", url)
+        end
+        for host in v:gmatch("[%w%-_]+%.[%a][%a%d%-_%.]+") do
+            if #host >= 6 then add_candidate("HOST/PATH", host) end
+        end
+        if #v >= 8 and printable_ratio(v) > 0.92 then
+            local low = v:lower()
+            if low:find("http", 1, true)
+                or low:find("discord", 1, true)
+                or low:find("github", 1, true)
+                or low:find("remote", 1, true)
+                or low:find("workspace", 1, true)
+                or low:find("player", 1, true)
+                or low:find("ball", 1, true)
+                or low:find("aim", 1, true)
+                or low:find("solution", 1, true)
+                or low:find("reward", 1, true)
+                or low:find("skin", 1, true)
+                or low:find("level", 1, true)
+            then
+                add_candidate("KEYWORD", v)
+            end
+        end
+    end
+end
+
+table.sort(candidates)
+save("8BALLX_06_candidates.txt", table.concat(candidates, "\n"))
+
+-- 5) "PRETTY" ESTAGIO ZERO: APENAS QUEBRA SEGURA FORA DE STRINGS
+-- Nao e um decompilador; serve para tornar a camada externa inspecionavel.
+local function stage0_pretty(s)
+    local out = {}
+    local quote = nil
+    local escaped = false
+    local i = 1
+    while i <= #s do
+        local c = s:sub(i, i)
+        if quote then
+            out[#out + 1] = c
+            if escaped then
+                escaped = false
+            elseif c == "\\" then
+                escaped = true
+            elseif c == quote then
+                quote = nil
+            end
+        else
+            if c == "'" or c == '"' then
+                quote = c
+                out[#out + 1] = c
+            elseif c == ";" then
+                out[#out + 1] = ";\n"
+            else
+                out[#out + 1] = c
+            end
+        end
+        i = i + 1
+    end
+    return table.concat(out)
+end
+
+save("8BALLX_02_stage0_pretty.txt", stage0_pretty(src))
+
+-- 6) COMPILAR SEM EXECUTAR E TENTAR EXTRAIR CONSTANTES/PROTOTIPOS
+local constantsOutput = {}
+local totalConstants = 0
+local maxConstants = 50000
+local maxDepth = 20
+local seenFns = {}
+
+local function emit_const(path, idx, v)
+    totalConstants = totalConstants + 1
+    if totalConstants > maxConstants then return false end
+
+    local tv = type(v)
+    if tv == "string" then
+        constantsOutput[#constantsOutput + 1] =
+            string.format("%s const[%s] string len=%d printable=%.3f :: %q",
+                path, tostring(idx), #v, printable_ratio(v), v)
+        if v:find("http", 1, true) or v:find("Http", 1, true) then
+            add_candidate("CONST_HTTP", v)
+        end
+    elseif tv == "number" or tv == "boolean" or tv == "nil" then
+        constantsOutput[#constantsOutput + 1] =
+            string.format("%s const[%s] %s :: %s",
+                path, tostring(idx), tv, safe_tostring(v))
+    else
+        constantsOutput[#constantsOutput + 1] =
+            string.format("%s const[%s] %s :: %s",
+                path, tostring(idx), tv, safe_tostring(v))
+    end
+    return true
+end
+
+local dbg = type(debug) == "table" and debug or {}
+local getconstants_fn = dbg.getconstants or rawget(_G, "getconstants")
+local getprotos_fn = dbg.getprotos or rawget(_G, "getprotos")
+local getupvalues_fn = dbg.getupvalues or rawget(_G, "getupvalues")
+
+local function inspect_fn(fn, path, depth)
+    if type(fn) ~= "function" then return end
+    if seenFns[fn] then return end
+    if depth > maxDepth or totalConstants > maxConstants then return end
+    seenFns[fn] = true
+
+    constantsOutput[#constantsOutput + 1] =
+        string.format("\n=== %s depth=%d ===", path, depth)
+
+    if type(getconstants_fn) == "function" then
+        local ok, consts = pcall(getconstants_fn, fn)
+        if ok and type(consts) == "table" then
+            constantsOutput[#constantsOutput + 1] =
+                "constants_count=" .. tostring(#consts)
+            for i, v in ipairs(consts) do
+                if not emit_const(path, i, v) then break end
+            end
+        else
+            constantsOutput[#constantsOutput + 1] =
+                "getconstants indisponivel/falhou: " .. safe_tostring(consts)
+        end
+    else
+        constantsOutput[#constantsOutput + 1] = "getconstants: API inexistente"
+    end
+
+    if type(getupvalues_fn) == "function" then
+        local ok, ups = pcall(getupvalues_fn, fn)
+        if ok and type(ups) == "table" then
+            constantsOutput[#constantsOutput + 1] =
+                "upvalues_count=" .. tostring(#ups)
+            for i, v in pairs(ups) do
+                local tv = type(v)
+                if tv == "string" or tv == "number" or tv == "boolean" then
+                    constantsOutput[#constantsOutput + 1] =
+                        string.format("%s upvalue[%s] %s :: %s",
+                            path, tostring(i), tv,
+                            tv == "string" and string.format("%q", v) or safe_tostring(v))
+                elseif tv == "function" then
+                    inspect_fn(v, path .. ".up[" .. tostring(i) .. "]", depth + 1)
+                end
+            end
+        end
+    end
+
+    if type(getprotos_fn) == "function" then
+        local ok, protos = pcall(getprotos_fn, fn)
+        if ok and type(protos) == "table" then
+            constantsOutput[#constantsOutput + 1] =
+                "protos_count=" .. tostring(#protos)
+            for i, p in ipairs(protos) do
+                if type(p) == "function" then
+                    inspect_fn(p, path .. ".proto[" .. i .. "]", depth + 1)
+                end
+            end
+        else
+            constantsOutput[#constantsOutput + 1] =
+                "getprotos indisponivel/falhou: " .. safe_tostring(protos)
+        end
+    else
+        constantsOutput[#constantsOutput + 1] = "getprotos: API inexistente"
+    end
+end
+
+local compiler = rawget(_G, "loadstring") or rawget(_G, "load")
+if type(compiler) == "function" then
+    local okCompile, fnOrErr = pcall(function()
+        local ok1, result = pcall(compiler, src, "@8BALLX_obfuscated")
+        if ok1 then return result end
+        return compiler(src)
+    end)
+
+    if okCompile and type(fnOrErr) == "function" then
+        log("Compilacao: SUCESSO (funcao NAO executada).")
+        inspect_fn(fnOrErr, "root", 0)
+    else
+        log("Compilacao: falhou/indisponivel: " .. safe_tostring(fnOrErr))
+    end
+else
+    log("Compilacao: loadstring/load nao existe neste executor.")
+end
+
+save("8BALLX_04_compiled_constants.txt", table.concat(constantsOutput, "\n"))
+
+-- Regrava candidatos, pois constantes compiladas podem ter adicionado novos.
+table.sort(candidates)
+save("8BALLX_06_candidates.txt", table.concat(candidates, "\n"))
+
+-- 7) RESUMO FINAL
+log("")
+log("=== RESUMO ===")
+log("Strings estaticas: " .. #strings)
+log("Constantes registradas: " .. totalConstants)
+log("Candidatos relevantes: " .. #candidates)
+log("getconstants disponivel: " .. tostring(type(getconstants_fn) == "function"))
+log("getprotos disponivel: " .. tostring(type(getprotos_fn) == "function"))
+log("getupvalues disponivel: " .. tostring(type(getupvalues_fn) == "function"))
+
+log("")
+log("Arquivos esperados:")
+log("  8BALLX_01_raw_obfuscated.txt")
+log("  8BALLX_02_stage0_pretty.txt")
+log("  8BALLX_03_static_strings.txt")
+log("  8BALLX_04_compiled_constants.txt")
+log("  8BALLX_05_report.txt")
+log("  8BALLX_06_candidates.txt")
+
+local finalReport = table.concat(report, "\n")
+save("8BALLX_05_report.txt", finalReport)
+
+if type(writefile) ~= "function" then
+    warn("[8BALLX-DUMP] Este executor nao possui writefile.")
+    if type(setclipboard) == "function" then
+        pcall(setclipboard, finalReport)
+        warn("[8BALLX-DUMP] O relatorio foi copiado para a area de transferencia.")
+    end
+else
+    print("[8BALLX-DUMP] CONCLUIDO. O payload remoto NAO foi executado.")
+end
