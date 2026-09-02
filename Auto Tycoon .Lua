@@ -8,8 +8,8 @@ local VirtualInputManager = nil
 pcall(function()
     VirtualInputManager = game:GetService("VirtualInputManager")
 end)
-local VERSION = "AUTO-TP-1.7.5.8"
-local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_5_8"
+local VERSION = "AUTO-TP-1.7.5.9"
+local GUI_NAME = "PsicoTycoonPurchaseAutomatorV1_7_5_9"
 local MAX_AUX_EVENTS = 2000
 local MONEY_INTERVAL = 0.25
 local TYCOON_INTERVAL = 1.5
@@ -104,6 +104,11 @@ local State = {
     BunkerExitOnlyTeleportAttempts = 0,
     BunkerMainTeleportBlocks = 0,
     BunkerExitSettleUntil = 0,
+    BunkerExitRetryUntil = 0,
+    BunkerExitFailureCount = 0,
+    BunkerPhysicalReconciliations = 0,
+    BunkerLastRawPhysicalZone = "UNKNOWN",
+    BunkerLastRawPhysicalEvidence = nil,
     BunkerLastCompletedSessionId = 0,
     BunkerSessionAnchorCFrame = nil,
     BunkerWalkAttempts = 0,
@@ -575,7 +580,7 @@ local function createGui()
     version.Position = UDim2.new(0, 12, 0, 28)
     version.BackgroundTransparency = 1
     version.TextXAlignment = Enum.TextXAlignment.Left
-    version.Text = "AUTO V1.7.5.8 - bunker exit-only teleport lock"
+    version.Text = "AUTO V1.7.5.9 - bunker exit-only teleport lock"
     version.TextColor3 = COLORS.Muted
     version.Font = Enum.Font.Gotham
     version.TextSize = 10
@@ -728,7 +733,7 @@ local function createGui()
     export.Size = UDim2.new(1, 0, 0, 36)
     export.BackgroundColor3 = COLORS.Card
     export.BorderSizePixel = 0
-    export.Text = "Exportar relatorio AUTO V1.7.5.8 (.txt)"
+    export.Text = "Exportar relatorio AUTO V1.7.5.9 (.txt)"
     export.TextColor3 = COLORS.Text
     export.Font = Enum.Font.GothamBold
     export.TextSize = 11
@@ -798,12 +803,12 @@ local function createGui()
 end
 State.Player = waitForLocalPlayer(10)
 if not State.Player then
-    warn("[Tycoon Automator V1.7.5.8] LocalPlayer indisponivel.")
+    warn("[Tycoon Automator V1.7.5.9] LocalPlayer indisponivel.")
     return
 end
 local guiOk, guiResult = pcall(createGui)
 if not guiOk then
-    warn("[Tycoon Automator V1.7.5.8] GUI ERROR: " .. tostring(guiResult))
+    warn("[Tycoon Automator V1.7.5.9] GUI ERROR: " .. tostring(guiResult))
     return
 end
 State.Health.Bootstrap = "GUI_OK"
@@ -1159,6 +1164,89 @@ local function detectZoneByPosition()
 
     return "OUTSIDE_TYCOON", "far from known Tycoon/Bunker purchase objects"
 end
+local function detectRawPhysicalZoneByPosition()
+    local character = State.Player and State.Player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then
+        return "UNKNOWN", "HumanoidRootPart unavailable"
+    end
+
+    local nearestBunker = math.huge
+    local nearestMain = math.huge
+
+    local function inspectFolder(folder, isButtons)
+        if not folder then
+            return
+        end
+        local count = 0
+        for _, child in ipairs(folder:GetChildren()) do
+            count = count + 1
+            if count > 120 then
+                break
+            end
+            if child:IsA("Model") or child:IsA("Folder") then
+                local info
+                if isButtons then
+                    info = State.ButtonCache[child.Name] or describeButton(child)
+                else
+                    info = State.ButtonCache[child.Name] or describePurchase(child)
+                end
+                local position = modelPosition(child)
+                if position then
+                    local distance = (root.Position - position).Magnitude
+                    local nameNorm = normalize(info and info.Name)
+                    local dependencyNorm = normalize(info and info.Dependency)
+                    local rootBunker = nameNorm == "bunker" and dependencyNorm == ""
+                    local logicalZone = rootBunker and "MAIN_TYCOON" or inferLogicalZone(info)
+                    if logicalZone == "BUNKER" then
+                        nearestBunker = math.min(nearestBunker, distance)
+                    else
+                        nearestMain = math.min(nearestMain, distance)
+                    end
+                end
+            end
+        end
+    end
+
+    inspectFolder(State.ButtonsFolder, true)
+    inspectFolder(State.PurchasesFolder, false)
+
+    if nearestMain < math.huge and nearestBunker < math.huge then
+        if nearestMain <= 180 and nearestMain + 12 < nearestBunker then
+            return "MAIN_TYCOON",
+                "raw nearest main=" .. tostring(math.floor(nearestMain)) ..
+                " bunker=" .. tostring(math.floor(nearestBunker))
+        end
+        if nearestBunker <= 120 and nearestBunker + 12 < nearestMain then
+            return "BUNKER",
+                "raw nearest bunker=" .. tostring(math.floor(nearestBunker)) ..
+                " main=" .. tostring(math.floor(nearestMain))
+        end
+    end
+
+    if nearestMain <= 70 then
+        return "MAIN_TYCOON",
+            "raw strong main proximity=" .. tostring(math.floor(nearestMain))
+    end
+    if nearestBunker <= 70 then
+        return "BUNKER",
+            "raw strong bunker proximity=" .. tostring(math.floor(nearestBunker))
+    end
+    if nearestMain <= 180 and nearestBunker > 180 then
+        return "MAIN_TYCOON",
+            "raw main-only proximity=" .. tostring(math.floor(nearestMain))
+    end
+    if nearestBunker <= 180 and nearestMain > 180 then
+        return "BUNKER",
+            "raw bunker-only proximity=" .. tostring(math.floor(nearestBunker))
+    end
+
+    return "UNKNOWN",
+        "raw zone ambiguous main=" ..
+        tostring(nearestMain < math.huge and math.floor(nearestMain) or "inf") ..
+        " bunker=" ..
+        tostring(nearestBunker < math.huge and math.floor(nearestBunker) or "inf")
+end
 local function classifyTransitionPrompt(prompt)
     local action = normalize(prompt and prompt.ActionText)
     local object = normalize(prompt and prompt.ObjectText)
@@ -1212,6 +1300,7 @@ local function watchTransitionPrompts(instance)
                     if direction == "ENTER_BUNKER" then
                         State.BunkerEnterPromptObservedClock = item.Clock
                         State.BunkerExitSettleUntil = 0
+                        State.BunkerExitRetryUntil = 0
                         if not State.BunkerEnterInProgress then
                             if not State.BunkerSessionActive then
                                 State.BunkerSessionId = State.BunkerSessionId + 1
@@ -1232,6 +1321,7 @@ local function watchTransitionPrompts(instance)
                     elseif direction == "EXIT_BUNKER" then
                         local wasAutoExit = State.BunkerExitInProgress
                         State.BunkerExitPromptObservedClock = item.Clock
+                        State.BunkerExitRetryUntil = 0
                         if not wasAutoExit then
                             State.BunkerManualExitCount = State.BunkerManualExitCount + 1
                         end
@@ -2176,6 +2266,8 @@ local BUNKER_PROMPT_MARGIN = 1.5
 local BUNKER_PURCHASE_WALK_DISTANCE = 3.5
 local BUNKER_PENDING_RETRY_WAIT = 0.65
 local BUNKER_REENTRY_NEAR_ENTER = 35
+local BUNKER_EXIT_PROMPT_DISCOVERY_TIMEOUT = 2.5
+local BUNKER_EXIT_FAILURE_COOLDOWN = 4.0
 local AUTO_REBIRTH_CONFIRM_TIMEOUT = 5
 local AUTO_REBIRTH_RETRY_COOLDOWN = 8
 local AUTOSAVE_INTERVAL = 15
@@ -2211,6 +2303,51 @@ local function autoCaptureCurrentSafePosition(reason)
     })
     return true
 end
+local function autoReconcileBunkerPhysicalState(source)
+    local rawZone, rawEvidence = detectRawPhysicalZoneByPosition()
+    State.BunkerLastRawPhysicalZone = rawZone
+    State.BunkerLastRawPhysicalEvidence = rawEvidence
+
+    if rawZone == "MAIN_TYCOON"
+    and not State.BunkerEnterInProgress
+    and (
+        State.BunkerSessionActive
+        or State.CurrentZone == "BUNKER"
+        or State.BunkerExitInProgress
+    ) then
+        local previousSession = State.BunkerSessionId
+        State.BunkerSessionActive = false
+        State.BunkerExitInProgress = false
+        State.BunkerEnterInProgress = false
+        State.BunkerSessionAnchorCFrame = nil
+        State.BunkerSessionReason = "PHYSICAL_MAIN_RECONCILED"
+        State.BunkerExitRetryUntil = 0
+        State.BunkerExitSettleUntil = math.max(
+            State.BunkerExitSettleUntil or 0,
+            os.clock() + 0.25
+        )
+        State.BunkerLastCompletedSessionId = math.max(
+            State.BunkerLastCompletedSessionId or 0,
+            previousSession or 0
+        )
+        State.BunkerPhysicalReconciliations =
+            (State.BunkerPhysicalReconciliations or 0) + 1
+
+        setZone("MAIN_TYCOON", "RAW_PHYSICAL_MAIN_RECONCILED: " .. tostring(rawEvidence))
+        autoCaptureCurrentSafePosition("RAW_PHYSICAL_MAIN_RECONCILED")
+        autoRecord("BUNKER_STALE_STATE_CLEARED_BY_PHYSICAL_MAIN", {
+            Source = tostring(source or "UNKNOWN"),
+            SessionId = previousSession,
+            RawZone = rawZone,
+            Evidence = rawEvidence,
+            Policy = "PHYSICAL_MAIN_OVERRIDES_STALE_BUNKER_LOCK; NEVER_TELEPORT_BACK_TO_EXIT_FROM_MAIN",
+        })
+        return true, rawZone, rawEvidence
+    end
+
+    return false, rawZone, rawEvidence
+end
+
 local function autoTargetPart(container)
     if not container then return nil end
     local touch = container:FindFirstChild("Touch", true)
@@ -2770,18 +2907,33 @@ local function autoFindBunkerPrompt(actionText)
     if not bunker then
         return nil
     end
-    local fallback = nil
+
+    local wanted = normalize(actionText)
+    local wantedDirection = nil
+    if wanted == "enter" or wanted == "entrada" then
+        wantedDirection = "ENTER_BUNKER"
+    elseif wanted == "exit" or wanted == "leave" or wanted == "return"
+    or wanted == "sair" or wanted == "saida" then
+        wantedDirection = "EXIT_BUNKER"
+    end
+
     for _, descendant in ipairs(bunker:GetDescendants()) do
         if descendant:IsA("ProximityPrompt") then
-            if not fallback then
-                fallback = descendant
-            end
-            if actionText and textContains(descendant.ActionText, actionText) then
+            local direction = classifyTransitionPrompt(descendant)
+            if wantedDirection then
+                if direction == wantedDirection then
+                    return descendant
+                end
+            elseif actionText and textContains(descendant.ActionText, actionText) then
                 return descendant
             end
         end
     end
-    return fallback
+
+    -- IMPORTANT: when a direction was requested, never return the opposite
+    -- prompt as a fallback. A missing ExitPrompt must stay missing until it
+    -- actually exists.
+    return nil
 end
 local function autoPromptPart(prompt)
     if not prompt then
@@ -3023,6 +3175,12 @@ local function autoExitBunker()
         return false, "BUNKER_ELIGIBLE_ITEMS_REMAIN"
     end
 
+    local reconciled, rawZone, rawEvidence =
+        autoReconcileBunkerPhysicalState("AUTO_EXIT_PRECHECK")
+    if reconciled or rawZone == "MAIN_TYCOON" then
+        return true, "ALREADY_PHYSICALLY_IN_MAIN"
+    end
+
     if not State.BunkerSessionActive and State.CurrentZone == "MAIN_TYCOON" then
         if os.clock() < (State.BunkerExitSettleUntil or 0) then
             return false, "BUNKER_EXIT_SETTLE_ACTIVE"
@@ -3030,20 +3188,72 @@ local function autoExitBunker()
         return true, "ALREADY_IN_MAIN_TYCOON_WITHOUT_SESSION"
     end
 
+    if os.clock() < (State.BunkerExitRetryUntil or 0) then
+        return false, "BUNKER_EXIT_RETRY_COOLDOWN"
+    end
+
     State.AutomationState = "EXITING_BUNKER"
     State.Health.Automation = "EXITING_BUNKER"
     State.BunkerExitInProgress = true
     State.BunkerExitPromptObservedClock = 0
 
-    local prompt = autoFindBunkerPrompt("exit")
+    local prompt = nil
+    local discoveryDeadline = os.clock() + BUNKER_EXIT_PROMPT_DISCOVERY_TIMEOUT
+    repeat
+        prompt = autoFindBunkerPrompt("exit")
+        if prompt then
+            break
+        end
+
+        local nowReconciled, nowRawZone =
+            autoReconcileBunkerPhysicalState("EXIT_PROMPT_DISCOVERY")
+        if nowReconciled or nowRawZone == "MAIN_TYCOON" then
+            State.BunkerExitInProgress = false
+            return true, "PHYSICAL_MAIN_DURING_EXIT_DISCOVERY"
+        end
+        task.wait(0.08)
+    until os.clock() >= discoveryDeadline
+
     if not prompt then
         State.BunkerExitInProgress = false
+        State.BunkerExitFailureCount = (State.BunkerExitFailureCount or 0) + 1
+        State.BunkerExitRetryUntil = os.clock() + BUNKER_EXIT_FAILURE_COOLDOWN
+        autoRecord("BUNKER_EXIT_PROMPT_NOT_READY", {
+            SessionId = State.BunkerSessionId,
+            RetryAfter = BUNKER_EXIT_FAILURE_COOLDOWN,
+            Policy = "STRICT_EXIT_PROMPT_ONLY; NEVER_FALLBACK_TO_ENTER_PROMPT",
+        })
         return false, "EXIT_PROMPT_NOT_FOUND"
     end
+
+    if classifyTransitionPrompt(prompt) ~= "EXIT_BUNKER" then
+        State.BunkerExitInProgress = false
+        State.BunkerExitFailureCount = (State.BunkerExitFailureCount or 0) + 1
+        State.BunkerExitRetryUntil = os.clock() + BUNKER_EXIT_FAILURE_COOLDOWN
+        autoRecord("BUNKER_EXIT_WRONG_PROMPT_REJECTED", {
+            SessionId = State.BunkerSessionId,
+            Prompt = safeFullName(prompt),
+            ActionText = prompt.ActionText,
+            Policy = "NEVER_USE_ENTER_PROMPT_AS_EXIT",
+        })
+        return false, "EXIT_PROMPT_DIRECTION_MISMATCH"
+    end
+
     local part = autoPromptPart(prompt)
     if not part then
         State.BunkerExitInProgress = false
+        State.BunkerExitRetryUntil = os.clock() + BUNKER_EXIT_FAILURE_COOLDOWN
         return false, "EXIT_PROMPT_PART_NOT_FOUND"
+    end
+
+    -- Reconcile again immediately before the only allowed Bunker teleport.
+    -- If the game has already returned the player to MAIN, never teleport
+    -- them back into the Bunker just to reach Exit.
+    local beforeTeleportReconciled, beforeTeleportRaw =
+        autoReconcileBunkerPhysicalState("EXIT_BEFORE_TELEPORT")
+    if beforeTeleportReconciled or beforeTeleportRaw == "MAIN_TYCOON" then
+        State.BunkerExitInProgress = false
+        return true, "PHYSICAL_MAIN_BEFORE_EXIT_TELEPORT"
     end
 
     State.BunkerExitOnlyTeleportAttempts = State.BunkerExitOnlyTeleportAttempts + 1
@@ -3051,17 +3261,27 @@ local function autoExitBunker()
         SessionId = State.BunkerSessionId,
         Prompt = safeFullName(prompt),
         TargetPart = safeFullName(part),
+        RawPhysicalZone = beforeTeleportRaw,
         Policy = "EXIT_PROMPT_IS_THE_ONLY_TELEPORT_TARGET_ALLOWED_DURING_BUNKER_SESSION",
     })
 
     local positioned, positionReason = autoTeleportToPart(part)
     if not positioned then
+        local afterFailReconciled, afterFailRaw =
+            autoReconcileBunkerPhysicalState("EXIT_POSITION_FAILED")
+        if afterFailReconciled or afterFailRaw == "MAIN_TYCOON" then
+            State.BunkerExitInProgress = false
+            return true, "PHYSICAL_MAIN_AFTER_EXIT_POSITION_FAILURE"
+        end
         State.BunkerExitInProgress = false
         State.BunkerSessionReason = "EXIT_POSITION_FAILED_SESSION_RETAINED"
+        State.BunkerExitFailureCount = (State.BunkerExitFailureCount or 0) + 1
+        State.BunkerExitRetryUntil = os.clock() + BUNKER_EXIT_FAILURE_COOLDOWN
         autoRecord("BUNKER_EXIT_ONLY_TELEPORT_FAILED", {
             SessionId = State.BunkerSessionId,
             Reason = positionReason,
             TargetPart = safeFullName(part),
+            RetryAfter = BUNKER_EXIT_FAILURE_COOLDOWN,
         })
         return false, positionReason
     end
@@ -3086,24 +3306,43 @@ local function autoExitBunker()
         Movement = "SAFE_TELEPORT_TO_EXIT_PROMPT_ONLY_THEN_REAL_EXIT_PROMPT",
     }
     table.insert(State.BunkerTransitionLog, transition)
+
+    local activationMethod = nil
+    local promptOk = false
+    if type(fireproximityprompt) == "function" then
+        promptOk = pcall(function()
+            fireproximityprompt(prompt)
+        end)
+        if promptOk then
+            activationMethod = "FIREPROXIMITYPROMPT"
+        end
+    else
+        promptOk = pcall(function()
+            prompt:InputHoldBegin()
+            task.wait(math.max(0.10, tonumber(prompt.HoldDuration) or 0) + 0.12)
+            prompt:InputHoldEnd()
+        end)
+        if promptOk then
+            activationMethod = "INPUT_HOLD"
+        end
+    end
+
     autoRecord("BUNKER_EXIT_PROMPT_STARTED", {
         TransitionId = transition.Id,
         Prompt = transition.Prompt,
         TargetPart = transition.TargetPart,
         ActionText = transition.ActionText,
         PositionReason = positionReason,
+        ActivationMethod = activationMethod,
         Movement = transition.Movement,
     })
 
-    local promptOk = pcall(function()
-        prompt:InputHoldBegin()
-        task.wait(math.max(0.10, tonumber(prompt.HoldDuration) or 0) + 0.12)
-        prompt:InputHoldEnd()
-    end)
     if not promptOk then
         State.BunkerExitInProgress = false
         State.BunkerSessionActive = true
         State.BunkerSessionReason = "EXIT_PROMPT_TRIGGER_FAILED_SESSION_RETAINED"
+        State.BunkerExitFailureCount = (State.BunkerExitFailureCount or 0) + 1
+        State.BunkerExitRetryUntil = os.clock() + BUNKER_EXIT_FAILURE_COOLDOWN
         return false, "EXIT_PROMPT_TRIGGER_FAILED"
     end
 
@@ -3114,75 +3353,92 @@ local function autoExitBunker()
             (State.BunkerExitPromptObservedClock or 0) > 0
             and (State.BunkerExitPromptObservedClock or 0) >= transitionStartedClock - 0.10
 
-        if exitObserved and currentRoot and currentHumanoid and currentHumanoid.Health > 0 then
+        local nowRawZone, nowRawEvidence = detectRawPhysicalZoneByPosition()
+        State.BunkerLastRawPhysicalZone = nowRawZone
+        State.BunkerLastRawPhysicalEvidence = nowRawEvidence
+
+        if currentRoot and currentHumanoid and currentHumanoid.Health > 0 then
             local displacement = (currentRoot.Position - originPosition).Magnitude
-            if displacement >= BUNKER_TRANSITION_MIN_DISPLACEMENT
-            or (
-                not State.BunkerSessionActive
-                and State.CurrentZone == "MAIN_TYCOON"
-            ) then
+            local physicalMainConfirmed =
+                nowRawZone == "MAIN_TYCOON"
+                and displacement >= BUNKER_TRANSITION_MIN_DISPLACEMENT
+
+            if exitObserved or physicalMainConfirmed then
                 State.BunkerSessionActive = false
                 State.BunkerExitInProgress = false
                 State.BunkerEnterInProgress = false
-                State.BunkerSessionReason = "EXIT_REAL_PROMPT_CONFIRMED"
+                State.BunkerSessionReason = exitObserved
+                    and "EXIT_REAL_PROMPT_CONFIRMED"
+                    or "EXIT_PHYSICAL_MAIN_CONFIRMED"
                 State.BunkerSessionAnchorCFrame = nil
                 State.BunkerLastCompletedSessionId = State.BunkerSessionId
+                State.BunkerExitRetryUntil = 0
                 State.BunkerExitSettleUntil = math.max(
                     State.BunkerExitSettleUntil or 0,
                     os.clock() + 0.35
                 )
-                setZone("MAIN_TYCOON", "BUNKER_REAL_EXIT_PROMPT_CONFIRMED")
-                autoCaptureCurrentSafePosition("BUNKER_REAL_EXIT_PROMPT_CONFIRMED")
+                setZone(
+                    "MAIN_TYCOON",
+                    exitObserved
+                        and "BUNKER_REAL_EXIT_PROMPT_CONFIRMED"
+                        or "BUNKER_RAW_PHYSICAL_MAIN_CONFIRMED"
+                )
+                autoCaptureCurrentSafePosition(
+                    exitObserved
+                        and "BUNKER_REAL_EXIT_PROMPT_CONFIRMED"
+                        or "BUNKER_RAW_PHYSICAL_MAIN_CONFIRMED"
+                )
                 transition.Result = "ZONE_CONFIRMED"
                 transition.FinishedUnix = os.time()
                 transition.FinishedElapsed = elapsed()
                 transition.Displacement = displacement
-                transition.PromptObserved = true
+                transition.PromptObserved = exitObserved
+                transition.PhysicalEvidence = nowRawEvidence
                 autoRecord("BUNKER_SESSION_RELEASED", {
                     SessionId = State.BunkerSessionId,
-                    Reason = "REAL_EXIT_PROMPT_CONFIRMED",
-                    ExitPolicy = "TELEPORT_TO_EXIT_BUTTON_ONLY; GAME_PROMPT_PERFORMS_CROSS_ZONE_TRANSITION",
+                    Reason = State.BunkerSessionReason,
+                    ExitPolicy = "STRICT_EXIT_PROMPT; PHYSICAL_MAIN_MAY_CONFIRM_WHEN_TRIGGER_EVENT_IS_NOT_EXPOSED",
                     Displacement = displacement,
+                    PromptObserved = exitObserved,
+                    RawPhysicalZone = nowRawZone,
+                    RawPhysicalEvidence = nowRawEvidence,
+                    ActivationMethod = activationMethod,
                 })
-                return true, "EXIT_PROMPT_CONFIRMED"
+                return true, exitObserved
+                    and "EXIT_PROMPT_CONFIRMED"
+                    or "EXIT_PHYSICAL_MAIN_CONFIRMED"
             end
         end
         task.wait(0.05)
     end
 
-    if (State.BunkerExitPromptObservedClock or 0) >= transitionStartedClock - 0.10 then
-        State.BunkerSessionActive = false
+    local timeoutReconciled, timeoutRaw, timeoutEvidence =
+        autoReconcileBunkerPhysicalState("EXIT_CONFIRM_TIMEOUT")
+    if timeoutReconciled or timeoutRaw == "MAIN_TYCOON" then
         State.BunkerExitInProgress = false
-        State.BunkerEnterInProgress = false
-        State.BunkerSessionReason = "EXIT_PROMPT_OBSERVED_PHYSICAL_CONFIRM_TIMEOUT"
-        State.BunkerSessionAnchorCFrame = nil
-        State.BunkerLastCompletedSessionId = State.BunkerSessionId
-        State.BunkerExitSettleUntil = os.clock() + 0.85
-        setZone("MAIN_TYCOON", "BUNKER_EXIT_PROMPT_OBSERVED_AUTHORITATIVE")
-        transition.Result = "PROMPT_CONFIRMED_PHYSICAL_TIMEOUT"
-        transition.FinishedUnix = os.time()
-        transition.FinishedElapsed = elapsed()
-        autoRecord("BUNKER_SESSION_RELEASED_BY_EXIT_PROMPT_FALLBACK", {
-            SessionId = State.BunkerSessionId,
-            Policy = "REAL_EXIT_PROMPT_IS_AUTHORITATIVE; DO_NOT_REENTER_FROM_STALE_SESSION",
-        })
-        return true, "EXIT_PROMPT_OBSERVED"
+        return true, "PHYSICAL_MAIN_RECONCILED_AFTER_EXIT_TIMEOUT"
     end
 
     State.BunkerExitInProgress = false
     State.BunkerSessionActive = true
-    State.BunkerSessionReason = "EXIT_PROMPT_NOT_OBSERVED_SESSION_RETAINED"
-    setZone("BUNKER", "BUNKER_EXIT_PROMPT_NOT_OBSERVED; SESSION_RETAINED")
+    State.BunkerSessionReason = "EXIT_NOT_CONFIRMED_SESSION_RETAINED"
+    State.BunkerExitFailureCount = (State.BunkerExitFailureCount or 0) + 1
+    State.BunkerExitRetryUntil = os.clock() + BUNKER_EXIT_FAILURE_COOLDOWN
+    setZone("BUNKER", "BUNKER_EXIT_NOT_CONFIRMED; SESSION_RETAINED")
     autoRecord("BUNKER_SESSION_EXIT_FAILED", {
         SessionId = State.BunkerSessionId,
-        Reason = "EXIT_PROMPT_NOT_OBSERVED",
+        Reason = "EXIT_NOT_CONFIRMED",
         Zone = State.CurrentZone,
-        Policy = "RETAIN_SESSION_ONLY_WHEN_REAL_EXIT_PROMPT_WAS_NOT_OBSERVED",
+        RawPhysicalZone = timeoutRaw,
+        RawPhysicalEvidence = timeoutEvidence,
+        RetryAfter = BUNKER_EXIT_FAILURE_COOLDOWN,
+        Policy = "NO_SPAM; RETRY_COOLDOWN; PHYSICAL_MAIN_RECONCILIATION_RUNS_EVERY_AUTOMATION_LOOP",
     })
-    return false, "EXIT_PROMPT_NOT_OBSERVED"
+    return false, "EXIT_NOT_CONFIRMED"
 end
 
 local function autoCollectWithBunkerExit()
+    autoReconcileBunkerPhysicalState("COLLECTOR_PRECHECK")
     if os.clock() < (State.BunkerExitSettleUntil or 0) then
         return false, "BUNKER_EXIT_SETTLE_ACTIVE"
     end
@@ -4295,6 +4551,8 @@ local function autoHandleRebirth(oldValue, newValue)
     State.BunkerEnterInProgress = false
     State.BunkerEnterCooldownUntil = 0
     State.BunkerExitInProgress = false
+    State.BunkerExitRetryUntil = 0
+    State.BunkerExitFailureCount = 0
     State.BunkerEnterPromptObservedClock = 0
     State.BunkerExitPromptObservedClock = 0
     State.BunkerExitSettleUntil = 0
@@ -4400,6 +4658,8 @@ local function setAutomation(enabled)
         State.BunkerEnterCooldownUntil = 0
         State.BunkerEnterPromptObservedClock = 0
         State.BunkerExitPromptObservedClock = 0
+        State.BunkerExitRetryUntil = 0
+        State.BunkerExitInProgress = false
         autoRefreshFundsBlocks()
         State.AutomationServerSignal = nil
         State.AutomationLastRebirth = State.LastRebirths
@@ -4432,6 +4692,7 @@ task.spawn(function()
         if State.AutomationEnabled then
             safeCall("AUTOMATION_LOOP", function()
                 local currentRebirth = autoSyncRuntimeState()
+                autoReconcileBunkerPhysicalState("AUTOMATION_LOOP")
                 if not State.Tycoon
                 or not State.Tycoon.Parent
                 or not State.ButtonsFolder
@@ -4674,6 +4935,11 @@ local function buildReport()
                 CollectorExitSuccessful = State.BunkerCollectorExitSuccessful,
                 CollectorExitFailed = State.BunkerCollectorExitFailed,
                 ExitOnlyTeleportAttempts = State.BunkerExitOnlyTeleportAttempts,
+                ExitFailureCount = State.BunkerExitFailureCount,
+                ExitRetryUntil = State.BunkerExitRetryUntil,
+                PhysicalReconciliations = State.BunkerPhysicalReconciliations,
+                LastRawPhysicalZone = State.BunkerLastRawPhysicalZone,
+                LastRawPhysicalEvidence = State.BunkerLastRawPhysicalEvidence,
                 MainTeleportBlocks = State.BunkerMainTeleportBlocks,
                 LastCompletedSessionId = State.BunkerLastCompletedSessionId,
                 Policy = "LOCK_BUNKER_UNTIL_ZERO_PHYSICALLY_PRESENT_ELIGIBLE_BUTTONS; MANUAL_ENTER_IS_ADOPTED; COLLECTOR_REQUIRES_EXIT_PROMPT",
@@ -4727,7 +4993,7 @@ local function buildReport()
                 AutoCollectUnknownGameRemoteInvocation = false,
                 AutoCollectServerMutation = "OBSERVED_ONLY",
                 AutoCollectSimulationOnly = false,
-                BunkerTransition = "ENTER_USES_NORMAL_APPROACH_AND_REAL_PROMPT; EXIT_ALONE_MAY_SAFE_TELEPORT_TO_EXIT_PROMPT_THEN_REAL_PROMPT",
+                BunkerTransition = "STRICT_DIRECTIONAL_PROMPTS; EXIT_ONLY_MAY_SAFE_TELEPORT_TO_REAL_EXIT_PROMPT; RAW_PHYSICAL_MAIN_RECONCILES_STALE_STATE",
                 BunkerPurchaseMovement = "HUMANOID_WALK_TO_TOUCH_ONLY_WHILE_SESSION_LOCKED",
                 BunkerExitPolicy = "TWO_EMPTY_RESCANS_THEN_EXIT_ONCE",
                 AutoRebirth = true,
@@ -4737,7 +5003,7 @@ local function buildReport()
                 AutoRebirthDirectRemoteInvocation = false,
                 AutoRebirthConfirmation = "OBSERVED_REBIRTHS_INCREMENT",
                 DirectTeleport = true,
-                DirectTeleportScope = "MAIN_TYCOON_ONLY; COLLECTOR_TELEPORT_HARD_BLOCKED_WHILE_BUNKER_CONTEXT_ACTIVE",
+                DirectTeleportScope = "MAIN_TYCOON_ONLY; BUNKER_EXCEPTION_IS_STRICT_REAL_EXIT_PROMPT; STALE_BUNKER_STATE_CANNOT_PULL_PLAYER_BACK_FROM_MAIN",
                 MoneyBypass = false,
                 RebirthBypass = false,
                 MarketplaceBypass = false,
@@ -4799,10 +5065,10 @@ local function autoSaveNow(reason, timestamped)
         State.AutoSaveLastReason = reason
         return false, "WRITEFILE_UNAVAILABLE"
     end
-    local filename = "Tycoon_Purchase_Automator_V1_7_5_8_AutoSave_Latest.txt"
+    local filename = "Tycoon_Purchase_Automator_V1_7_5_9_AutoSave_Latest.txt"
     if timestamped then
         filename =
-            "Tycoon_Purchase_Automator_V1_7_5_8_AutoSave_" ..
+            "Tycoon_Purchase_Automator_V1_7_5_9_AutoSave_" ..
             reason ..
             "_" ..
             os.date("%Y%m%d_%H%M%S") ..
@@ -4915,7 +5181,7 @@ installAutoSaveWatchers()
 local function exportReport()
     local content = buildReport()
     local filename =
-        "Tycoon_Purchase_Automator_V1_7_5_8_" ..
+        "Tycoon_Purchase_Automator_V1_7_5_9_" ..
         os.date("%Y%m%d_%H%M%S") ..
         ".txt"
     local saved = false
@@ -5066,7 +5332,7 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
-UI.Status.Text = "AUTO V1.7.5.8 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
+UI.Status.Text = "AUTO V1.7.5.9 pronta. Leitura PAUSADA. Automacao OFF. GUI=" .. tostring(UI.ParentKind)
 safeCall("UI_INITIAL_REFRESH", function()
     refreshUI()
 end)
