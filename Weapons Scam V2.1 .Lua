@@ -1,1115 +1,653 @@
---==============================================================
--- PSICOSENATICO • PESQUISA DE ARMAS V2.2
--- PENETRAÇÃO DE PAREDE • DIAGNÓSTICO CIRÚRGICO / OBSERVACIONAL
---
--- OBJETIVO
--- • mapear castRays / canPierce e remotes relacionados
--- • tentar ler Source somente se o ambiente permitir
--- • comparar quatro cenários com a mesma arma equipada
--- • registrar raycast local de referência por gatilho e por gasto de munição
---
--- SEGURANÇA DA COLETA
--- • não altera arma, dano, raycast, colisão ou módulos
--- • não executa ModuleScripts via require()
--- • não chama FireServer / InvokeServer
---==============================================================
+-- PSICOSENATICO • PESQUISA DE ARMAS V2.2.1
+-- Fluxo automático de 4 missões + pausa sem reset + HUD minimizado + leitura de possíveis limites do mapa.
 
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local HttpService = game:GetService("HttpService")
-local UserInputService = game:GetService("UserInputService")
-local CoreGui = game:GetService("CoreGui")
-local Workspace = game:GetService("Workspace")
+local Players=game:GetService("Players")
+local ReplicatedStorage=game:GetService("ReplicatedStorage")
+local HttpService=game:GetService("HttpService")
+local UserInputService=game:GetService("UserInputService")
+local CoreGui=game:GetService("CoreGui")
+local Workspace=game:GetService("Workspace")
+local CollectionService=game:GetService("CollectionService")
 
-local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local LP=Players.LocalPlayer or Players.PlayerAdded:Wait()
 
-local CONFIG = {
-    VERSION = "V2.2",
-    GUI_NAME = "PsicosenaticoWeaponResearch_V2_2",
-    MAX_EVENTS = 1800,
-    MAX_LIVE = 90,
-    UI_REFRESH = 0.8,
-    PHASES = {"CLEAR", "WALL", "TARGET_BEHIND_WALL", "TARGET_CLEAR"},
-    PHASE_LABELS = {
-        CLEAR = "LIVRE",
-        WALL = "PAREDE",
-        TARGET_BEHIND_WALL = "ALVO ATRÁS DA PAREDE",
-        TARGET_CLEAR = "ALVO LIVRE"
-    },
-    WATCH_ATTRS = {
-        "_ammo", "projectileType", "raysPerShot", "rayRadius",
-        "range", "fireMode", "rateOfFire", "damage", "spread"
-    }
+local C={
+ VERSION="V2.2.1",
+ GUI="PsicosenaticoWeaponResearch_V2_2_1",
+ SHOTS=3,
+ MAX_EVENTS=2200,
+ MAX_LIVE=90,
+ BOUNDARY_DISTANCE=10000,
+ PHASES={"CLEAR","WALL","TARGET_BEHIND_WALL","TARGET_CLEAR"},
+ LABELS={
+  CLEAR="TIRO LIVRE",
+  WALL="PAREDE",
+  TARGET_BEHIND_WALL="ALVO + PAREDE",
+  TARGET_CLEAR="ALVO LIVRE"
+ },
+ HELP={
+  CLEAR="Atire para o céu/espaço sem alvo.",
+  WALL="Atire diretamente em uma parede.",
+  TARGET_BEHIND_WALL="Atire em um alvo com uma parede no meio.",
+  TARGET_CLEAR="Atire diretamente em um alvo sem parede."
+ },
+ ATTRS={"_ammo","projectileType","raysPerShot","rayRadius","range","fireMode","rateOfFire","damage","spread"},
+ LIMIT_WORDS={"boundary","bounds","border","limit","limite","barrier","barreira","invisible","invis","ceiling","maplimit","map_limit","killwall","kill_wall"}
 }
 
---==============================================================
--- CONTROLE DE INSTÂNCIA / LIMPEZA DE VERSÕES ANTERIORES
---==============================================================
+local ENV=_G
+if typeof(getgenv)=="function" then
+ local ok,e=pcall(getgenv)
+ if ok and type(e)=="table" then ENV=e end
+end
+local RUNTIME_KEY="__PSICOSENATICO_WEAPON_RESEARCH_RUNTIME"
+local old=ENV[RUNTIME_KEY]
+if type(old)=="table" and type(old.cleanup)=="function" then pcall(old.cleanup) end
 
-local RuntimeEnv = _G
-if typeof(getgenv) == "function" then
-    local ok, env = pcall(getgenv)
-    if ok and type(env) == "table" then
-        RuntimeEnv = env
-    end
+local function guiParent()
+ if typeof(gethui)=="function" then
+  local ok,p=pcall(gethui)
+  if ok and p then return p end
+ end
+ return CoreGui
 end
 
-local RUNTIME_KEY = "__PSICOSENATICO_WEAPON_RESEARCH_RUNTIME"
-local PreviousRuntime = RuntimeEnv[RUNTIME_KEY]
-if type(PreviousRuntime) == "table" and type(PreviousRuntime.cleanup) == "function" then
-    pcall(PreviousRuntime.cleanup)
+local GP=guiParent()
+local OLD={PsicosenaticoWeaponResearch_V2_1=true,PsicosenaticoWeaponResearch_V2_2=true,[C.GUI]=true}
+for _,x in ipairs(GP:GetChildren()) do
+ if OLD[x.Name] then pcall(function() x:Destroy() end) end
 end
 
-local function getGuiParent()
-    if typeof(gethui) == "function" then
-        local ok, parent = pcall(gethui)
-        if ok and parent then
-            return parent
-        end
-    end
-    return CoreGui
-end
-
-local GuiParent = getGuiParent()
-local OLD_GUI_NAMES = {
-    ["PsicosenaticoWeaponResearch_V2_1"] = true,
-    [CONFIG.GUI_NAME] = true
+local S={
+ Recording=false,Started=false,Completed=false,
+ StartUnix=nil,EndUnix=nil,Errors=0,
+ Events={},Live={},Markers={},Shots={},
+ PhaseIndex=0,CurrentPhase=nil,PhaseShots=0,PhaseStats={},
+ ActiveTool=nil,Tools={},ToolConnections={},Connections={},
+ Architecture=nil,SourceInspection={},BoundarySurvey={},LastAssessment=nil
 }
 
-for _, child in ipairs(GuiParent:GetChildren()) do
-    if OLD_GUI_NAMES[child.Name] then
-        pcall(function()
-            child:Destroy()
-        end)
-    end
+local function clock() return os.clock() end
+local function unix() return os.time() end
+
+local function full(obj)
+ local ok,v=pcall(function() return obj:GetFullName() end)
+ return ok and tostring(v) or tostring(obj and obj.Name or "DESCONHECIDO")
 end
 
---==============================================================
--- ESTADO
---==============================================================
-
-local S = {
-    Recording = false,
-    Started = false,
-    StartUnix = nil,
-    EndUnix = nil,
-    Errors = 0,
-    Events = {},
-    Live = {},
-    Markers = {},
-    Shots = {},
-    CurrentPhase = nil,
-    ActiveTool = nil,
-    Tools = {},
-    ToolConnections = {},
-    Connections = {},
-    Architecture = nil,
-    SourceInspection = {}
-}
-
-local function now()
-    return os.clock()
+local function attr(obj,name)
+ local ok,v=pcall(function() return obj:GetAttribute(name) end)
+ return ok and v or nil
 end
 
-local function unix()
-    return os.time()
+local function prop(obj,name)
+ local ok,v=pcall(function() return obj[name] end)
+ return ok and v or nil
 end
 
-local function fullName(obj)
-    local ok, value = pcall(function()
-        return obj:GetFullName()
-    end)
-    return ok and tostring(value) or tostring(obj and obj.Name or "DESCONHECIDO")
+local function live(kind,msg)
+ S.Live[#S.Live+1]={time=clock(),type=kind,message=tostring(msg or "")}
+ while #S.Live>C.MAX_LIVE do table.remove(S.Live,1) end
 end
 
-local function attribute(obj, name)
-    local ok, value = pcall(function()
-        return obj:GetAttribute(name)
-    end)
-    return ok and value or nil
-end
-
-local function pushLive(kind, message)
-    S.Live[#S.Live + 1] = {
-        time = now(),
-        type = kind,
-        message = tostring(message or "")
-    }
-    while #S.Live > CONFIG.MAX_LIVE do
-        table.remove(S.Live, 1)
-    end
-end
-
-local function log(kind, data, message)
-    pushLive(kind, message)
-    if kind == "ERROR" then
-        S.Errors += 1
-    end
-    if not S.Recording or #S.Events >= CONFIG.MAX_EVENTS then
-        return
-    end
-    S.Events[#S.Events + 1] = {
-        unix = unix(),
-        time = now(),
-        type = kind,
-        phase = S.CurrentPhase,
-        data = data or {}
-    }
+local function log(kind,data,msg)
+ live(kind,msg)
+ if kind=="ERROR" then S.Errors+=1 end
+ if not S.Recording or #S.Events>=C.MAX_EVENTS then return end
+ S.Events[#S.Events+1]={
+  unix=unix(),time=clock(),type=kind,
+  phase=S.CurrentPhase,phaseIndex=S.PhaseIndex,phaseShots=S.PhaseShots,
+  data=data or {}
+ }
 end
 
 local function isWeapon(tool)
-    if not tool or not tool:IsA("Tool") then
-        return false
-    end
-    return attribute(tool, "projectileType") ~= nil
-        or attribute(tool, "rateOfFire") ~= nil
-        or attribute(tool, "_ammo") ~= nil
+ return tool and tool:IsA("Tool") and (
+  attr(tool,"projectileType")~=nil or attr(tool,"rateOfFire")~=nil or attr(tool,"_ammo")~=nil
+ )
 end
 
-local function weaponSnapshot(tool)
-    if not tool then
-        return nil
-    end
-    local attrs = {}
-    for _, name in ipairs(CONFIG.WATCH_ATTRS) do
-        attrs[name] = attribute(tool, name)
-    end
-    return {
-        name = tool.Name,
-        path = fullName(tool),
-        attributes = attrs
-    }
+local function weapon(tool)
+ if not tool then return nil end
+ local a={}
+ for _,n in ipairs(C.ATTRS) do a[n]=attr(tool,n) end
+ return {name=tool.Name,path=full(tool),attributes=a}
 end
 
---==============================================================
--- ARQUITETURA: castRays / canPierce / remotes
---==============================================================
-
-local function inspectSource(moduleScript)
-    local result = {
-        name = moduleScript.Name,
-        path = fullName(moduleScript),
-        sourceReadable = false,
-        sourceLength = nil,
-        source = nil,
-        error = nil
-    }
-    local ok, source = pcall(function()
-        return moduleScript.Source
-    end)
-    if ok and type(source) == "string" then
-        result.sourceReadable = true
-        result.sourceLength = #source
-        result.source = source
-    else
-        result.error = tostring(source)
-    end
-    return result
+local function inspectSource(m)
+ local r={name=m.Name,path=full(m),sourceReadable=false,sourceLength=nil,source=nil,error=nil}
+ local ok,v=pcall(function() return m.Source end)
+ if ok and type(v)=="string" then
+  r.sourceReadable=true;r.sourceLength=#v;r.source=v
+  if #v==0 then r.note="PROPRIEDADE_ACESSIVEL_MAS_CONTEUDO_VAZIO" end
+ else r.error=tostring(v) end
+ return r
 end
 
 local function inspectArchitecture(reason)
-    local root = ReplicatedStorage:FindFirstChild("BlasterSystem")
-    local result = {
-        reason = reason,
-        time = now(),
-        found = root ~= nil,
-        rootPath = root and fullName(root) or nil,
-        targets = {},
-        remotes = {},
-        sourceInspection = {}
-    }
-
-    if not root then
-        S.Architecture = result
-        log("ARCHITECTURE_SCAN", {found = false, reason = reason}, "BlasterSystem não encontrado")
-        return
-    end
-
-    local wanted = {
-        canpierce = true,
-        castrays = true,
-        shoot = true,
-        shootprojectile = true,
-        replicateprojectile = true,
-        projectilehit = true
-    }
-
-    for _, obj in ipairs(root:GetDescendants()) do
-        if wanted[string.lower(obj.Name)] then
-            local item = {
-                name = obj.Name,
-                class = obj.ClassName,
-                path = fullName(obj)
-            }
-            result.targets[#result.targets + 1] = item
-
-            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("UnreliableRemoteEvent") then
-                result.remotes[#result.remotes + 1] = item
-            end
-
-            if obj:IsA("ModuleScript") then
-                local sourceInfo = inspectSource(obj)
-                result.sourceInspection[#result.sourceInspection + 1] = sourceInfo
-                S.SourceInspection[sourceInfo.path] = sourceInfo
-            end
-        end
-    end
-
-    table.sort(result.targets, function(a, b)
-        return a.path < b.path
-    end)
-
-    S.Architecture = result
-
-    local readable = 0
-    for _, item in ipairs(result.sourceInspection) do
-        if item.sourceReadable then
-            readable += 1
-        end
-    end
-
-    log("ARCHITECTURE_SCAN", {
-        reason = reason,
-        targetCount = #result.targets,
-        remoteCount = #result.remotes,
-        readableSources = readable,
-        moduleCount = #result.sourceInspection
-    }, string.format(
-        "Arquitetura: %d alvos • código legível %d/%d",
-        #result.targets,
-        readable,
-        #result.sourceInspection
-    ))
+ local root=ReplicatedStorage:FindFirstChild("BlasterSystem")
+ local out={reason=reason,time=clock(),found=root~=nil,rootPath=root and full(root) or nil,targets={},remotes={},sourceInspection={}}
+ if not root then S.Architecture=out;log("ARCHITECTURE_SCAN",{found=false},"BlasterSystem não encontrado");return end
+ local wanted={canpierce=true,castrays=true,shoot=true,shootprojectile=true,replicateprojectile=true,projectilehit=true}
+ for _,o in ipairs(root:GetDescendants()) do
+  if wanted[string.lower(o.Name)] then
+   local item={name=o.Name,class=o.ClassName,path=full(o)}
+   out.targets[#out.targets+1]=item
+   if o:IsA("RemoteEvent") or o:IsA("RemoteFunction") or o:IsA("UnreliableRemoteEvent") then out.remotes[#out.remotes+1]=item end
+   if o:IsA("ModuleScript") then
+    local si=inspectSource(o)
+    out.sourceInspection[#out.sourceInspection+1]=si
+    S.SourceInspection[si.path]=si
+   end
+  end
+ end
+ table.sort(out.targets,function(a,b) return a.path<b.path end)
+ S.Architecture=out
+ log("ARCHITECTURE_SCAN",{reason=reason,targetCount=#out.targets,remoteCount=#out.remotes,moduleCount=#out.sourceInspection},
+  string.format("Arquitetura: %d alvos",#out.targets))
 end
 
---==============================================================
--- RAYCAST LOCAL DE REFERÊNCIA
---==============================================================
-
-local function hitDescription(result, origin)
-    if not result then
-        return nil
-    end
-
-    local instance = result.Instance
-    local model = instance and instance:FindFirstAncestorOfClass("Model") or nil
-    local humanoid = model and model:FindFirstChildOfClass("Humanoid") or nil
-
-    return {
-        instance = instance and fullName(instance) or nil,
-        instanceName = instance and instance.Name or nil,
-        instanceClass = instance and instance.ClassName or nil,
-        model = model and fullName(model) or nil,
-        modelName = model and model.Name or nil,
-        hasHumanoid = humanoid ~= nil,
-        material = tostring(result.Material),
-        distance = (result.Position - origin).Magnitude,
-        position = {result.Position.X, result.Position.Y, result.Position.Z},
-        normal = {result.Normal.X, result.Normal.Y, result.Normal.Z}
-    }
+local function hasLimitWord(text)
+ text=string.lower(tostring(text or ""))
+ for _,w in ipairs(C.LIMIT_WORDS) do
+  if string.find(text,w,1,true) then return true,w end
+ end
+ return false,nil
 end
 
-local function referenceRaycast(referenceTool)
-    local camera = Workspace.CurrentCamera
-    if not camera then
-        return {ok = false, reason = "SEM_CAMERA"}
-    end
+local function classify(inst,hasHumanoid)
+ if not inst then return "SEM_IMPACTO",0,{} end
+ if hasHumanoid then return "PERSONAGEM",0,{"modelo possui Humanoid"} end
 
-    local viewport = camera.ViewportSize
-    local ray = camera:ViewportPointToRay(viewport.X / 2, viewport.Y / 2)
-    local range = tonumber(attribute(referenceTool or S.ActiveTool, "range")) or 2000
-    local direction = ray.Direction.Unit * range
+ local score,reasons=0,{}
+ local hit,w=hasLimitWord(inst.Name.." "..full(inst))
+ if hit then score+=5;reasons[#reasons+1]="nome/caminho sugere limite: "..w end
 
-    local excluded = {camera}
-    if LocalPlayer.Character then
-        excluded[#excluded + 1] = LocalPlayer.Character
-    end
+ local tr=tonumber(prop(inst,"Transparency"))
+ local cq=prop(inst,"CanQuery")
+ local cc=prop(inst,"CanCollide")
+ local size=prop(inst,"Size")
+ if tr and tr>=0.95 then score+=3;reasons[#reasons+1]="quase/invisível" end
+ if cq==true and cc==false then score+=1;reasons[#reasons+1]="CanQuery=true e CanCollide=false" end
+ if typeof(size)=="Vector3" then
+  local m=math.max(size.X,size.Y,size.Z)
+  if m>=2000 then score+=3;reasons[#reasons+1]="dimensão muito grande"
+  elseif m>=500 then score+=1;reasons[#reasons+1]="dimensão grande" end
+ end
 
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = excluded
-    params.IgnoreWater = false
+ local attrs,tags={},{}
+ pcall(function() attrs=inst:GetAttributes() end)
+ pcall(function() tags=CollectionService:GetTags(inst) end)
+ for k,v in pairs(attrs) do
+  local ok2,key=hasLimitWord(tostring(k).."="..tostring(v))
+  if ok2 then score+=5;reasons[#reasons+1]="atributo sugere limite: "..key;break end
+ end
+ for _,tag in ipairs(tags) do
+  local ok2,key=hasLimitWord(tag)
+  if ok2 then score+=5;reasons[#reasons+1]="tag sugere limite: "..tostring(tag);break end
+ end
 
-    local ok, first = pcall(function()
-        return Workspace:Raycast(ray.Origin, direction, params)
-    end)
-
-    if not ok then
-        return {ok = false, reason = tostring(first), range = range}
-    end
-
-    local output = {
-        ok = true,
-        hit = first ~= nil,
-        origin = {ray.Origin.X, ray.Origin.Y, ray.Origin.Z},
-        direction = {direction.X, direction.Y, direction.Z},
-        range = range,
-        firstHit = hitDescription(first, ray.Origin),
-        nextHit = nil
-    }
-
-    -- Segunda leitura geométrica: ignora somente a primeira peça atingida.
-    -- Não simula canPierce; serve para registrar o que está logo atrás.
-    if first and first.Instance then
-        local firstDistance = (first.Position - ray.Origin).Magnitude
-        local remaining = range - firstDistance - 0.05
-        if remaining > 0 then
-            local excludedNext = {camera, first.Instance}
-            if LocalPlayer.Character then
-                excludedNext[#excludedNext + 1] = LocalPlayer.Character
-            end
-
-            local nextParams = RaycastParams.new()
-            nextParams.FilterType = Enum.RaycastFilterType.Exclude
-            nextParams.FilterDescendantsInstances = excludedNext
-            nextParams.IgnoreWater = false
-
-            local nextOrigin = first.Position + ray.Direction.Unit * 0.05
-            local okNext, second = pcall(function()
-                return Workspace:Raycast(nextOrigin, ray.Direction.Unit * remaining, nextParams)
-            end)
-
-            if okNext and second then
-                output.nextHit = hitDescription(second, nextOrigin)
-            end
-        end
-    end
-
-    return output
+ return score>=5 and "POSSIVEL_LIMITE_MAPA" or "GEOMETRIA_MAPA",score,reasons
 end
 
---==============================================================
--- ARMAS / DISPAROS
---==============================================================
-
-local function addToolConnection(tool, connection)
-    S.ToolConnections[tool] = S.ToolConnections[tool] or {}
-    table.insert(S.ToolConnections[tool], connection)
+local function describe(result,origin)
+ if not result then return nil end
+ local inst=result.Instance
+ local model=inst and inst:FindFirstAncestorOfClass("Model") or nil
+ local hum=model and model:FindFirstChildOfClass("Humanoid") or nil
+ local class,score,reasons=classify(inst,hum~=nil)
+ local size=prop(inst,"Size")
+ local attrs,tags={},{}
+ pcall(function() attrs=inst:GetAttributes() end)
+ pcall(function() tags=CollectionService:GetTags(inst) end)
+ return {
+  instance=inst and full(inst) or nil,instanceName=inst and inst.Name or nil,instanceClass=inst and inst.ClassName or nil,
+  model=model and full(model) or nil,modelName=model and model.Name or nil,hasHumanoid=hum~=nil,
+  material=tostring(result.Material),distance=(result.Position-origin).Magnitude,
+  position={result.Position.X,result.Position.Y,result.Position.Z},normal={result.Normal.X,result.Normal.Y,result.Normal.Z},
+  classification=class,boundaryScore=score,boundaryReasons=reasons,
+  transparency=prop(inst,"Transparency"),canCollide=prop(inst,"CanCollide"),canQuery=prop(inst,"CanQuery"),
+  canTouch=prop(inst,"CanTouch"),anchored=prop(inst,"Anchored"),collisionGroup=prop(inst,"CollisionGroup"),
+  size=typeof(size)=="Vector3" and {size.X,size.Y,size.Z} or nil,tags=tags,attributes=attrs
+ }
 end
 
-local function registerWeapon(tool, reason)
-    if not isWeapon(tool) or S.Tools[tool] then
-        return
+local function assessment(ref)
+ if not ref or not ref.ok then return "LEITURA_INDISPONIVEL" end
+ if not ref.firstHit then return "CAMINHO_LIVRE" end
+ if ref.firstHit.classification=="POSSIVEL_LIMITE_MAPA" then return "POSSIVEL_LIMITE_MAPA" end
+ if ref.firstHit.classification=="PERSONAGEM" then return "PERSONAGEM" end
+ return "GEOMETRIA_MAPA"
+end
+
+local function referenceRay(tool)
+ local cam=Workspace.CurrentCamera
+ if not cam then return {ok=false,reason="SEM_CAMERA"} end
+ local vp=cam.ViewportSize
+ local ray=cam:ViewportPointToRay(vp.X/2,vp.Y/2)
+ local range=tonumber(attr(tool or S.ActiveTool,"range")) or 2000
+ local dir=ray.Direction.Unit*range
+
+ local ex={cam}
+ if LP.Character then ex[#ex+1]=LP.Character end
+ local p=RaycastParams.new()
+ p.FilterType=Enum.RaycastFilterType.Exclude;p.FilterDescendantsInstances=ex;p.IgnoreWater=false
+ local ok,first=pcall(function() return Workspace:Raycast(ray.Origin,dir,p) end)
+ if not ok then return {ok=false,reason=tostring(first),range=range} end
+
+ local out={
+  ok=true,hit=first~=nil,origin={ray.Origin.X,ray.Origin.Y,ray.Origin.Z},
+  direction={dir.X,dir.Y,dir.Z},range=range,
+  firstHit=describe(first,ray.Origin),nextHit=nil
+ }
+
+ if first and first.Instance then
+  local d=(first.Position-ray.Origin).Magnitude
+  local rem=range-d-0.05
+  if rem>0 then
+   local p2=RaycastParams.new()
+   local ex2={cam,first.Instance}
+   if LP.Character then ex2[#ex2+1]=LP.Character end
+   p2.FilterType=Enum.RaycastFilterType.Exclude;p2.FilterDescendantsInstances=ex2;p2.IgnoreWater=false
+   local o2=first.Position+ray.Direction.Unit*0.05
+   local ok2,second=pcall(function() return Workspace:Raycast(o2,ray.Direction.Unit*rem,p2) end)
+   if ok2 and second then out.nextHit=describe(second,o2) end
+  end
+ end
+ out.assessment=assessment(out)
+ return out
+end
+
+local function validatePhase(phase,ref)
+ local first=ref and ref.firstHit or nil
+ local second=ref and ref.nextHit or nil
+ local a=ref and ref.assessment or "LEITURA_INDISPONIVEL"
+ if phase=="CLEAR" then
+  if a=="CAMINHO_LIVRE" then return "COMPATIVEL","nenhum obstáculo dentro do alcance" end
+  if a=="POSSIVEL_LIMITE_MAPA" then return "COMPATIVEL_COM_LIMITE","possível limite/barreira do mapa" end
+  return "REVISAR","o tiro livre encontrou geometria/personagem"
+ elseif phase=="WALL" then
+  if first and not first.hasHumanoid then
+   return first.classification=="POSSIVEL_LIMITE_MAPA" and "REVISAR_LIMITE" or "COMPATIVEL",
+          first.classification=="POSSIVEL_LIMITE_MAPA" and "obstáculo pode ser limite do mapa" or "primeiro impacto é geometria"
+  end
+  return "REVISAR","parede não foi o primeiro impacto"
+ elseif phase=="TARGET_BEHIND_WALL" then
+  if first and not first.hasHumanoid and second and second.hasHumanoid then return "FORTE_COMPATIBILIDADE","geometria primeiro e personagem logo atrás" end
+  if first and not first.hasHumanoid then return "INCONCLUSIVO","há geometria primeiro; nextHit não confirmou personagem" end
+  return "REVISAR","primeiro impacto não foi geometria"
+ elseif phase=="TARGET_CLEAR" then
+  if first and first.hasHumanoid then return "COMPATIVEL","personagem é o primeiro impacto" end
+  return "REVISAR","personagem não foi o primeiro impacto"
+ end
+ return "SEM_FASE","fase desconhecida"
+end
+
+local function boundarySurvey()
+ local cam=Workspace.CurrentCamera
+ if not cam then return end
+ local origin=cam.CFrame.Position
+ local dirs={
+  {"CIMA",Vector3.new(0,1,0)},{"NORTE",Vector3.new(0,0,-1)},{"SUL",Vector3.new(0,0,1)},
+  {"LESTE",Vector3.new(1,0,0)},{"OESTE",Vector3.new(-1,0,0)}
+ }
+ local p=RaycastParams.new();p.FilterType=Enum.RaycastFilterType.Exclude;p.IgnoreWater=false
+ p.FilterDescendantsInstances=LP.Character and {LP.Character,cam} or {cam}
+ S.BoundarySurvey={}
+ for _,v in ipairs(dirs) do
+  local ok,r=pcall(function() return Workspace:Raycast(origin,v[2]*C.BOUNDARY_DISTANCE,p) end)
+  S.BoundarySurvey[#S.BoundarySurvey+1]={direction=v[1],ok=ok,hit=ok and r~=nil or false,firstHit=ok and describe(r,origin) or nil,error=ok and nil or tostring(r)}
+ end
+ log("BOUNDARY_SURVEY",{rays=S.BoundarySurvey},"Leitura auxiliar de possíveis limites concluída")
+end
+
+local function phaseLabel() return C.LABELS[S.CurrentPhase] or "-" end
+local function phaseHelp() return C.HELP[S.CurrentPhase] or "Aguardando início." end
+
+local function phaseMarker(reason)
+ if not S.CurrentPhase then return end
+ local m={
+  time=clock(),unix=unix(),kind=S.CurrentPhase,label=phaseLabel(),phaseIndex=S.PhaseIndex,reason=reason,
+  weapon=weapon(S.ActiveTool),referenceRay=S.ActiveTool and referenceRay(S.ActiveTool) or nil
+ }
+ S.Markers[#S.Markers+1]=m
+ log("PHASE_MARKER",m,string.format("MISSÃO %d/4 • %s",S.PhaseIndex,m.label))
+end
+
+local function setPhase(index,reason)
+ S.PhaseIndex=index;S.CurrentPhase=C.PHASES[index];S.PhaseShots=0
+ if not S.CurrentPhase then return end
+ S.PhaseStats[S.CurrentPhase]=S.PhaseStats[S.CurrentPhase] or {required=C.SHOTS,confirmed=0,completed=false}
+ phaseMarker(reason or "AUTO")
+end
+
+local function advancePhase()
+ if S.PhaseShots<C.SHOTS then return end
+ local st=S.PhaseStats[S.CurrentPhase];if st then st.completed=true end
+ local nxt=S.PhaseIndex+1
+ if nxt>#C.PHASES then
+  log("ALL_PHASES_COMPLETED",{totalShots=#S.Shots},"4 missões concluídas")
+  S.Completed=true;S.Recording=false;S.EndUnix=unix()
+ else
+  setPhase(nxt,"AUTO_ADVANCE")
+ end
+end
+
+local function addToolConn(tool,c)
+ S.ToolConnections[tool]=S.ToolConnections[tool] or {}
+ table.insert(S.ToolConnections[tool],c)
+end
+
+local function registerWeapon(tool,reason)
+ if not isWeapon(tool) or S.Tools[tool] then return end
+ S.Tools[tool]={name=tool.Name,reason=reason,firstPath=full(tool),initial=weapon(tool),lastAmmo=tonumber(attr(tool,"_ammo"))}
+ log("WEAPON_FOUND",{reason=reason,snapshot=weapon(tool)},"Arma: "..tool.Name)
+
+ addToolConn(tool,tool.Equipped:Connect(function()
+  S.ActiveTool=tool
+  local d=S.Tools[tool];if d then d.lastAmmo=tonumber(attr(tool,"_ammo")) end
+  log("WEAPON_EQUIPPED",{snapshot=weapon(tool)},tool.Name.." equipada")
+ end))
+
+ addToolConn(tool,tool.Unequipped:Connect(function()
+  if S.ActiveTool==tool then S.ActiveTool=nil end
+  log("WEAPON_UNEQUIPPED",{name=tool.Name},tool.Name.." desequipada")
+ end))
+
+ addToolConn(tool,tool.Activated:Connect(function()
+  if not S.Recording then return end
+  local ref=referenceRay(tool)
+  log("SHOT_TRIGGER",{phase=S.CurrentPhase,phaseIndex=S.PhaseIndex,phaseShots=S.PhaseShots,weapon=weapon(tool),referenceRay=ref},
+      tool.Name.." • "..phaseLabel().." • gatilho")
+ end))
+
+ for _,name in ipairs(C.ATTRS) do
+  local ok,sig=pcall(function() return tool:GetAttributeChangedSignal(name) end)
+  if ok and sig then
+   addToolConn(tool,sig:Connect(function()
+    local value=attr(tool,name)
+    local d=S.Tools[tool]
+    if name=="_ammo" and d then
+     local before,after=tonumber(d.lastAmmo),tonumber(value)
+     if before and after and after<before and S.Recording and not S.Completed and S.CurrentPhase then
+      local raw=before-after
+      local remain=math.max(0,C.SHOTS-S.PhaseShots)
+      local counted=math.min(raw,remain)
+      local ref=referenceRay(tool)
+      local shot={
+       time=clock(),unix=unix(),source="AMMO_DECREASE",
+       phase=S.CurrentPhase,phaseIndex=S.PhaseIndex,phaseShotBefore=S.PhaseShots,
+       ammoBefore=before,ammoAfter=after,ammoDelta=raw,countedForPhase=counted,overflowNotCounted=math.max(0,raw-counted),
+       weapon=weapon(tool),referenceRay=ref,assessment=ref.assessment
+      }
+      shot.phaseValidation,shot.phaseValidationReason=validatePhase(S.CurrentPhase,ref)
+      S.Shots[#S.Shots+1]=shot;S.LastAssessment=ref.assessment
+      if counted>0 then
+       S.PhaseShots+=counted
+       local st=S.PhaseStats[S.CurrentPhase];if st then st.confirmed=S.PhaseShots end
+      end
+      log("SHOT_AMMO_CONFIRMED",shot,string.format("%s • %s • %d/%d • %s",tool.Name,phaseLabel(),S.PhaseShots,C.SHOTS,tostring(ref.assessment)))
+      live("VALIDACAO",tostring(shot.phaseValidation).." • "..tostring(shot.phaseValidationReason))
+      advancePhase()
+     end
+     d.lastAmmo=after or value
+    elseif S.Recording then
+     log("ATTRIBUTE_CHANGED",{weapon=tool.Name,attribute=name,value=value},tool.Name.." • "..name.."="..tostring(value))
     end
-
-    S.Tools[tool] = {
-        name = tool.Name,
-        reason = reason,
-        firstPath = fullName(tool),
-        initial = weaponSnapshot(tool),
-        lastAmmo = tonumber(attribute(tool, "_ammo"))
-    }
-
-    log("WEAPON_FOUND", {
-        reason = reason,
-        snapshot = weaponSnapshot(tool)
-    }, "Arma identificada: " .. tool.Name)
-
-    addToolConnection(tool, tool.Equipped:Connect(function()
-        S.ActiveTool = tool
-        local toolData = S.Tools[tool]
-        if toolData then
-            toolData.lastAmmo = tonumber(attribute(tool, "_ammo"))
-        end
-        log("WEAPON_EQUIPPED", {snapshot = weaponSnapshot(tool)}, tool.Name .. " equipada")
-    end))
-
-    addToolConnection(tool, tool.Unequipped:Connect(function()
-        if S.ActiveTool == tool then
-            S.ActiveTool = nil
-        end
-        log("WEAPON_UNEQUIPPED", {name = tool.Name}, tool.Name .. " desequipada")
-    end))
-
-    addToolConnection(tool, tool.Activated:Connect(function()
-        local phaseLabel = CONFIG.PHASE_LABELS[S.CurrentPhase] or "SEM FASE"
-        local reference = referenceRaycast(tool)
-        log("SHOT_TRIGGER", {
-            time = now(),
-            unix = unix(),
-            phase = S.CurrentPhase,
-            weapon = weaponSnapshot(tool),
-            referenceRay = reference
-        }, string.format(
-            "%s • %s • gatilho registrado",
-            tool.Name,
-            phaseLabel
-        ))
-    end))
-
-    for _, attrName in ipairs(CONFIG.WATCH_ATTRS) do
-        local ok, signal = pcall(function()
-            return tool:GetAttributeChangedSignal(attrName)
-        end)
-
-        if ok and signal then
-            addToolConnection(tool, signal:Connect(function()
-                local value = attribute(tool, attrName)
-                local toolData = S.Tools[tool]
-
-                if attrName == "_ammo" and toolData then
-                    local before = tonumber(toolData.lastAmmo)
-                    local after = tonumber(value)
-
-                    if before and after and after < before then
-                        local shot = {
-                            time = now(),
-                            unix = unix(),
-                            source = "AMMO_DECREASE",
-                            phase = S.CurrentPhase,
-                            ammoBefore = before,
-                            ammoAfter = after,
-                            ammoDelta = before - after,
-                            weapon = weaponSnapshot(tool),
-                            referenceRay = referenceRaycast(tool)
-                        }
-                        S.Shots[#S.Shots + 1] = shot
-
-                        local phaseLabel = CONFIG.PHASE_LABELS[S.CurrentPhase] or "SEM FASE"
-                        log("SHOT_AMMO_CONFIRMED", shot, string.format(
-                            "%s • %s • munição %s→%s",
-                            tool.Name,
-                            phaseLabel,
-                            tostring(before),
-                            tostring(after)
-                        ))
-                    end
-
-                    toolData.lastAmmo = after or value
-                end
-
-                log("ATTRIBUTE_CHANGED", {
-                    weapon = tool.Name,
-                    attribute = attrName,
-                    value = value
-                }, tool.Name .. " • " .. attrName .. "=" .. tostring(value))
-            end))
-        end
-    end
+   end))
+  end
+ end
 end
 
 local function scanWeapons(reason)
-    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-    local character = LocalPlayer.Character
-
-    if backpack then
-        for _, item in ipairs(backpack:GetChildren()) do
-            if item:IsA("Tool") then
-                registerWeapon(item, reason or "BACKPACK_SCAN")
-            end
-        end
-    end
-
-    if character then
-        for _, item in ipairs(character:GetChildren()) do
-            if item:IsA("Tool") then
-                registerWeapon(item, reason or "CHARACTER_SCAN")
-                if isWeapon(item) then
-                    S.ActiveTool = item
-                end
-            end
-        end
-    end
+ local bp=LP:FindFirstChildOfClass("Backpack")
+ local ch=LP.Character
+ if bp then for _,o in ipairs(bp:GetChildren()) do if o:IsA("Tool") then registerWeapon(o,reason or "BACKPACK_SCAN") end end end
+ if ch then
+  for _,o in ipairs(ch:GetChildren()) do
+   if o:IsA("Tool") then registerWeapon(o,reason or "CHARACTER_SCAN");if isWeapon(o) then S.ActiveTool=o end end
+  end
+ end
 end
 
-local function connectCharacter(character)
-    S.Connections[#S.Connections + 1] = character.ChildAdded:Connect(function(child)
-        if child:IsA("Tool") then
-            task.defer(function()
-                registerWeapon(child, "CHARACTER_ADDED")
-                if isWeapon(child) then
-                    S.ActiveTool = child
-                end
-            end)
-        end
-    end)
+local function connectCharacter(ch)
+ S.Connections[#S.Connections+1]=ch.ChildAdded:Connect(function(o)
+  if o:IsA("Tool") then task.defer(function() registerWeapon(o,"CHARACTER_ADDED");if isWeapon(o) then S.ActiveTool=o end end) end
+ end)
 end
 
 local function connectBackpack()
-    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-    if not backpack then
-        return
-    end
-
-    S.Connections[#S.Connections + 1] = backpack.ChildAdded:Connect(function(child)
-        if child:IsA("Tool") then
-            task.defer(registerWeapon, child, "BACKPACK_ADDED")
-        end
-    end)
+ local bp=LP:FindFirstChildOfClass("Backpack");if not bp then return end
+ S.Connections[#S.Connections+1]=bp.ChildAdded:Connect(function(o)
+  if o:IsA("Tool") then task.defer(registerWeapon,o,"BACKPACK_ADDED") end
+ end)
 end
 
-if LocalPlayer.Character then
-    connectCharacter(LocalPlayer.Character)
-end
+if LP.Character then connectCharacter(LP.Character) end
 connectBackpack()
-
-S.Connections[#S.Connections + 1] = LocalPlayer.CharacterAdded:Connect(function(character)
-    S.ActiveTool = nil
-    task.wait(0.35)
-    connectCharacter(character)
-    scanWeapons("RESPAWN_SCAN")
+S.Connections[#S.Connections+1]=LP.CharacterAdded:Connect(function(ch)
+ S.ActiveTool=nil;task.wait(0.35);connectCharacter(ch);scanWeapons("RESPAWN_SCAN")
 end)
 
---==============================================================
--- FASES / SESSÃO / EXPORTAÇÃO
---==============================================================
-
-local function setPhase(phase)
-    if not S.Recording then
-        pushLive("AVISO", "Inicie a coleta antes de escolher uma fase.")
-        return false
-    end
-
-    if not S.ActiveTool or not isWeapon(S.ActiveTool) then
-        S.Errors += 1
-        pushLive("ERRO", "Equipe uma arma antes de escolher a fase.")
-        return false
-    end
-
-    S.CurrentPhase = phase
-    local marker = {
-        time = now(),
-        unix = unix(),
-        kind = phase,
-        label = CONFIG.PHASE_LABELS[phase] or phase,
-        weapon = weaponSnapshot(S.ActiveTool),
-        referenceRay = referenceRaycast(S.ActiveTool)
-    }
-    S.Markers[#S.Markers + 1] = marker
-    log("PHASE_MARKER", marker, "FASE: " .. marker.label)
-    return true
+local function resetSession()
+ S.Events={};S.Markers={};S.Shots={};S.Errors=0;S.PhaseStats={};S.BoundarySurvey={};S.LastAssessment=nil
+ S.PhaseIndex=0;S.CurrentPhase=nil;S.PhaseShots=0;S.Completed=false;S.SourceInspection={}
+ S.StartUnix=unix();S.EndUnix=nil
 end
 
-local function startDiagnostic()
-    if S.Recording then
-        return
-    end
-
-    S.Events = {}
-    S.Markers = {}
-    S.Shots = {}
-    S.Errors = 0
-    S.CurrentPhase = nil
-    S.SourceInspection = {}
-    S.Started = true
-    S.Recording = true
-    S.StartUnix = unix()
-    S.EndUnix = nil
-
-    log("DIAGNOSTIC_STARTED", {}, "Pesquisa de Armas V2.2 iniciada")
-    inspectArchitecture("DIAGNOSTIC_START")
-    scanWeapons("DIAGNOSTIC_START")
+local function beginSession()
+ if not S.ActiveTool or not isWeapon(S.ActiveTool) then live("AVISO","Equipe uma arma antes de iniciar.");return false end
+ resetSession();S.Started=true;S.Recording=true
+ log("DIAGNOSTIC_STARTED",{},"Pesquisa V2.2.1 iniciada")
+ inspectArchitecture("DIAGNOSTIC_START");boundarySurvey();setPhase(1,"SESSION_START")
+ return true
 end
 
-local function stopDiagnostic()
-    if not S.Recording then
-        return
-    end
+local function pauseSession()
+ if not S.Recording then return end
+ log("SESSION_PAUSED",{phase=S.CurrentPhase,phaseIndex=S.PhaseIndex,phaseShots=S.PhaseShots},"Pausado sem apagar progresso")
+ S.Recording=false
+end
 
-    inspectArchitecture("DIAGNOSTIC_STOP")
-    log("DIAGNOSTIC_STOPPED", {}, "Pesquisa de Armas V2.2 parada")
-    S.Recording = false
-    S.EndUnix = unix()
+local function resumeSession()
+ if not S.Started or S.Completed then return false end
+ if not S.ActiveTool or not isWeapon(S.ActiveTool) then live("AVISO","Equipe uma arma antes de retomar.");return false end
+ S.Recording=true
+ log("SESSION_RESUMED",{phase=S.CurrentPhase,phaseIndex=S.PhaseIndex,phaseShots=S.PhaseShots},"Retomado na mesma missão")
+ return true
 end
 
 local function serializeTools()
-    local output = {}
-    for tool, data in pairs(S.Tools) do
-        output[#output + 1] = {
-            name = data.name,
-            reason = data.reason,
-            firstPath = data.firstPath,
-            initial = data.initial,
-            final = tool and tool.Parent and weaponSnapshot(tool) or nil
-        }
-    end
-    table.sort(output, function(a, b)
-        return tostring(a.name) < tostring(b.name)
-    end)
-    return output
+ local out={}
+ for tool,d in pairs(S.Tools) do
+  out[#out+1]={name=d.name,reason=d.reason,firstPath=d.firstPath,initial=d.initial,final=tool and tool.Parent and weapon(tool) or nil}
+ end
+ table.sort(out,function(a,b) return tostring(a.name)<tostring(b.name) end)
+ return out
 end
 
-local function buildExport()
-    return {
-        format = "Psicosenatico Weapon Research",
-        version = CONFIG.VERSION,
-        focus = "BULLET_NOCLIP_WALL_PENETRATION",
-        generatedAtUnix = unix(),
-        diagnostic = {
-            status = S.Recording and "RECORDING" or "STOPPED",
-            startedAtUnix = S.StartUnix,
-            finishedAtUnix = S.EndUnix
-        },
-        summary = {
-            events = #S.Events,
-            markers = #S.Markers,
-            confirmedShotRecords = #S.Shots,
-            errors = S.Errors
-        },
-        architecture = S.Architecture,
-        sourceInspection = S.SourceInspection,
-        tools = serializeTools(),
-        markers = S.Markers,
-        shots = S.Shots,
-        events = S.Events,
-        interpretationRules = {
-            "referenceRay é somente uma leitura geométrica local do cenário.",
-            "nextHit ignora somente a primeira peça atingida e não simula canPierce.",
-            "Nenhum RemoteEvent é disparado por este diagnóstico.",
-            "Nenhum ModuleScript é executado via require()."
-        }
-    }
+local function exportTable()
+ return {
+  format="Psicosenatico Weapon Research",version=C.VERSION,focus="BULLET_NOCLIP_WALL_PENETRATION",generatedAtUnix=unix(),
+  diagnostic={status=S.Completed and "COMPLETED" or (S.Recording and "RECORDING" or "PAUSED_OR_STOPPED"),startedAtUnix=S.StartUnix,finishedAtUnix=S.EndUnix},
+  automaticFlow={shotsPerPhase=C.SHOTS,currentPhase=S.CurrentPhase,currentPhaseIndex=S.PhaseIndex,currentPhaseShots=S.PhaseShots,completed=S.Completed,phaseStats=S.PhaseStats},
+  summary={events=#S.Events,markers=#S.Markers,confirmedShotRecords=#S.Shots,errors=S.Errors},
+  architecture=S.Architecture,sourceInspection=S.SourceInspection,boundarySurvey=S.BoundarySurvey,
+  tools=serializeTools(),markers=S.Markers,shots=S.Shots,events=S.Events,
+  interpretationRules={
+   "referenceRay é uma leitura geométrica local do cenário.",
+   "nextHit ignora apenas a primeira peça e não simula canPierce.",
+   "POSSIVEL_LIMITE_MAPA é heurístico: nome/tags/atributos/transparência/dimensões.",
+   "Barreiras sem geometria consultável por raycast ou regras exclusivamente do servidor podem não ser detectadas.",
+   "Nenhum RemoteEvent é disparado e nenhum ModuleScript é executado via require()."
+  }
+ }
 end
 
-local function encodeExport()
-    local ok, data = pcall(function()
-        return HttpService:JSONEncode(buildExport())
-    end)
-    if ok then
-        return data, nil
-    end
-    return nil, data
+local function encode()
+ local ok,v=pcall(function() return HttpService:JSONEncode(exportTable()) end)
+ return ok and v or nil,ok and nil or v
 end
 
---==============================================================
--- INTERFACE EM PORTUGUÊS
---==============================================================
-
-local COLORS = {
-    bg = Color3.fromRGB(10, 10, 13),
-    panel = Color3.fromRGB(19, 19, 24),
-    panel2 = Color3.fromRGB(28, 28, 35),
-    text = Color3.fromRGB(245, 245, 248),
-    sub = Color3.fromRGB(158, 158, 172),
-    blue = Color3.fromRGB(22, 55, 105),
-    blue2 = Color3.fromRGB(32, 82, 145),
-    green = Color3.fromRGB(65, 210, 118),
-    red = Color3.fromRGB(235, 38, 52),
-    yellow = Color3.fromRGB(242, 184, 57)
+local COL={
+ bg=Color3.fromRGB(10,10,13),panel=Color3.fromRGB(19,19,24),panel2=Color3.fromRGB(28,28,35),
+ text=Color3.fromRGB(245,245,248),sub=Color3.fromRGB(158,158,172),
+ blue=Color3.fromRGB(22,55,105),blue2=Color3.fromRGB(32,82,145),
+ green=Color3.fromRGB(65,210,118),red=Color3.fromRGB(235,38,52),yellow=Color3.fromRGB(242,184,57)
 }
-
-local function new(className, props)
-    local object = Instance.new(className)
-    for key, value in pairs(props or {}) do
-        object[key] = value
-    end
-    return object
+local function new(class,p)
+ local o=Instance.new(class);for k,v in pairs(p or {}) do o[k]=v end;return o
+end
+local function round(o,r) new("UICorner",{Parent=o,CornerRadius=UDim.new(0,r or 8)}) end
+local function label(parent,text,size,pos,ts)
+ return new("TextLabel",{Parent=parent,BackgroundTransparency=1,Text=text,Size=size,Position=pos,TextColor3=COL.text,Font=Enum.Font.Gotham,TextSize=ts or 10,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center})
 end
 
-local function round(object, radius)
-    new("UICorner", {
-        Parent = object,
-        CornerRadius = UDim.new(0, radius or 8)
-    })
-end
-
-local function label(parent, text, size, position, textSize)
-    return new("TextLabel", {
-        Parent = parent,
-        BackgroundTransparency = 1,
-        Text = text,
-        Size = size,
-        Position = position,
-        TextColor3 = COLORS.text,
-        Font = Enum.Font.Gotham,
-        TextSize = textSize or 10,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Center
-    })
-end
-
-local Gui = new("ScreenGui", {
-    Parent = GuiParent,
-    Name = CONFIG.GUI_NAME,
-    ResetOnSpawn = false,
-    IgnoreGuiInset = true
-})
-
-local Main = new("Frame", {
-    Parent = Gui,
-    BackgroundColor3 = COLORS.bg,
-    BorderSizePixel = 0,
-    AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.5)
-})
-round(Main, 15)
+local Gui=new("ScreenGui",{Parent=GP,Name=C.GUI,ResetOnSpawn=false,IgnoreGuiInset=true})
+local Main=new("Frame",{Parent=Gui,BackgroundColor3=COL.bg,BorderSizePixel=0,AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5)})
+round(Main,15)
 
 local function resize()
-    local camera = Workspace.CurrentCamera
-    if not camera then
-        return
-    end
-    local viewport = camera.ViewportSize
-    local width = math.min(math.floor(viewport.X * 0.94), viewport.X - 14)
-    local height = math.min(math.floor(viewport.Y * 0.72), viewport.Y - 14)
-    Main.Size = UDim2.fromOffset(math.max(320, width), math.max(285, height))
+ local cam=Workspace.CurrentCamera;if not cam then return end
+ local v=cam.ViewportSize
+ Main.Size=UDim2.fromOffset(math.max(320,math.min(math.floor(v.X*0.94),v.X-14)),math.max(285,math.min(math.floor(v.Y*0.72),v.Y-14)))
 end
 resize()
 
-local Header = new("Frame", {
-    Parent = Main,
-    Size = UDim2.new(1, 0, 0, 56),
-    BackgroundColor3 = COLORS.panel,
-    BorderSizePixel = 0
-})
-round(Header, 15)
+local Header=new("Frame",{Parent=Main,Size=UDim2.new(1,0,0,56),BackgroundColor3=COL.panel,BorderSizePixel=0});round(Header,15)
+label(Header,"PSICOSENATICO • PESQUISA DE ARMAS",UDim2.new(1,-140,0,24),UDim2.fromOffset(14,5),14)
+local Ver=label(Header,"V2.2.1",UDim2.fromOffset(48,16),UDim2.fromOffset(14,32),9);Ver.TextColor3=COL.blue2
+local Sub=label(Header,"PENETRAÇÃO DE PAREDE • AUTOMÁTICO",UDim2.new(1,-190,0,16),UDim2.fromOffset(66,32),8);Sub.TextColor3=COL.sub
 
-label(Header, "PSICOSENATICO • PESQUISA DE ARMAS", UDim2.new(1, -140, 0, 24), UDim2.fromOffset(14, 5), 14)
-local Version = label(Header, "V2.2", UDim2.fromOffset(38, 16), UDim2.fromOffset(14, 32), 9)
-Version.TextColor3 = COLORS.blue2
-local Subtitle = label(Header, "PENETRAÇÃO DE PAREDE • DIAGNÓSTICO", UDim2.new(1, -180, 0, 16), UDim2.fromOffset(55, 32), 8)
-Subtitle.TextColor3 = COLORS.sub
+local Min=new("TextButton",{Parent=Header,Size=UDim2.fromOffset(36,32),Position=UDim2.new(1,-82,0,11),Text="—",BackgroundColor3=COL.panel2,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=17,BorderSizePixel=0});round(Min,9)
+local Close=new("TextButton",{Parent=Header,Size=UDim2.fromOffset(36,32),Position=UDim2.new(1,-41,0,11),Text="×",BackgroundColor3=COL.red,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=19,BorderSizePixel=0});round(Close,9)
 
-local Minimize = new("TextButton", {
-    Parent = Header,
-    Size = UDim2.fromOffset(36, 32),
-    Position = UDim2.new(1, -82, 0, 11),
-    Text = "—",
-    BackgroundColor3 = COLORS.panel2,
-    TextColor3 = COLORS.text,
-    Font = Enum.Font.GothamBold,
-    TextSize = 17,
-    BorderSizePixel = 0
-})
-round(Minimize, 9)
+local Status=label(Main,"Pronto • equipe uma arma.",UDim2.new(1,-28,0,19),UDim2.fromOffset(14,59),9);Status.TextColor3=COL.sub
+local Start=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.fromOffset(14,81),Text="INICIAR",BackgroundColor3=COL.blue2,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0});round(Start,8)
+local Export=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0});round(Export,8)
 
-local Close = new("TextButton", {
-    Parent = Header,
-    Size = UDim2.fromOffset(36, 32),
-    Position = UDim2.new(1, -41, 0, 11),
-    Text = "×",
-    BackgroundColor3 = COLORS.red,
-    TextColor3 = COLORS.text,
-    Font = Enum.Font.GothamBold,
-    TextSize = 19,
-    BorderSizePixel = 0
-})
-round(Close, 9)
+local Mission=new("Frame",{Parent=Main,Position=UDim2.fromOffset(14,120),Size=UDim2.new(1,-28,0,48),BackgroundColor3=COL.panel2,BorderSizePixel=0});round(Mission,8)
+local MTitle=label(Mission,"MISSÃO: AGUARDANDO",UDim2.new(1,-18,0,20),UDim2.fromOffset(9,4),10);MTitle.Font=Enum.Font.GothamBold
+local MHelp=label(Mission,"O fluxo será automático após iniciar.",UDim2.new(1,-18,0,18),UDim2.fromOffset(9,25),8);MHelp.TextColor3=COL.sub
+local Summary=label(Main,"",UDim2.new(1,-28,0,18),UDim2.fromOffset(14,171),8);Summary.TextColor3=COL.sub
 
-local Status = label(Main, "Pronto • equipe uma arma.", UDim2.new(1, -28, 0, 19), UDim2.fromOffset(14, 59), 9)
-Status.TextColor3 = COLORS.sub
+local Viewer=new("ScrollingFrame",{Parent=Main,Position=UDim2.fromOffset(14,193),Size=UDim2.new(1,-28,1,-202),BackgroundColor3=COL.panel,BorderSizePixel=0,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=5,ScrollingDirection=Enum.ScrollingDirection.Y});round(Viewer,9)
+local Text=new("TextLabel",{Parent=Viewer,BackgroundTransparency=1,Position=UDim2.fromOffset(8,7),Size=UDim2.new(1,-16,0,0),AutomaticSize=Enum.AutomaticSize.Y,Text="",TextColor3=COL.text,Font=Enum.Font.Code,TextSize=9,TextWrapped=false,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top})
 
-local Start = new("TextButton", {
-    Parent = Main,
-    Size = UDim2.new(0.5, -17, 0, 34),
-    Position = UDim2.fromOffset(14, 81),
-    Text = "INICIAR",
-    BackgroundColor3 = COLORS.blue2,
-    TextColor3 = COLORS.text,
-    Font = Enum.Font.GothamBold,
-    TextSize = 10,
-    BorderSizePixel = 0
-})
-round(Start, 8)
+local HUD=new("Frame",{Parent=Gui,Visible=false,Active=true,Size=UDim2.fromOffset(340,74),Position=UDim2.fromScale(0.04,0.18),BackgroundColor3=COL.bg,BorderSizePixel=0});round(HUD,12)
+local HTitle=label(HUD,"AGUARDANDO",UDim2.new(1,-78,0,24),UDim2.fromOffset(12,7),10);HTitle.Font=Enum.Font.GothamBold
+local HHelp=label(HUD,"",UDim2.new(1,-78,0,36),UDim2.fromOffset(12,31),8);HHelp.TextWrapped=true;HHelp.TextColor3=COL.sub
+local Open=new("TextButton",{Parent=HUD,Size=UDim2.fromOffset(60,48),Position=UDim2.new(1,-68,0,13),Text="ABRIR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=9,BorderSizePixel=0});round(Open,8)
 
-local Export = new("TextButton", {
-    Parent = Main,
-    Size = UDim2.new(0.5, -17, 0, 34),
-    Position = UDim2.new(0.5, 3, 0, 81),
-    Text = "EXPORTAR",
-    BackgroundColor3 = COLORS.blue,
-    TextColor3 = COLORS.text,
-    Font = Enum.Font.GothamBold,
-    TextSize = 10,
-    BorderSizePixel = 0
-})
-round(Export, 8)
-
-local PhaseRow = new("Frame", {
-    Parent = Main,
-    BackgroundTransparency = 1,
-    Position = UDim2.fromOffset(14, 120),
-    Size = UDim2.new(1, -28, 0, 35)
-})
-
-local phaseButtons = {}
-local shortLabels = {
-    CLEAR = "LIVRE",
-    WALL = "PAREDE",
-    TARGET_BEHIND_WALL = "ALVO+PAREDE",
-    TARGET_CLEAR = "ALVO LIVRE"
-}
-
-for index, phase in ipairs(CONFIG.PHASES) do
-    local button = new("TextButton", {
-        Parent = PhaseRow,
-        Size = UDim2.new(0.25, -5, 1, 0),
-        Position = UDim2.new((index - 1) * 0.25, (index - 1) * 2, 0, 0),
-        Text = shortLabels[phase],
-        BackgroundColor3 = COLORS.panel2,
-        TextColor3 = COLORS.text,
-        Font = Enum.Font.GothamBold,
-        TextSize = 8,
-        BorderSizePixel = 0
-    })
-    round(button, 7)
-    phaseButtons[phase] = button
+local function draggable(target,handle)
+ local dragging,input,start,pos=false,nil,nil,nil
+ S.Connections[#S.Connections+1]=handle.InputBegan:Connect(function(i)
+  if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+   dragging=true;start=i.Position;pos=target.Position
+   i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then dragging=false end end)
+  end
+ end)
+ S.Connections[#S.Connections+1]=handle.InputChanged:Connect(function(i)
+  if i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch then input=i end
+ end)
+ S.Connections[#S.Connections+1]=UserInputService.InputChanged:Connect(function(i)
+  if dragging and i==input then
+   local d=i.Position-start
+   target.Position=UDim2.new(pos.X.Scale,pos.X.Offset+d.X,pos.Y.Scale,pos.Y.Offset+d.Y)
+  end
+ end)
 end
+draggable(Main,Header);draggable(HUD,HUD)
 
-local Summary = label(Main, "", UDim2.new(1, -28, 0, 18), UDim2.fromOffset(14, 159), 8)
-Summary.TextColor3 = COLORS.sub
+local function updateUI()
+ local active=S.ActiveTool and S.ActiveTool.Name or "NENHUMA"
+ local state=S.Completed and "CONCLUÍDO" or (S.Recording and "GRAVANDO" or (S.Started and "PAUSADO" or "PRONTO"))
+ Summary.Text=string.format("%s • ARMA:%s • FASE:%s • TIROS:%d • ERROS:%d",state,active,phaseLabel(),#S.Shots,S.Errors)
 
-local Viewer = new("ScrollingFrame", {
-    Parent = Main,
-    Position = UDim2.fromOffset(14, 181),
-    Size = UDim2.new(1, -28, 1, -190),
-    BackgroundColor3 = COLORS.panel,
-    BorderSizePixel = 0,
-    CanvasSize = UDim2.new(),
-    AutomaticCanvasSize = Enum.AutomaticSize.Y,
-    ScrollBarThickness = 5,
-    ScrollingDirection = Enum.ScrollingDirection.Y
-})
-round(Viewer, 9)
+ if S.Completed then
+  MTitle.Text="✓ TESTE CONCLUÍDO • 4/4";MHelp.Text="As 12 leituras foram concluídas. Exporte o JSON."
+  HTitle.Text="✓ TESTE CONCLUÍDO";HHelp.Text="4/4 missões concluídas • exporte o JSON."
+ elseif not S.Started or not S.CurrentPhase then
+  MTitle.Text="MISSÃO: AGUARDANDO";MHelp.Text="Inicie com uma arma equipada."
+  HTitle.Text="AGUARDANDO";HHelp.Text="Equipe uma arma e inicie a coleta."
+ else
+  local pre=S.Recording and "" or "PAUSADO • "
+  MTitle.Text=string.format("%sMISSÃO %d/4 • %s • %d/%d",pre,S.PhaseIndex,phaseLabel(),S.PhaseShots,C.SHOTS)
+  MHelp.Text=phaseHelp()
+  HTitle.Text=string.format("%s%d/4 • %s • %d/%d",pre,S.PhaseIndex,phaseLabel(),S.PhaseShots,C.SHOTS)
+  HHelp.Text=phaseHelp().."\n"..(S.LastAssessment and ("Última leitura: "..S.LastAssessment) or "Sem leitura ainda.")
+ end
 
-local Text = new("TextLabel", {
-    Parent = Viewer,
-    BackgroundTransparency = 1,
-    Position = UDim2.fromOffset(8, 7),
-    Size = UDim2.new(1, -16, 0, 0),
-    AutomaticSize = Enum.AutomaticSize.Y,
-    Text = "",
-    TextColor3 = COLORS.text,
-    Font = Enum.Font.Code,
-    TextSize = 9,
-    TextWrapped = false,
-    TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top
-})
-
-local Mini = new("TextButton", {
-    Parent = Gui,
-    Visible = false,
-    Size = UDim2.fromOffset(58, 58),
-    Position = UDim2.fromScale(0.06, 0.24),
-    Text = "V2.2",
-    BackgroundColor3 = COLORS.blue,
-    TextColor3 = COLORS.text,
-    Font = Enum.Font.GothamBold,
-    TextSize = 10,
-    BorderSizePixel = 0
-})
-round(Mini, 17)
-
-local function draggable(target, handle)
-    local dragging = false
-    local dragInput = nil
-    local dragStart = nil
-    local startPosition = nil
-
-    S.Connections[#S.Connections + 1] = handle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPosition = target.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
-    end)
-
-    S.Connections[#S.Connections + 1] = handle.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-            dragInput = input
-        end
-    end)
-
-    S.Connections[#S.Connections + 1] = UserInputService.InputChanged:Connect(function(input)
-        if dragging and input == dragInput then
-            local delta = input.Position - dragStart
-            target.Position = UDim2.new(
-                startPosition.X.Scale,
-                startPosition.X.Offset + delta.X,
-                startPosition.Y.Scale,
-                startPosition.Y.Offset + delta.Y
-            )
-        end
-    end)
-end
-
-draggable(Main, Header)
-draggable(Mini, Mini)
-
-local function updatePreview()
-    local active = S.ActiveTool and S.ActiveTool.Name or "NENHUMA"
-    local phase = CONFIG.PHASE_LABELS[S.CurrentPhase] or "-"
-
-    Summary.Text = string.format(
-        "GRAV:%s • ARMA:%s • FASE:%s • TIROS:%d • ERROS:%d",
-        S.Recording and "SIM" or "NÃO",
-        active,
-        phase,
-        #S.Shots,
-        S.Errors
-    )
-
-    local lines = {
-        "PESQUISA DE ARMAS V2.2",
-        "────────────────────────────────────────",
-        "FOCO: canPierce / castRays",
-        "",
-        "PROTOCOLO",
-        "1 LIVRE → 3 tiros",
-        "2 PAREDE → 3 tiros",
-        "3 ALVO+PAREDE → 3 tiros",
-        "4 ALVO LIVRE → 3 tiros",
-        "",
-        "MANTENHA A MESMA ARMA EQUIPADA",
-        "• marque a fase antes dos 3 tiros",
-        "• mire exatamente no ponto do teste",
-        "• o diagnóstico não altera o disparo",
-        "",
-        "ÚLTIMOS EVENTOS",
-        "────────────────────────────────────────"
-    }
-
-    local first = math.max(1, #S.Live - 70)
-    for index = first, #S.Live do
-        local item = S.Live[index]
-        lines[#lines + 1] = string.format(
-            "[%.3f] %-18s %s",
-            item.time or 0,
-            tostring(item.type),
-            tostring(item.message)
-        )
-    end
-    Text.Text = table.concat(lines, "\n")
+ local lines={
+  "PESQUISA DE ARMAS V2.2.1","────────────────────────────────────────",
+  "FLUXO AUTOMÁTICO • 3 tiros por missão","",
+  "1 TIRO LIVRE → céu/espaço sem alvo",
+  "2 PAREDE → diretamente na parede",
+  "3 ALVO + PAREDE → alvo com parede no meio",
+  "4 ALVO LIVRE → alvo sem parede","",
+  "LIMITE DO MAPA",
+  "CAMINHO_LIVRE = nenhum impacto no alcance",
+  "POSSIVEL_LIMITE_MAPA = indícios de barreira/limite",
+  "GEOMETRIA_MAPA = peça normal do mapa",
+  "PERSONAGEM = modelo com Humanoid","",
+  "PAUSAR NÃO APAGA O PROGRESSO","","ÚLTIMOS EVENTOS","────────────────────────────────────────"
+ }
+ for i=math.max(1,#S.Live-65),#S.Live do
+  local e=S.Live[i];lines[#lines+1]=string.format("[%.3f] %-18s %s",e.time or 0,tostring(e.type),tostring(e.message))
+ end
+ Text.Text=table.concat(lines,"\n")
 end
 
 Start.Activated:Connect(function()
-    if not S.Recording then
-        startDiagnostic()
-        Start.Text = "PARAR"
-        Status.Text = "Gravando • escolha uma fase e atire."
-        Status.TextColor3 = COLORS.green
-    else
-        stopDiagnostic()
-        Start.Text = "INICIAR"
-        Status.Text = "Parado • dados preservados."
-        Status.TextColor3 = COLORS.sub
-    end
-    updatePreview()
+ if not S.Started or S.Completed then
+  if beginSession() then Start.Text="PAUSAR";Status.Text="Gravando • siga a missão mostrada.";Status.TextColor3=COL.green
+  else Status.Text="Equipe uma arma antes de iniciar.";Status.TextColor3=COL.red end
+ elseif S.Recording then
+  pauseSession();Start.Text="RETOMAR";Status.Text="Pausado • progresso preservado.";Status.TextColor3=COL.yellow
+ else
+  if resumeSession() then Start.Text="PAUSAR";Status.Text="Retomado • continue a mesma missão.";Status.TextColor3=COL.green
+  else Status.Text="Equipe uma arma antes de retomar.";Status.TextColor3=COL.red end
+ end
+ updateUI()
 end)
-
-for phase, button in pairs(phaseButtons) do
-    button.Activated:Connect(function()
-        if setPhase(phase) then
-            Status.Text = "✓ FASE ATIVA: " .. (CONFIG.PHASE_LABELS[phase] or phase)
-            Status.TextColor3 = COLORS.yellow
-        else
-            Status.Text = "Equipe uma arma e inicie a coleta."
-            Status.TextColor3 = COLORS.red
-        end
-        updatePreview()
-    end)
-end
 
 Export.Activated:Connect(function()
-    if not S.Started then
-        Status.Text = "Inicie a coleta antes de exportar."
-        Status.TextColor3 = COLORS.yellow
-        return
-    end
-
-    local data, err = encodeExport()
-    if not data then
-        Status.Text = "Falha ao gerar JSON: " .. tostring(err)
-        Status.TextColor3 = COLORS.red
-        return
-    end
-
-    local filename = "Psicosenatico_WeaponResearch_V2_2_"
-        .. tostring(game.PlaceId)
-        .. "_"
-        .. tostring(os.time())
-        .. ".json"
-
-    local saved = false
-    if typeof(writefile) == "function" then
-        saved = pcall(function()
-            writefile(filename, data)
-        end)
-    end
-
-    if saved then
-        Status.Text = "✓ ARQUIVO EXPORTADO: " .. filename
-        Status.TextColor3 = COLORS.green
-    elseif typeof(setclipboard) == "function" and pcall(function()
-        setclipboard(data)
-    end) then
-        Status.Text = "✓ JSON COPIADO."
-        Status.TextColor3 = COLORS.green
-    else
-        Status.Text = "Não foi possível salvar ou copiar o JSON."
-        Status.TextColor3 = COLORS.red
-    end
+ if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+ local data,err=encode()
+ if not data then Status.Text="Falha JSON: "..tostring(err);Status.TextColor3=COL.red;return end
+ local name="Psicosenatico_WeaponResearch_V2_2_1_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+ local saved=false
+ if typeof(writefile)=="function" then saved=pcall(function() writefile(name,data) end) end
+ if saved then Status.Text="✓ ARQUIVO EXPORTADO: "..name;Status.TextColor3=COL.green
+ elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+ else Status.Text="Não foi possível salvar ou copiar o JSON.";Status.TextColor3=COL.red end
 end)
 
-Minimize.Activated:Connect(function()
-    Main.Visible = false
-    Mini.Visible = true
-end)
-
-Mini.Activated:Connect(function()
-    Mini.Visible = false
-    Main.Visible = true
-end)
+Min.Activated:Connect(function() Main.Visible=false;HUD.Visible=true;updateUI() end)
+Open.Activated:Connect(function() HUD.Visible=false;Main.Visible=true end)
 
 local function cleanup()
-    if S.Recording then
-        stopDiagnostic()
-    end
-
-    for _, list in pairs(S.ToolConnections) do
-        for _, connection in ipairs(list) do
-            pcall(function()
-                connection:Disconnect()
-            end)
-        end
-    end
-
-    for _, connection in ipairs(S.Connections) do
-        pcall(function()
-            connection:Disconnect()
-        end)
-    end
-
-    pcall(function()
-        Gui:Destroy()
-    end)
-
-    local runtime = RuntimeEnv[RUNTIME_KEY]
-    if type(runtime) == "table" and runtime.cleanup == cleanup then
-        RuntimeEnv[RUNTIME_KEY] = nil
-    end
+ S.Recording=false
+ for _,list in pairs(S.ToolConnections) do for _,c in ipairs(list) do pcall(function() c:Disconnect() end) end end
+ for _,c in ipairs(S.Connections) do pcall(function() c:Disconnect() end) end
+ pcall(function() Gui:Destroy() end)
+ local rt=ENV[RUNTIME_KEY]
+ if type(rt)=="table" and rt.cleanup==cleanup then ENV[RUNTIME_KEY]=nil end
 end
 
-RuntimeEnv[RUNTIME_KEY] = {
-    version = CONFIG.VERSION,
-    cleanup = cleanup
-}
-
+ENV[RUNTIME_KEY]={version=C.VERSION,cleanup=cleanup}
 Close.Activated:Connect(cleanup)
 
 if Workspace.CurrentCamera then
-    local ok, signal = pcall(function()
-        return Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize")
-    end)
-    if ok and signal then
-        S.Connections[#S.Connections + 1] = signal:Connect(resize)
-    end
+ local ok,sig=pcall(function() return Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize") end)
+ if ok and sig then S.Connections[#S.Connections+1]=sig:Connect(resize) end
 end
 
 scanWeapons("INITIAL_SCAN")
-pushLive("SISTEMA", "Pesquisa de Armas V2.2 pronta.")
-pushLive("SISTEMA", "Interface em português • coleta observacional.")
-updatePreview()
+live("SISTEMA","Pesquisa V2.2.1 pronta.")
+live("SISTEMA","Fluxo automático • pausa preserva o progresso.")
+updateUI()
 
 task.spawn(function()
-    while Gui.Parent do
-        pcall(updatePreview)
-        task.wait(CONFIG.UI_REFRESH)
-    end
+ while Gui.Parent do pcall(updateUI);task.wait(0.75) end
 end)
