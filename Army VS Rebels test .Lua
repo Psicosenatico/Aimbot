@@ -930,21 +930,21 @@ local function GetTarget()
                     )
 
 
-                local root =
+                local head =
                     character:FindFirstChild(
-                        "HumanoidRootPart"
+                        "Head"
                     )
 
 
                 if humanoid
-                and root
+                and head
                 and humanoid.Health > 0 then
 
 
                     local worldDistance =
                         (
                             camera.CFrame.Position -
-                            root.Position
+                            head.Position
                         ).Magnitude
 
 
@@ -955,7 +955,7 @@ local function GetTarget()
                         local screenPosition,
                             visible =
                             camera:WorldToViewportPoint(
-                                root.Position
+                                head.Position
                             )
 
 
@@ -1023,13 +1023,13 @@ local function AimAtTarget(character)
     end
 
 
-    local root =
+    local head =
         character:FindFirstChild(
-            "HumanoidRootPart"
+            "Head"
         )
 
 
-    if not root then
+    if not head then
         return
     end
 
@@ -1037,7 +1037,7 @@ local function AimAtTarget(character)
     camera.CFrame =
         CFrame.lookAt(
             camera.CFrame.Position,
-            root.Position
+            head.Position
         )
 end
 
@@ -8251,6 +8251,4 @@ end
 
 --========================================================
 -- START
---========================================================
-
-CreateInterface()
+--=================
