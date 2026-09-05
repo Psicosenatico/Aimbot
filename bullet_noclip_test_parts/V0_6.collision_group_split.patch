@@ -1,0 +1,313 @@
+-- V0.6 COLLISION-GROUP SPLIT PATCH
+-- Replaces CanQuery-only behavior with a collision-group separation strategy:
+-- candidate walls stay CanCollide=true for the local character's collision group(s),
+-- but do not collide with Default, the collision group used by raycasts when none is specified.
+-- Also corrects V0.5 candidate verification to use debugId, never path text.
+
+local PhysicsService=game:GetService("PhysicsService")
+C.VERSION="V0.6"
+local BULLET_GROUP="PSICO_BULLET_PASS"
+S.groupStrategyReady=false
+S.groupStrategyBlockedReason=nil
+S.groupStrategyCharacterGroups={}
+S.groupApplied=0
+S.groupApplyFailed=0
+S.groupRestored=0
+S.groupRestoreFailed=0
+S.respectCanCollideCandidateHitsVerified=0
+S.respectCanCollidePathFalsePositives=0
+S.playerGroupRayCandidateHits=0
+S.playerGroupRayErrors=0
+
+local function isGroupRegisteredV06(name)
+ local ok,v=pcall(function() return Workspace:IsCollisionGroupRegistered(name) end)
+ if ok then return v==true end
+ local ok2,v2=pcall(function() return PhysicsService:IsCollisionGroupRegistered(name) end)
+ return ok2 and v2==true
+end
+
+local function registerGroupV06(name)
+ if isGroupRegisteredV06(name) then return true end
+ local ok=pcall(function() Workspace:RegisterCollisionGroup(name) end)
+ if not ok then ok=pcall(function() PhysicsService:RegisterCollisionGroup(name) end) end
+ return ok and isGroupRegisteredV06(name)
+end
+
+local function setGroupsCollidableV06(a,b,value)
+ local ok=pcall(function() Workspace:CollisionGroupSetCollidable(a,b,value) end)
+ if not ok then ok=pcall(function() PhysicsService:CollisionGroupSetCollidable(a,b,value) end) end
+ return ok
+end
+
+local function groupsCollidableV06(a,b)
+ local ok,v=pcall(function() return Workspace:CollisionGroupsAreCollidable(a,b) end)
+ if ok then return v==true,true end
+ local ok2,v2=pcall(function() return PhysicsService:CollisionGroupsAreCollidable(a,b) end)
+ if ok2 then return v2==true,true end
+ return nil,false
+end
+
+local function characterGroupsV06()
+ local groups={}
+ local ch=LP.Character
+ if ch then
+  for _,d in ipairs(ch:GetDescendants()) do
+   if d:IsA("BasePart") then
+    local g=tostring(d.CollisionGroup or "Default")
+    groups[g]=(groups[g] or 0)+1
+   end
+  end
+ end
+ return groups
+end
+
+local function prepareGroupStrategyV06()
+ local groups=characterGroupsV06()
+ S.groupStrategyCharacterGroups=groups
+ if next(groups)==nil then
+  S.groupStrategyReady=false
+  S.groupStrategyBlockedReason="SEM_GRUPO_DE_COLISAO_DO_PERSONAGEM"
+  return false,S.groupStrategyBlockedReason
+ end
+ if groups.Default then
+  S.groupStrategyReady=false
+  S.groupStrategyBlockedReason="PERSONAGEM_USA_DEFAULT; separar raycast Default quebraria colisão física do player"
+  return false,S.groupStrategyBlockedReason
+ end
+ if not registerGroupV06(BULLET_GROUP) then
+  S.groupStrategyReady=false
+  S.groupStrategyBlockedReason="NAO_FOI_POSSIVEL_REGISTRAR_COLLISION_GROUP"
+  return false,S.groupStrategyBlockedReason
+ end
+ if not setGroupsCollidableV06(BULLET_GROUP,"Default",false) then
+  S.groupStrategyReady=false
+  S.groupStrategyBlockedReason="FALHA_AO_SEPARAR_PSICO_X_DEFAULT"
+  return false,S.groupStrategyBlockedReason
+ end
+ for g,_ in pairs(groups) do
+  if not setGroupsCollidableV06(BULLET_GROUP,g,true) then
+   S.groupStrategyReady=false
+   S.groupStrategyBlockedReason="FALHA_AO_PRESERVAR_COLISAO_COM_"..tostring(g)
+   return false,S.groupStrategyBlockedReason
+  end
+ end
+ local defaultValue,defaultReadable=groupsCollidableV06(BULLET_GROUP,"Default")
+ if defaultReadable and defaultValue~=false then
+  S.groupStrategyReady=false
+  S.groupStrategyBlockedReason="VERIFICACAO_PSICO_X_DEFAULT_NAO_FICOU_FALSE"
+  return false,S.groupStrategyBlockedReason
+ end
+ for g,_ in pairs(groups) do
+  local v,readable=groupsCollidableV06(BULLET_GROUP,g)
+  if readable and v~=true then
+   S.groupStrategyReady=false
+   S.groupStrategyBlockedReason="VERIFICACAO_COLISAO_PERSONAGEM_FALHOU_"..tostring(g)
+   return false,S.groupStrategyBlockedReason
+  end
+ end
+ S.groupStrategyReady=true
+ S.groupStrategyBlockedReason=nil
+ event("COLLISION_GROUP_READY",{group=BULLET_GROUP,characterGroups=groups,defaultCollidable=false})
+ return true,nil
+end
+
+for _,meta in pairs(S.candidates) do
+ if meta and meta.originalCollisionGroup==nil then
+  meta.originalCollisionGroup=meta.baselineState and meta.baselineState.collisionGroup or "Default"
+ end
+end
+
+apply=function(p,meta)
+ if not p or not p.Parent then return false end
+ if not S.groupStrategyReady then return false end
+ local before=readPartState(p)
+ if meta.originalCollisionGroup==nil then meta.originalCollisionGroup=before.collisionGroup or "Default" end
+ if meta.originalCanQuery==nil and before.canQueryReadOk then meta.originalCanQuery=before.canQuery end
+ local okQ,eQ=pcall(function() p.CanQuery=false end)
+ if not okQ then err("applyCanQueryV06",eQ) end
+ local okG,eG=pcall(function() p.CollisionGroup=BULLET_GROUP end)
+ if not okG then err("applyCollisionGroupV06",eG) end
+ local after=readPartState(p)
+ meta.lastApplyBefore=before
+ meta.lastApplyAfter=after
+ meta.groupApplied=okG and after.collisionGroup==BULLET_GROUP and after.canCollide==true
+ meta.applyVerified=meta.groupApplied
+ meta.applied=meta.groupApplied
+ if meta.applied then
+  S.applyVerified+=1
+  S.groupApplied+=1
+  persistenceSample(p,meta,"IMMEDIATE")
+  schedulePersistence(p,meta)
+  event("GROUP_APPLY",{path=meta.path,debugId=meta.debugId,fromGroup=meta.originalCollisionGroup,toGroup=BULLET_GROUP,canCollide=after.canCollide,canQuery=after.canQuery})
+ else
+  S.applyVerifyFailed+=1
+  S.groupApplyFailed+=1
+  event("GROUP_APPLY_FAILED",{path=meta.path,debugId=meta.debugId,before=before,after=after,okGroupWrite=okG,error=tostring(eG)})
+ end
+ return meta.applied
+end
+
+restore=function(p,meta)
+ if not p or not p.Parent then return false end
+ local before=readPartState(p)
+ local okQ,eQ=pcall(function() p.CanQuery=meta.originalCanQuery end)
+ if not okQ then err("restoreCanQueryV06",eQ) end
+ local targetGroup=meta.originalCollisionGroup or (meta.baselineState and meta.baselineState.collisionGroup) or "Default"
+ local okG,eG=pcall(function() p.CollisionGroup=targetGroup end)
+ if not okG then err("restoreCollisionGroupV06",eG) end
+ local after=readPartState(p)
+ meta.lastRestoreBefore=before
+ meta.lastRestoreAfter=after
+ meta.groupApplied=false
+ meta.applied=false
+ local restored=okG and after.collisionGroup==targetGroup and (not after.canQueryReadOk or after.canQuery==meta.originalCanQuery)
+ if restored then S.groupRestored+=1 else S.groupRestoreFailed+=1 end
+ event("GROUP_RESTORE",{path=meta.path,debugId=meta.debugId,targetGroup=targetGroup,restored=restored,after=after})
+ return restored
+end
+
+local _setEnabledV05=setEnabled
+setEnabled=function(v,reason)
+ if v and not S.enabled then
+  local ok,why=prepareGroupStrategyV06()
+  if not ok then
+   S.last="V0.6 BLOQUEADO • "..tostring(why)
+   event("COLLISION_GROUP_BLOCKED",{reason=why,characterGroups=S.groupStrategyCharacterGroups})
+   updateUI()
+   return
+  end
+ end
+ _setEnabledV05(v,reason)
+end
+
+local function verifiedCandidateByDebugIdV06(info)
+ local id=info and info.state and info.state.debugId or nil
+ if not id then return nil end
+ for p,m in pairs(S.candidates) do
+  if p and p.Parent and m and tostring(m.debugId)==tostring(id) then return m,p end
+ end
+ return nil,nil
+end
+
+local function firstCharacterGroupV06()
+ for g,_ in pairs(S.groupStrategyCharacterGroups or {}) do return g end
+ return nil
+end
+
+local function playerGroupRayV06(tool)
+ local group=firstCharacterGroupV06()
+ local cam=Workspace.CurrentCamera
+ if not group or not cam then return nil,false,"SEM_GRUPO_OU_CAMERA" end
+ local range=tool:GetAttribute("range")
+ if type(range)~="number" or range<=0 then range=1200 end
+ local origin=cam.CFrame.Position
+ local rp=RaycastParams.new()
+ rp.FilterType=Enum.RaycastFilterType.Exclude
+ rp.IgnoreWater=true
+ rp.CollisionGroup=group
+ rp.FilterDescendantsInstances=LP.Character and {LP.Character} or {}
+ local hit=nil
+ local ok,e=pcall(function() hit=Workspace:Raycast(origin,cam.CFrame.LookVector*range,rp) end)
+ if not ok then return nil,false,tostring(e) end
+ return hitRecord(hit,origin),true,nil
+end
+
+local _shotReadV05=shotRead
+shotRead=function(tool,delta)
+ _shotReadV05(tool,delta)
+ local rec=S.shots[#S.shots]
+ if not rec then return end
+ local reported=rec.respectCanCollideHitCandidate==true
+ local verifiedMeta=verifiedCandidateByDebugIdV06(rec.respectCanCollideRayHit)
+ rec.respectCanCollideHitCandidateVerified=verifiedMeta~=nil
+ rec.respectCanCollideCandidateMatchMethod="debugId"
+ if verifiedMeta then
+  S.respectCanCollideCandidateHitsVerified+=1
+  rec.respectCanCollideVerifiedKind=verifiedMeta.kind
+ elseif reported then
+  S.respectCanCollidePathFalsePositives+=1
+ end
+ local pg,ok,e=playerGroupRayV06(tool)
+ rec.playerCollisionGroupRayOk=ok
+ rec.playerCollisionGroupRayHit=pg
+ rec.playerCollisionGroupRayError=e
+ if not ok then
+  S.playerGroupRayErrors+=1
+ else
+  local m=verifiedCandidateByDebugIdV06(pg)
+  if m then
+   S.playerGroupRayCandidateHits+=1
+   rec.playerCollisionGroupRayHitCandidate=true
+  end
+ end
+ updateUI()
+end
+
+local _payloadV05=payload
+payload=function()
+ local t=_payloadV05()
+ t.version=C.VERSION
+ t.policy=t.policy or {}
+ t.policy.mode="MAP_WALL_COLLISION_GROUP_SPLIT_V06"
+ t.policy.primaryMechanism="Candidatas ficam no grupo PSICO_BULLET_PASS; grupo não colide com Default mas continua colidindo com os grupos físicos do personagem local. CanCollide das paredes permanece true."
+ t.policy.canQueryFinding="Roblox documenta que CanQuery só produz efeito quando CanCollide=false; V0.6 não depende de CanQuery para a separação principal."
+ t.policy.identityFix="Hits RespectCanCollide são validados por debugId; comparação por path da V0.5 é mantida apenas como legado e seus falsos positivos são contados."
+ t.summary=t.summary or {}
+ t.summary.groupStrategyReady=S.groupStrategyReady
+ t.summary.groupStrategyBlockedReason=S.groupStrategyBlockedReason
+ t.summary.groupStrategyCharacterGroups=S.groupStrategyCharacterGroups
+ t.summary.groupApplied=S.groupApplied
+ t.summary.groupApplyFailed=S.groupApplyFailed
+ t.summary.groupRestored=S.groupRestored
+ t.summary.groupRestoreFailed=S.groupRestoreFailed
+ t.summary.respectCanCollideCandidateHitsVerified=S.respectCanCollideCandidateHitsVerified
+ t.summary.respectCanCollidePathFalsePositives=S.respectCanCollidePathFalsePositives
+ t.summary.playerGroupRayCandidateHits=S.playerGroupRayCandidateHits
+ t.summary.playerGroupRayErrors=S.playerGroupRayErrors
+ return t
+end
+
+save=function()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+ if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_6_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then
+  local a,b=pcall(writefile,name,json)
+  if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+ end
+ if typeof(setclipboard)=="function" then
+  local a,b=pcall(setclipboard,json)
+  if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+ end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
+
+local _updateUIV05=updateUI
+updateUI=function()
+ _updateUIV05()
+ Reader.Text=string.gsub(Reader.Text,"Leitor V0%.5","Leitor V0.6")
+ local groupText=S.groupStrategyReady and "OK" or (S.groupStrategyBlockedReason and ("BLOQUEADO: "..S.groupStrategyBlockedReason) or "AGUARDANDO ATIVAÇÃO")
+ Reader.Text=Reader.Text..string.format("\nCollisionGroup Split: %s\nGrupo aplicado: %d • falhas: %d\nRCC candidata verificada: %d • falsos path V0.5: %d\nRay grupo Player → candidata: %d",groupText,S.groupApplied,S.groupApplyFailed,S.respectCanCollideCandidateHitsVerified,S.respectCanCollidePathFalsePositives,S.playerGroupRayCandidateHits)
+ ver.Text=C.VERSION
+ State.Text=S.enabled and "Estado: ATIVO • CollisionGroup Split" or "Estado: DESATIVADO • restaurado"
+end
+
+S.conns[#S.conns+1]=LP.CharacterAdded:Connect(function()
+ task.wait(0.75)
+ if S.closed or not S.enabled then return end
+ local ok,why=prepareGroupStrategyV06()
+ if not ok then
+  setEnabled(false,"RESPAWN_UNSAFE")
+  S.last="V0.6 desativado após respawn • "..tostring(why)
+ else
+  for p,m in pairs(S.candidates) do
+   if p.Parent and not m.applied then apply(p,m) end
+  end
+ end
+ updateUI()
+end)
+
+local rtV06=ENV[C.KEY]
+if type(rtV06)=="table" then rtV06.version=C.VERSION end
+event("V06_READY",{mechanism="COLLISION_GROUP_SPLIT",group=BULLET_GROUP,canQueryOnlyDeprecated=true,identityMatch="debugId"})
+pcall(updateUI)
