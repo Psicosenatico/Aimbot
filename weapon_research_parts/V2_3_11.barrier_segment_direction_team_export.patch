@@ -1,0 +1,359 @@
+-- V2.3.11 EFFECTIVE TEAM-BARRIER SEGMENT + DIRECTION/TEAM + EXPORT FIX
+-- Preserves SHOT-LOCK, OBB, HP diagnostics and relative NoClip sync.
+-- BARREIRA_PROTECAO_TIME is effective only when the signed barrier bundle is between shot origin and target.
+-- Promotes bot modelAttributes.Team/Faction/Side into canonical team, records crossing direction,
+-- and fixes the exported filename/version to V2_3_11.
+
+C.VERSION="V2.3.11"
+S.V2311BarrierBetween=0
+S.V2311BarrierBehind=0
+S.V2311TargetInsideBarrier=0
+S.V2311BarrierNoTarget=0
+S.V2311CanonicalBotTeams=0
+S.V2311DirectionalResolved=0
+
+local function canonicalTeamContextV2311(ctx)
+ if type(ctx)~="table" then return nil,nil end
+ local current=ctx.team and ctx.team.name or nil
+ if current~=nil and tostring(current)~="" then
+  ctx.resolvedTeamName=tostring(current)
+  ctx.resolvedTeamSource=ctx.team.source or "PLAYER_TEAM"
+  return ctx.resolvedTeamName,ctx.resolvedTeamSource
+ end
+ local attrs=ctx.modelAttributes
+ if type(attrs)=="table" then
+  for _,key in ipairs({"Team","Faction","Side"}) do
+   local v=attrs[key]
+   if v~=nil and tostring(v)~="" then
+    ctx.team=type(ctx.team)=="table" and ctx.team or {}
+    ctx.team.name=tostring(v)
+    ctx.team.source="MODEL_ATTRIBUTE_"..string.upper(key)
+    ctx.resolvedTeamName=tostring(v)
+    ctx.resolvedTeamSource=ctx.team.source
+    if ctx.kind=="BOT_SOLDIER" then S.V2311CanonicalBotTeams+=1 end
+    return ctx.resolvedTeamName,ctx.resolvedTeamSource
+   end
+  end
+ end
+ ctx.resolvedTeamName=nil
+ ctx.resolvedTeamSource="UNRESOLVED"
+ return nil,ctx.resolvedTeamSource
+end
+
+local _applyRelativeSyncV2310V2311=applyRelativeSyncV2310
+applyRelativeSyncV2310=function(shot,r,dt,offset)
+ local sync=_applyRelativeSyncV2310V2311(shot,r,dt,offset)
+ if sync and r then
+  sync.barrierSegmentRelation=r.barrierSegmentRelation
+  sync.barrierBetweenCameraAndTarget=r.barrierBetweenCameraAndTarget
+  sync.barrierCrossingDirection=r.barrierCrossingDirection
+  sync.shooterBarrierSide=r.shooterBarrierSide
+  sync.targetBarrierSide=r.targetBarrierSide
+  sync.wallDiagnosticCategory=r.wallDiagnosticCategory
+  if type(r.targetProtectionContext)=="table" then
+   shot.targetProtectionContext=r.targetProtectionContext
+   canonicalTeamContextV2311(shot.targetProtectionContext)
+  end
+ end
+ return sync
+end
+
+local function barrierPartV2311(barrier)
+ if not barrier then return nil end
+ for _,info in ipairs({barrier.forceField,barrier.smoothPlastic}) do
+  if info and info.debugId then
+   local p=v238PartByDebugId(info.debugId)
+   if p and p.Parent then return p end
+  end
+ end
+ return nil
+end
+
+local function pointSideV2311(barrier,pos)
+ if typeof(pos)~="Vector3" then return nil end
+ local p=barrierPartV2311(barrier)
+ if not p then return nil end
+ local ok,res=pcall(function()
+  local lp=p.CFrame:PointToObjectSpace(pos)
+  local s=p.Size
+  local thinAxis=math.abs(s.X)<=math.abs(s.Z) and "X" or "Z"
+  local signed=thinAxis=="X" and lp.X or lp.Z
+  local thinSize=thinAxis=="X" and math.abs(s.X) or math.abs(s.Z)
+  return {
+   thinAxis=thinAxis,signedThinOffset=signed,absoluteThinOffset=math.abs(signed),
+   side=signed>=0 and "POSITIVE" or "NEGATIVE",
+   insideThickness=math.abs(signed)<=thinSize*0.5+0.05,
+   localPosition={lp.X,lp.Y,lp.Z},barrierDebugId=p:GetDebugId(0),barrierPath=full(p)
+  }
+ end)
+ return ok and res or nil
+end
+
+local function targetDistanceV2311(shot,bundle)
+ local sync=shot and shot.noClipSync
+ local bh=sync and sync.diagnosticBaselineHit
+ if sync and sync.matched and bh and bh.humanoid==true and tonumber(bh.distance) then
+  return tonumber(bh.distance),"NOCLIP_SYNC_BASELINE_HUMANOID"
+ end
+ if bundle and tonumber(bundle.targetDistance) then
+  return tonumber(bundle.targetDistance),"RESEARCH_WALL_TRAVERSAL_TARGET"
+ end
+ local ctx=shot and shot.targetProtectionContext
+ local ref=shot and shot.referenceRay
+ if ctx and type(ctx.rootPosition)=="table" and ref and type(ref.origin)=="table" and type(ref.direction)=="table" then
+  local o=Vector3.new(ref.origin[1] or 0,ref.origin[2] or 0,ref.origin[3] or 0)
+  local d=Vector3.new(ref.direction[1] or 0,ref.direction[2] or 0,ref.direction[3] or 0)
+  local rp=Vector3.new(ctx.rootPosition[1] or 0,ctx.rootPosition[2] or 0,ctx.rootPosition[3] or 0)
+  if d.Magnitude>0 then return (rp-o):Dot(d.Unit),"TARGET_ROOT_PROJECTION" end
+ end
+ return nil,"TARGET_DISTANCE_UNAVAILABLE"
+end
+
+local function barrierRelationV2311(shot,bundle,barrier)
+ local sync=shot and shot.noClipSync
+ if sync and sync.matched and sync.barrierBetweenCameraAndTarget~=nil then
+  return {
+   relation=sync.barrierSegmentRelation or (sync.barrierBetweenCameraAndTarget and "BARREIRA_ENTRE_CAMERA_E_ALVO" or "BARREIRA_FORA_DO_SEGMENTO_ALVO"),
+   betweenCameraAndTarget=sync.barrierBetweenCameraAndTarget==true,
+   crossingDirection=sync.barrierCrossingDirection or "INDETERMINADA",
+   shooterSide=sync.shooterBarrierSide,targetSide=sync.targetBarrierSide,
+   source="NOCLIP_V012_SHARED_BUS"
+  }
+ end
+ local td,tdSource=targetDistanceV2311(shot,bundle)
+ local entry=tonumber(bundle and bundle.entryDistance or barrier and barrier.entryDistance)
+ local exit=tonumber(bundle and bundle.exitDistance or barrier and barrier.exitDistance)
+ local relation="SEM_ALVO"
+ local between=false
+ if td and entry and exit then
+  if td>exit+0.05 then relation="BARREIRA_ENTRE_CAMERA_E_ALVO";between=true
+  elseif td<entry-0.05 then relation="BARREIRA_ATRAS_DO_ALVO"
+  else relation="ALVO_DENTRO_OU_NA_BARREIRA" end
+ end
+ local shooterSide=nil
+ local ref=shot and shot.referenceRay
+ if ref and type(ref.origin)=="table" then
+  shooterSide=pointSideV2311(barrier,Vector3.new(ref.origin[1] or 0,ref.origin[2] or 0,ref.origin[3] or 0))
+ end
+ local targetSide=shot and shot.targetProtectionContext and shot.targetProtectionContext.teamBarrierSide or nil
+ if not targetSide and shot and shot.targetProtectionContext and type(shot.targetProtectionContext.rootPosition)=="table" then
+  local rp=shot.targetProtectionContext.rootPosition
+  targetSide=pointSideV2311(barrier,Vector3.new(rp[1] or 0,rp[2] or 0,rp[3] or 0))
+ end
+ local direction="INDETERMINADA"
+ if shooterSide and targetSide and shooterSide.side and targetSide.side then
+  if shooterSide.side==targetSide.side then direction="MESMO_LADO_"..shooterSide.side
+  else direction=shooterSide.side.."_TO_"..targetSide.side end
+ end
+ return {
+  relation=relation,betweenCameraAndTarget=between,targetDistance=td,targetDistanceSource=tdSource,
+  barrierEntryDistance=entry,barrierExitDistance=exit,
+  shooterSide=shooterSide,targetSide=targetSide,crossingDirection=direction,
+  source="RESEARCH_GEOMETRY_FALLBACK"
+ }
+end
+
+-- Replace the legacy V2.3.8 finder so all downstream V2.3.8/V2.3.9 summaries only treat
+-- the signature as a protection barrier when it is actually before the target.
+local _v238FindBarrierLegacyV2311=v238FindBarrier
+v238FindBarrier=function(shot)
+ local tr=shot and shot.wallTraversal
+ if not tr or type(tr.compositeBundles)~="table" then return nil,nil end
+ local rejected={}
+ for i,b in ipairs(tr.compositeBundles) do
+  local barrier=v238BarrierFromBundle(b)
+  if barrier then
+   barrier.bundleIndex=i
+   local rel=barrierRelationV2311(shot,b,barrier)
+   rejected[#rejected+1]={bundleIndex=i,relation=rel.relation,source=rel.source}
+   if rel.betweenCameraAndTarget then
+    barrier.segmentRelationV2311=rel
+    shot.barrierSegmentRelationV2311=rel.relation
+    shot.barrierBetweenCameraAndTargetV2311=true
+    shot.barrierCrossingDirectionV2311=rel.crossingDirection
+    shot.shooterBarrierSideV2311=rel.shooterSide
+    shot.targetBarrierSideV2311=rel.targetSide
+    shot.wallDiagnosticCategory="BARREIRA_PROTECAO_TIME"
+    S.V2311BarrierBetween+=1
+    if rel.crossingDirection~="INDETERMINADA" then S.V2311DirectionalResolved+=1 end
+    return barrier,b
+   end
+  end
+ end
+ shot.rejectedBarrierBundlesV2311=rejected
+ shot.barrierBetweenCameraAndTargetV2311=false
+ return nil,nil
+end
+
+local function normalizeShotV2311(shot)
+ if not shot then return end
+ attachNoClipSyncV239(shot,false)
+ if type(shot.targetProtectionContext)=="table" then canonicalTeamContextV2311(shot.targetProtectionContext) end
+ local tr=shot.wallTraversal
+ local foundEffective=false
+ local strongest=nil
+ if tr and type(tr.compositeBundles)=="table" then
+  for i,b in ipairs(tr.compositeBundles) do
+   local barrier=v238BarrierFromBundle(b)
+   if barrier then
+    barrier.bundleIndex=i
+    local rel=barrierRelationV2311(shot,b,barrier)
+    if rel.betweenCameraAndTarget then
+     foundEffective=true
+     shot.barrierSegmentRelationV2311=rel.relation
+     shot.barrierBetweenCameraAndTargetV2311=true
+     shot.barrierCrossingDirectionV2311=rel.crossingDirection
+     shot.shooterBarrierSideV2311=rel.shooterSide
+     shot.targetBarrierSideV2311=rel.targetSide
+     shot.wallDiagnosticCategory="BARREIRA_PROTECAO_TIME"
+     break
+    elseif not strongest or rel.relation=="BARREIRA_ATRAS_DO_ALVO" then
+     strongest=rel
+    end
+   end
+  end
+ end
+ if not foundEffective and strongest then
+  if shot.wallDiagnosticCategory=="BARREIRA_PROTECAO_TIME" then shot.wallDiagnosticCategoryLegacyV238="BARREIRA_PROTECAO_TIME" end
+  shot.barrierSegmentRelationV2311=strongest.relation
+  shot.barrierBetweenCameraAndTargetV2311=false
+  shot.barrierCrossingDirectionV2311=strongest.crossingDirection
+  shot.shooterBarrierSideV2311=strongest.shooterSide
+  shot.targetBarrierSideV2311=strongest.targetSide
+  if strongest.relation=="BARREIRA_ATRAS_DO_ALVO" then
+   shot.wallDiagnosticCategory="BARREIRA_ATRAS_DO_ALVO"
+   S.V2311BarrierBehind+=1
+  elseif strongest.relation=="ALVO_DENTRO_OU_NA_BARREIRA" then
+   shot.wallDiagnosticCategory="ALVO_DENTRO_OU_NA_BARREIRA"
+   S.V2311TargetInsideBarrier+=1
+  else
+   shot.wallDiagnosticCategory="BARREIRA_SEM_ALVO_VALIDADO"
+   S.V2311BarrierNoTarget+=1
+  end
+ end
+end
+
+-- Attach the NoClip result before V2.3.8 barrier logic runs whenever the bus record is already available.
+local _startDamageProbeV2310V2311=startDamageProbe
+startDamageProbe=function(shot,locked,tool,shotToken)
+ attachNoClipSyncV239(shot,false)
+ if type(shot.targetProtectionContext)=="table" then canonicalTeamContextV2311(shot.targetProtectionContext) end
+ return _startDamageProbeV2310V2311(shot,locked,tool,shotToken)
+end
+
+local function directionalSummaryV2311()
+ local out={
+  effectiveBarrierShots=0,barrierBehindTarget=0,targetInsideBarrier=0,barrierNoTarget=0,
+  directions={},targetTeams={},teamPairs={},authorities={},records={}
+ }
+ for _,shot in ipairs(S.Shots) do
+  normalizeShotV2311(shot)
+  local rel=shot.barrierSegmentRelationV2311
+  if rel=="BARREIRA_ENTRE_CAMERA_E_ALVO" then
+   out.effectiveBarrierShots+=1
+   local d=tostring(shot.barrierCrossingDirectionV2311 or "INDETERMINADA")
+   out.directions[d]=(out.directions[d] or 0)+1
+   local ctx=shot.targetProtectionContext
+   local targetTeam=ctx and (ctx.resolvedTeamName or (ctx.team and ctx.team.name)) or "?"
+   local localTeam=ctx and ctx.localTeam and ctx.localTeam.name or "?"
+   out.targetTeams[tostring(targetTeam)]=(out.targetTeams[tostring(targetTeam)] or 0)+1
+   local pair=tostring(localTeam).."->"..tostring(targetTeam)
+   out.teamPairs[pair]=(out.teamPairs[pair] or 0)+1
+   local authority=shot.noClipSync and shot.noClipSync.matched and "NOCLIP_SHARED_BUS" or "RESEARCH_FALLBACK"
+   out.authorities[authority]=(out.authorities[authority] or 0)+1
+   out.records[#out.records+1]={
+    shotIndex=shot.shotIndex,direction=d,localTeam=localTeam,targetTeam=targetTeam,
+    clientPathState=shot.clientPathStateV239,outcome=shot.outcomeV239,
+    hpState=shot.hpStateV239,targetPath=targetPathV239(shot),authority=authority
+   }
+  elseif rel=="BARREIRA_ATRAS_DO_ALVO" then out.barrierBehindTarget+=1
+  elseif rel=="ALVO_DENTRO_OU_NA_BARREIRA" then out.targetInsideBarrier+=1
+  elseif shot.wallDiagnosticCategoryLegacyV238=="BARREIRA_PROTECAO_TIME" then out.barrierNoTarget+=1 end
+ end
+ return out
+end
+
+local _exportTableV2310V2311=exportTable
+exportTable=function()
+ -- Normalize/reconcile before the legacy summaries execute so they inherit the corrected barrier finder/team context.
+ for _,shot in ipairs(S.Shots) do normalizeShotV2311(shot) end
+ local t=_exportTableV2310V2311()
+ t.version=C.VERSION
+ t.mode="SHOT_LOCK_OBB_HP_NOCLIP_RELATIVE_SYNC_EFFECTIVE_TEAM_BARRIER_DIRECTION"
+ t.openEndedResearch=t.openEndedResearch or {}
+ t.openEndedResearch.teamProtectionBarrier=t.openEndedResearch.teamProtectionBarrier or {}
+ local tb=t.openEndedResearch.teamProtectionBarrier
+ tb.effectiveBarrierRuleV2311="BARREIRA_PROTECAO_TIME somente quando o bundle ForceField+SmoothPlastic está entre a origem do tiro e o alvo; bundles atrás do alvo ou sem alvo são categorias separadas."
+ tb.directionalV2311=directionalSummaryV2311()
+ tb.botTeamRuleV2311="Player.Team tem prioridade; para BOT_SOLDIER sem Player, modelAttributes.Team/Faction/Side é promovido para targetProtectionContext.team."
+ tb.clientPathAuthorityV2311="NOCLIP_V0.12_SHARED_BUS_WHEN_MATCHED; RESEARCH_GEOMETRY_FALLBACK otherwise"
+ t.interpretationRules=t.interpretationRules or {}
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.11: uma assinatura ForceField+SmoothPlastic atrás do alvo não é mais contada como BARREIRA_PROTECAO_TIME efetiva."
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.11: direction registra o lado geométrico do atirador e do alvo no eixo fino da barreira, permitindo comparar POSITIVE_TO_NEGATIVE e NEGATIVE_TO_POSITIVE."
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.11: bots podem ter Team resolvido por modelAttributes.Team/Faction/Side quando não existe Player.Team."
+ return t
+end
+
+local _resetSessionV2310V2311=resetSession
+resetSession=function()
+ _resetSessionV2310V2311()
+ S.V2311BarrierBetween=0
+ S.V2311BarrierBehind=0
+ S.V2311TargetInsideBarrier=0
+ S.V2311BarrierNoTarget=0
+ S.V2311CanonicalBotTeams=0
+ S.V2311DirectionalResolved=0
+end
+
+local _updateUIV2310V2311=updateUI
+updateUI=function()
+ _updateUIV2310V2311()
+ Ver.Text=C.VERSION
+ Sub.Text="SHOT-LOCK + BARREIRA EFETIVA + DIREÇÃO + TEAM"
+ Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.10","PESQUISA DE ARMAS V2.3.11")
+ Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.9","PESQUISA DE ARMAS V2.3.11")
+ local last=S.Shots[#S.Shots]
+ if last then
+  normalizeShotV2311(last)
+  if last.barrierBetweenCameraAndTargetV2311 then
+   MHelp.Text="BARREIRA TIME • "..tostring(last.barrierCrossingDirectionV2311 or "?").." • "..tostring(last.outcomeV239 or last.clientPathStateV239 or "ANALISANDO")
+  end
+ end
+end
+S.UIRefresh=updateUI
+local rt2311=ENV[RUNTIME_KEY]
+if type(rt2311)=="table" then rt2311.version=C.VERSION end
+
+-- Replace the inherited V2.3.9 export button so the physical filename matches the actual version.
+local oldExport2311=Export
+local NewExport2311=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+round(NewExport2311,8)
+pcall(function() oldExport2311:Destroy() end)
+Export=NewExport2311
+Export.Activated:Connect(function()
+ if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+ if S.ExportBusy then Status.Text="Exportação já está em andamento.";Status.TextColor3=COL.yellow;return end
+ if S.Recording then pauseSession("EXPORT") end
+ S.ExportBusy=true
+ Status.Text="Preparando JSON V2.3.11 • reconciliando sync, barreira efetiva, direção e Team."
+ Status.TextColor3=COL.yellow
+ updateUI()
+ local sessionId=S.SessionId
+ task.spawn(function()
+  while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+  if not Gui.Parent or S.SessionId~=sessionId then return end
+  local data,encErr=encode()
+  if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+  local name="Psicosenatico_WeaponResearch_V2_3_11_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+  local saved=false
+  if typeof(writefile)=="function" then saved=pcall(function() writefile(name,data) end) end
+  if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..name;Status.TextColor3=COL.green
+  elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+  else Status.Text="Não foi possível salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+  S.ExportBusy=false;updateUI()
+ end)
+end)
+
+live("SISTEMA","V2.3.11 • barreira só é efetiva quando está entre origem e alvo; direção e Team canônico ativos.")
+live("SISTEMA","Export físico corrigido para Psicosenatico_WeaponResearch_V2_3_11_*.json.")
+pcall(updateUI)
