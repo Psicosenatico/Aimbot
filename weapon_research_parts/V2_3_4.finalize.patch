@@ -1,0 +1,84 @@
+-- V2.3.4 FINALIZE PATCH
+-- Rebind weapons after the complete V2.3.3 source has initialized, so no patch is inserted
+-- inside a split function boundary. Replace the export button to guarantee V2.3.4 filename.
+
+for _,list in pairs(S.ToolConnections) do
+ for _,c in ipairs(list) do pcall(function() c:Disconnect() end) end
+end
+S.ToolConnections={}
+S.Tools={}
+S.ActiveTool=nil
+S.PendingTriggers={}
+scanWeapons("V2_3_4_SHOT_LOCK_REBIND")
+
+local rt=ENV[RUNTIME_KEY]
+if type(rt)=="table" then rt.version=C.VERSION end
+
+local oldExport=Export
+local NewExport=new("TextButton",{
+ Parent=Main,
+ Size=UDim2.new(0.5,-17,0,34),
+ Position=UDim2.new(0.5,3,0,81),
+ Text="EXPORTAR",
+ BackgroundColor3=COL.blue,
+ TextColor3=COL.text,
+ Font=Enum.Font.GothamBold,
+ TextSize=10,
+ BorderSizePixel=0
+})
+round(NewExport,8)
+pcall(function() oldExport:Destroy() end)
+Export=NewExport
+
+Export.Activated:Connect(function()
+ if not S.Started then
+  Status.Text="Inicie a coleta antes de exportar."
+  Status.TextColor3=COL.yellow
+  return
+ end
+ if S.ExportBusy then
+  Status.Text="Exportação já está em andamento."
+  Status.TextColor3=COL.yellow
+  return
+ end
+ if S.Recording then pauseSession("EXPORT") end
+ S.ExportBusy=true
+ Status.Text="Preparando JSON • aguardando probes ainda válidos."
+ Status.TextColor3=COL.yellow
+ updateUI()
+ local sessionId=S.SessionId
+ task.spawn(function()
+  while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+  if not Gui.Parent or S.SessionId~=sessionId then return end
+  local data,encErr=encode()
+  if not data then
+   S.ExportBusy=false
+   Status.Text="Falha JSON: "..tostring(encErr)
+   Status.TextColor3=COL.red
+   updateUI()
+   return
+  end
+  local name="Psicosenatico_WeaponResearch_V2_3_4_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+  local saved=false
+  if typeof(writefile)=="function" then saved=pcall(function() writefile(name,data) end) end
+  if saved then
+   S.Exported=true
+   Status.Text="✓ ARQUIVO EXPORTADO: "..name
+   Status.TextColor3=COL.green
+  elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then
+   S.Exported=true
+   Status.Text="✓ JSON COPIADO."
+   Status.TextColor3=COL.green
+  else
+   Status.Text="Não foi possível salvar ou copiar o JSON."
+   Status.TextColor3=COL.red
+  end
+  S.ExportBusy=false
+  updateUI()
+ end)
+end)
+
+live("SISTEMA","V2.3.4 aplicada sobre a base íntegra V2.3.3.")
+live("SISTEMA","Armas re-vinculadas ao SHOT-LOCK no evento de _ammo.")
+live("SISTEMA","Exportação V2.3.4 ativa; probes sobrepostos são ambíguos.")
+pcall(updateUI)
