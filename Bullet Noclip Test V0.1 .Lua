@@ -1,6 +1,6 @@
--- PSICOSENATICO • BULLET NOCLIP TEST V0.7
--- V0.6 CollisionGroup Split + V0.7 entrada/saída OBB, multicamadas e primeiro impacto pós-parede.
-local SOURCE_COMMIT="370a6beb1c3339a100f0cdaa1e79018e3afed9eb"
+-- PSICOSENATICO • BULLET NOCLIP TEST V0.8
+-- V0.7 travessia + V0.8 seleção segura de CollisionGroup já existente; não registra grupos no cliente.
+local SOURCE_COMMIT="8ce5fc6aa827095a76788854f3a12aa1ec717b56"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/bullet_noclip_test_parts/"
 local PARTS={
     "V0_3.part1",
@@ -14,22 +14,23 @@ local PARTS={
     "V0_4.ui.patch",
     "V0_5.respect_can_collide.patch",
     "V0_6.collision_group_split.patch",
-    "V0_7.wall_traversal.patch"
+    "V0_7.wall_traversal.patch",
+    "V0_8.existing_group_strategy.patch"
 }
 local chunks={}
 for i,name in ipairs(PARTS) do
     local ok,body=pcall(function() return game:HttpGet(BASE..name) end)
     if not ok or type(body)~="string" or #body==0 then
-        error("PSICOSENATICO V0.7: falha ao carregar parte "..tostring(i).." ("..name.."): "..tostring(body))
+        error("PSICOSENATICO V0.8: falha ao carregar parte "..tostring(i).." ("..name.."): "..tostring(body))
     end
     chunks[i]=body
 end
 local source=table.concat(chunks)
-if not string.find(source,'C.VERSION="V0.7"',1,true) then
-    error("PSICOSENATICO V0.7: patch de travessia não encontrado na fonte remontada")
+if not string.find(source,'C.VERSION="V0.8"',1,true) then
+    error("PSICOSENATICO V0.8: patch de grupo existente não encontrado na fonte remontada")
 end
 local compiler=loadstring
-if type(compiler)~="function" then error("PSICOSENATICO V0.7: loadstring indisponível") end
+if type(compiler)~="function" then error("PSICOSENATICO V0.8: loadstring indisponível") end
 local fn,err=compiler(source)
-if not fn then error("PSICOSENATICO V0.7: erro de compilação: "..tostring(err)) end
+if not fn then error("PSICOSENATICO V0.8: erro de compilação: "..tostring(err)) end
 return fn()
