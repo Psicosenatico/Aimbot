@@ -1,6 +1,6 @@
--- PSICOSENATICO • WEAPON RESEARCH V2.3.10
--- Base íntegra V2.3.9 + sync relativo NoClip por sessão, HP por cadência e resumo reconciliado.
-local SOURCE_COMMIT="8c9213ad6d24653217d7be189b628553736e3b73"
+-- PSICOSENATICO • WEAPON RESEARCH V2.3.11
+-- Base íntegra V2.3.10 + barreira efetiva por segmento, direção/Team e export físico corrigido.
+local SOURCE_COMMIT="63a384f11fdc52856230ebae2b0fd1532d9aa862"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/weapon_research_parts/"
 local PARTS={
     "V2_3_3.part1a",
@@ -23,28 +23,29 @@ local PARTS={
     "V2_3_9.noclip_sync_target_context.patch",
     "V2_3_9.sync_index_guard.patch",
     "V2_3_10.relative_sync_dynamic_hp.patch",
-    "V2_3_10.reconciled_sync_summary.patch"
+    "V2_3_10.reconciled_sync_summary.patch",
+    "V2_3_11.barrier_segment_direction_team_export.patch"
 }
 local chunks={}
 for i,name in ipairs(PARTS) do
     local ok,body=pcall(function() return game:HttpGet(BASE..name) end)
     if not ok or type(body)~="string" or #body==0 then
-        error("PSICOSENATICO V2.3.10: falha ao carregar parte "..tostring(i).." ("..name.."): "..tostring(body))
+        error("PSICOSENATICO V2.3.11: falha ao carregar parte "..tostring(i).." ("..name.."): "..tostring(body))
     end
     chunks[i]=body
 end
 local source=table.concat(chunks)
-if not string.find(source,'C.VERSION="V2.3.10"',1,true) then
-    error("PSICOSENATICO V2.3.10: patch final de sync relativo/HP não encontrado")
+if not string.find(source,'C.VERSION="V2.3.11"',1,true) then
+    error("PSICOSENATICO V2.3.11: patch final não encontrado")
 end
-if not string.find(source,'NOCLIP_ANCHOR_MAX_DT',1,true) then
-    error("PSICOSENATICO V2.3.10: âncora temporal do sync não encontrada")
+if not string.find(source,'effectiveBarrierRuleV2311',1,true) then
+    error("PSICOSENATICO V2.3.11: regra de barreira efetiva ausente")
 end
-if not string.find(source,'reconciledAtExport',1,true) then
-    error("PSICOSENATICO V2.3.10: resumo reconciliado não encontrado")
+if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_11_',1,true) then
+    error("PSICOSENATICO V2.3.11: export físico V2_3_11 ausente")
 end
 local compiler=loadstring
-if type(compiler)~="function" then error("PSICOSENATICO V2.3.10: loadstring indisponível neste ambiente") end
+if type(compiler)~="function" then error("PSICOSENATICO V2.3.11: loadstring indisponível neste ambiente") end
 local fn,err=compiler(source)
-if not fn then error("PSICOSENATICO V2.3.10: erro de compilação: "..tostring(err)) end
+if not fn then error("PSICOSENATICO V2.3.11: erro de compilação: "..tostring(err)) end
 return fn()
