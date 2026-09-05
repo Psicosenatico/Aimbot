@@ -1,0 +1,6 @@
+-- V0.4 patch: keep the validated candidate/protection classifier and add explicit-filter diagnostics.
+C.VERSION="V0.4"
+S.filteredCandidateBypassToCharacter=0
+S.filteredStoppedByProtected=0
+S.filteredNoHit=0
+S.filteredRayErrors=0
