@@ -1,0 +1,232 @@
+local Players=game:GetService("Players")
+local HttpService=game:GetService("HttpService")
+local UIS=game:GetService("UserInputService")
+local CoreGui=game:GetService("CoreGui")
+local Workspace=game:GetService("Workspace")
+local RunService=game:GetService("RunService")
+local LP=Players.LocalPlayer or Players.PlayerAdded:Wait()
+
+local C={
+ VERSION="V0.3", GUI="PsicosenaticoBulletNoclipTest_V0_3",
+ KEY="__PSICO_BULLET_NOCLIP_TEST_V0_3", THIN=5, HEIGHT=5, SPAN=8,
+}
+local ENV=_G
+if typeof(getgenv)=="function" then
+ local ok,e=pcall(getgenv)
+ if ok and type(e)=="table" then ENV=e end
+end
+for _,k in ipairs({"__PSICO_BULLET_NOCLIP_TEST_V0_1","__PSICO_BULLET_NOCLIP_TEST_V0_2",C.KEY}) do
+ if type(ENV[k])=="table" and type(ENV[k].cleanup)=="function" then pcall(ENV[k].cleanup) end
+end
+
+local S={
+ enabled=false,closed=false,started=os.time(),runId="",events={},shots={},candidates={},order={},
+ counts={NAMED_WALL=0,SHAPE_WALL=0},conns={},toolConns={},errors=0,last="Nenhuma leitura ainda.",
+ applyVerified=0,applyVerifyFailed=0,unexpectedQueryableCandidates=0,unregisteredWallHits=0,
+ queryReverts=0,registeredHitQueryable=0,persistenceSamples=0,
+}
+local updateUI=function() end
+local function full(o)
+ local ok,v=pcall(function() return o:GetFullName() end)
+ return ok and tostring(v) or tostring(o and o.Name or "?")
+end
+local function event(t,d)
+ S.events[#S.events+1]={index=#S.events+1,unix=os.time(),time=os.clock(),type=t,data=d or {}}
+end
+local function err(w,e)
+ S.errors+=1
+ event("ERROR",{where=w,message=tostring(e)})
+end
+local function map() return Workspace:FindFirstChild("Map") end
+local function tycoons() return Workspace:FindFirstChild("Tycoons") end
+local function runId()
+ local ok,v=pcall(function() return HttpService:GenerateGUID(false) end)
+ return ok and v or tostring(os.time())
+end
+local function safeDebugId(o)
+ if not o then return nil end
+ local ok,v=pcall(function() return o:GetDebugId(0) end)
+ if ok then return tostring(v) end
+ return nil
+end
+local function readPartState(p)
+ local out={alive=false,path=nil,name=nil,class=nil,debugId=nil,canQueryReadOk=false,canQuery=nil,canCollide=nil,canTouch=nil,collisionGroup=nil,material=nil,size=nil}
+ if not p then return out end
+ out.alive=p.Parent~=nil
+ out.path=full(p)
+ out.name=p.Name
+ out.class=p.ClassName
+ out.debugId=safeDebugId(p)
+ local okQ,q=pcall(function() return p.CanQuery end)
+ out.canQueryReadOk=okQ
+ if okQ then out.canQuery=q end
+ local okC,c=pcall(function() return p.CanCollide end); if okC then out.canCollide=c end
+ local okT,t=pcall(function() return p.CanTouch end); if okT then out.canTouch=t end
+ local okG,g=pcall(function() return p.CollisionGroup end); if okG then out.collisionGroup=tostring(g) end
+ local okM,m=pcall(function() return p.Material end); if okM then out.material=tostring(m) end
+ local okS,s=pcall(function() return p.Size end); if okS then out.size={s.X,s.Y,s.Z} end
+ return out
+end
+S.runId=runId()
+
+local function explicitBlock(p)
+ local cur=p
+ for _=1,10 do
+  if not cur or cur==Workspace then break end
+  local ok,v=pcall(function() return cur:GetAttribute("BulletsCannotPierce") end)
+  if ok and v==true then return true end
+  if string.lower(cur.Name)=="lasergate" then return true end
+  cur=cur.Parent
+ end
+ return false
+end
+local function protectedMap(p)
+ if explicitBlock(p) then return true,"LASERGATE_OR_EXPLICIT" end
+ local t=tycoons()
+ if t and p:IsDescendantOf(t) then return true,"TYCOON_BASE" end
+ local m=map()
+ local combat=m and m:FindFirstChild("CombatObstacles")
+ if combat and p:IsDescendantOf(combat) then return true,"COMBAT_OBSTACLE" end
+ local q=string.lower(full(p))
+ for _,w in ipairs({"ground","mountain","terrainpart","teamcolors","teamcolor","spawn"}) do
+  if string.find(q,w,1,true) then return true,"PROTECTED_"..string.upper(w) end
+ end
+ return false,nil
+end
+local function hasWallName(p,m)
+ local cur=p
+ while cur and cur~=m do
+  if string.find(string.lower(cur.Name),"wall",1,true) then return true,full(cur) end
+  cur=cur.Parent
+ end
+ return false,nil
+end
+local function shapeCandidate(p)
+ local s=p.Size
+ local x,y,z=math.abs(s.X),math.abs(s.Y),math.abs(s.Z)
+ local thin=math.min(x,z)
+ local span=math.max(x,z)
+ local ok=(y>=C.HEIGHT and thin<=C.THIN and span>=C.SPAN)
+ local floorLike=(y<=3 and span>=10 and thin>=6)
+ return ok,{size={x,y,z},thin=thin,span=span,height=y,profile=ok and "VERTICAL_THIN_PANEL_V233" or (floorLike and "FLOOR_LIKE" or "GENERIC")}
+end
+local function classify(p)
+ if not p or not p:IsA("BasePart") then return nil end
+ local m=map()
+ if not m or not p:IsDescendantOf(m) then return nil end
+ local prot,why=protectedMap(p)
+ if prot then return nil,why end
+ local named,marker=hasWallName(p,m)
+ if named then
+  local _,shape=shapeCandidate(p)
+  return {kind="NAMED_WALL",reason="nome/caminho contém Wall",marker=marker,shape=shape}
+ end
+ local ok,shape=shapeCandidate(p)
+ if ok then return {kind="SHAPE_WALL",reason="painel vertical fino",marker=full(p),shape=shape} end
+ return nil,"MAP_GENERIC_REVIEW"
+end
+
+local function persistenceSample(p,meta,label)
+ if S.closed or not p or not p.Parent then return end
+ local state=readPartState(p)
+ S.persistenceSamples+=1
+ meta.persistence=meta.persistence or {}
+ local sample={label=label,unix=os.time(),time=os.clock(),sameInstance=true,state=state}
+ meta.persistence[#meta.persistence+1]=sample
+ if S.enabled and meta.applied and state.canQueryReadOk and state.canQuery~=false then
+  if not meta.revertedObserved then
+   meta.revertedObserved=true
+   S.queryReverts+=1
+  end
+  event("CANQUERY_REVERTED",{path=meta.path,kind=meta.kind,label=label,state=state})
+ end
+end
+local function schedulePersistence(p,meta)
+ task.defer(function()
+  if S.closed then return end
+  local ok,e=pcall(function() RunService.Heartbeat:Wait() end)
+  if not ok then err("persistence_next_frame",e); return end
+  persistenceSample(p,meta,"NEXT_FRAME")
+ end)
+ task.delay(0.05,function() if not S.closed then persistenceSample(p,meta,"PLUS_0_05S") end end)
+ task.delay(0.25,function() if not S.closed then persistenceSample(p,meta,"PLUS_0_25S") end end)
+end
+local function apply(p,meta)
+ if not p or not p.Parent then return false end
+ local before=readPartState(p)
+ local ok,e=pcall(function() p.CanQuery=false end)
+ if not ok then err("apply",e); return false end
+ local after=readPartState(p)
+ meta.lastApplyBefore=before
+ meta.lastApplyAfter=after
+ meta.applied=after.canQueryReadOk and after.canQuery==false
+ meta.applyVerified=meta.applied
+ if meta.applied then
+  S.applyVerified+=1
+  persistenceSample(p,meta,"IMMEDIATE")
+  schedulePersistence(p,meta)
+ else
+  S.applyVerifyFailed+=1
+  event("APPLY_VERIFY_FAILED",{path=meta.path,before=before,after=after})
+ end
+ return meta.applied
+end
+local function restore(p,meta)
+ if not p or not p.Parent then return false end
+ local before=readPartState(p)
+ local ok,e=pcall(function() p.CanQuery=meta.originalCanQuery end)
+ if not ok then err("restore",e); return false end
+ local after=readPartState(p)
+ meta.lastRestoreBefore=before
+ meta.lastRestoreAfter=after
+ meta.applied=false
+ return true
+end
+local function register(p,info)
+ if S.closed or S.candidates[p] then return false end
+ local baseline=readPartState(p)
+ if not baseline.canQueryReadOk then return false end
+ local meta={
+  path=full(p),name=p.Name,class=p.ClassName,kind=info.kind,reason=info.reason,marker=info.marker,shape=info.shape,
+  originalCanQuery=baseline.canQuery,baselineState=baseline,debugId=baseline.debugId,applied=false,persistence={},revertedObserved=false,
+ }
+ S.candidates[p]=meta
+ S.order[#S.order+1]=p
+ S.counts[info.kind]=(S.counts[info.kind] or 0)+1
+ if S.enabled then apply(p,meta) end
+ event("CANDIDATE",{path=meta.path,kind=meta.kind,originalCanQuery=baseline.canQuery,baselineState=baseline})
+ return true
+end
+local function scan(reason)
+ local m=map()
+ if not m then event("SCAN",{reason=reason,map=false}); return 0 end
+ local n=0
+ for _,o in ipairs(m:GetDescendants()) do
+  if o:IsA("BasePart") then
+   local info=classify(o)
+   if info and register(o,info) then n+=1 end
+  end
+ end
+ event("SCAN",{reason=reason,added=n,total=#S.order,named=S.counts.NAMED_WALL,shape=S.counts.SHAPE_WALL})
+ return n
+end
+local function setEnabled(v,reason)
+ if S.closed or S.enabled==v then return end
+ if v then
+  scan("ENABLE_REFRESH")
+  S.enabled=true
+  local n=0
+  for p,m in pairs(S.candidates) do
+   if p.Parent and not m.applied and apply(p,m) then n+=1 end
+  end
+  event("NOCLIP_ON",{reason=reason,changed=n,total=#S.order})
+ else
+  S.enabled=false
+  local n=0
+  for p,m in pairs(S.candidates) do
+   if p.Parent and m.applied and restore(p,m) then n+=1 end
+  end
+  event("NOCLIP_OFF",{reason=reason,changed=n,total=#S.order})
+ end
+end
+
