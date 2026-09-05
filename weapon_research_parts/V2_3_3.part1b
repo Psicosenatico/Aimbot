@@ -1,0 +1,250 @@
+if scope=="BASE_PLAYER" then return "PROTEGIDO_NAO_ATRAVESSAR" end
+if scope=="LASERGATE_PROTEGIDO" then return "PROTEGIDO_NAO_ATRAVESSAR" end
+if scope=="MAPA" then return "MAPA_REQUER_SUBCLASSIFICACAO" end
+if scope=="PERSONAGEM" then return "ALVO" end
+return "REVISAR_NAO_ATRAVESSAR_POR_PADRAO"
+end
+local function lowerText(v)
+return string.lower(tostring(v or ""))
+end
+local function containsPlain(text,needle)
+return string.find(lowerText(text),lowerText(needle),1,true)~=nil
+end
+local function mapShapeProfile(inst)
+local size=prop(inst,"Size")
+if typeof(size)~="Vector3" then
+return {profile="SEM_SIZE",wallShapeCandidate=false,floorLike=false}
+end
+local x,y,z=math.abs(size.X),math.abs(size.Y),math.abs(size.Z)
+local horizontalMin=math.min(x,z)
+local horizontalMax=math.max(x,z)
+local wallShape=(y>=5 and horizontalMin<=5 and horizontalMax>=8)
+local floorLike=(y<=3 and horizontalMax>=10 and horizontalMin>=6)
+return {
+profile=wallShape and "PAINEL_VERTICAL_PROVAVEL" or (floorLike and "PISO_PLATAFORMA_PROVAVEL" or "FORMA_GENERICA"),
+wallShapeCandidate=wallShape,
+floorLike=floorLike,
+size={x,y,z},
+thinAxis=(x<=y and x<=z) and "X" or ((y<=x and y<=z) and "Y" or "Z")
+}
+end
+local function mapSubtypeInfo(inst)
+local path=lowerText(inst and full(inst) or "")
+local name=lowerText(inst and inst.Name or "")
+local model=inst and inst:FindFirstAncestorOfClass("Model") or nil
+local modelName=lowerText(model and model.Name or "")
+local shape=mapShapeProfile(inst)
+if containsPlain(path,"ground") or containsPlain(path,"mountain") or containsPlain(path,"terrainpart") then
+return "MAP_TERRAIN_PROTECTED","caminho/nome indica Ground, Mountain ou TerrainPart",shape
+end
+if containsPlain(path,"teamcolors") or containsPlain(path,"teamcolor") or containsPlain(path,"spawn") then
+return "MAP_GAMEPLAY_PROTECTED","objeto do mapa associado a team colors/spawn/lógica de jogo",shape
+end
+if containsPlain(path,"wall") or containsPlain(name,"wall") or containsPlain(modelName,"wall") then
+return "MAP_WALL_NAMED_CANDIDATE","nome/caminho contém Wall",shape
+end
+if containsPlain(path,"combatobstacles") then
+return "MAP_COMBAT_OBSTACLE_REVIEW","objeto descendente de Workspace.Map.CombatObstacles",shape
+end
+if shape.wallShapeCandidate then
+return "MAP_WALL_SHAPE_CANDIDATE","forma sugere painel vertical fino; requer validação",shape
+end
+if shape.floorLike then
+return "MAP_GENERIC_REVIEW","forma sugere piso/plataforma; não liberar por padrão",shape
+end
+return "MAP_GENERIC_REVIEW","objeto de Workspace.Map sem marcador forte de parede",shape
+end
+local function mapPenetrationPolicy(subtype)
+if subtype=="MAP_WALL_NAMED_CANDIDATE" then return "CANDIDATO_PAREDE_MAPA_REQUER_TESTE" end
+if subtype=="MAP_WALL_SHAPE_CANDIDATE" then return "CANDIDATO_PAREDE_POR_FORMA_REQUER_TESTE" end
+if subtype=="MAP_COMBAT_OBSTACLE_REVIEW" then return "CANDIDATO_OBSTACULO_REQUER_TESTE" end
+if subtype=="MAP_TERRAIN_PROTECTED" then return "PROTEGIDO_NAO_ATRAVESSAR" end
+if subtype=="MAP_GAMEPLAY_PROTECTED" then return "PROTEGIDO_NAO_ATRAVESSAR" end
+return "REVISAR_NAO_ATRAVESSAR_POR_PADRAO"
+end
+local function classify(inst,hasHumanoid,explicit)
+if not inst then return "SEM_IMPACTO",0,{} end
+if hasHumanoid then return "PERSONAGEM",0,{"modelo possui Humanoid"} end
+if explicit and explicit.found then
+return "BLOQUEIO_EXPLICITO",100,{"BulletsCannotPierce=true em "..tostring(explicit.path)}
+end
+local score,reasons=0,{}
+local hit,w=hasLimitWord(inst.Name.." "..full(inst))
+if hit then
+score+=5
+reasons[#reasons+1]="nome/caminho sugere limite: "..w
+end
+local tr=tonumber(prop(inst,"Transparency"))
+local cq=prop(inst,"CanQuery")
+local cc=prop(inst,"CanCollide")
+local size=prop(inst,"Size")
+if tr and tr>=0.95 then
+score+=3
+reasons[#reasons+1]="quase/invisível"
+end
+if cq==true and cc==false then
+score+=1
+reasons[#reasons+1]="CanQuery=true e CanCollide=false"
+end
+if typeof(size)=="Vector3" then
+local m=math.max(size.X,size.Y,size.Z)
+if m>=2000 then
+score+=3
+reasons[#reasons+1]="dimensão muito grande"
+elseif m>=500 then
+score+=1
+reasons[#reasons+1]="dimensão grande"
+end
+end
+local attrs,tags={},{}
+pcall(function() attrs=inst:GetAttributes() end)
+pcall(function() tags=CollectionService:GetTags(inst) end)
+for k,v in pairs(attrs) do
+local ok2,key=hasLimitWord(tostring(k).."="..tostring(v))
+if ok2 then
+score+=5
+reasons[#reasons+1]="atributo sugere limite: "..key
+break
+end
+end
+for _,tag in ipairs(tags) do
+local ok2=hasLimitWord(tag)
+if ok2 then
+score+=5
+reasons[#reasons+1]="tag sugere limite: "..tostring(tag)
+break
+end
+end
+return score>=5 and "POSSIVEL_LIMITE_MAPA" or "GEOMETRIA_MAPA",score,reasons
+end
+local function describe(result,origin)
+if not result then return nil end
+local inst=result.Instance
+local model=inst and inst:FindFirstAncestorOfClass("Model") or nil
+local hum=model and model:FindFirstChildOfClass("Humanoid") or nil
+local explicit=explicitBlockInfo(inst)
+local class,score,reasons=classify(inst,hum~=nil,explicit)
+local scope,scopeReason=hierarchyScope(inst,explicit)
+if hum then scope,scopeReason="PERSONAGEM","modelo possui Humanoid" end
+local tycoonRoot=(scope=="BASE_PLAYER" or scope=="LASERGATE_PROTEGIDO") and tycoonRootInfo(inst) or nil
+local mapSubtype,mapSubtypeReason,mapShape=nil,nil,nil
+local policy=penetrationPolicyForScope(scope)
+if scope=="MAPA" then
+mapSubtype,mapSubtypeReason,mapShape=mapSubtypeInfo(inst)
+policy=mapPenetrationPolicy(mapSubtype)
+end
+local size=prop(inst,"Size")
+local attrs,tags={},{}
+pcall(function() attrs=inst:GetAttributes() end)
+pcall(function() tags=CollectionService:GetTags(inst) end)
+return {
+instance=inst and full(inst) or nil,
+instanceName=inst and inst.Name or nil,
+instanceClass=inst and inst.ClassName or nil,
+model=model and full(model) or nil,
+modelName=model and model.Name or nil,
+hasHumanoid=hum~=nil,
+material=tostring(result.Material),
+distance=(result.Position-origin).Magnitude,
+position={result.Position.X,result.Position.Y,result.Position.Z},
+normal={result.Normal.X,result.Normal.Y,result.Normal.Z},
+classification=class,
+structureScope=scope,
+structureScopeReason=scopeReason,
+mapSubtype=mapSubtype,
+mapSubtypeReason=mapSubtypeReason,
+mapShapeProfile=mapShape,
+penetrationPolicy=policy,
+baseRootPath=tycoonRoot and tycoonRoot.path or nil,
+baseRootName=tycoonRoot and tycoonRoot.name or nil,
+boundaryScore=score,
+boundaryReasons=reasons,
+explicitProjectileBlock=explicit.found==true,
+explicitBlockPath=explicit.path,
+explicitBlockName=explicit.name,
+explicitBlockClass=explicit.class,
+explicitBlockAncestorDepth=explicit.ancestorDepth,
+explicitBlockRelation=explicit.relation,
+transparency=prop(inst,"Transparency"),
+canCollide=prop(inst,"CanCollide"),
+canQuery=prop(inst,"CanQuery"),
+canTouch=prop(inst,"CanTouch"),
+anchored=prop(inst,"Anchored"),
+collisionGroup=prop(inst,"CollisionGroup"),
+size=typeof(size)=="Vector3" and {size.X,size.Y,size.Z} or nil,
+tags=tags,
+attributes=attrs
+}
+end
+local function assessment(ref)
+if not ref or not ref.ok then return "LEITURA_INDISPONIVEL" end
+if not ref.firstHit then return "CAMINHO_LIVRE" end
+if ref.firstHit.classification=="POSSIVEL_LIMITE_MAPA" then return "POSSIVEL_LIMITE_MAPA" end
+if ref.firstHit.classification=="BLOQUEIO_EXPLICITO" then return "BLOQUEIO_EXPLICITO" end
+if ref.firstHit.classification=="PERSONAGEM" then return "PERSONAGEM" end
+return "GEOMETRIA_MAPA"
+end
+local function referenceRay(tool)
+local cam=Workspace.CurrentCamera
+if not cam then return {ok=false,reason="SEM_CAMERA"} end
+local vp=cam.ViewportSize
+local ray=cam:ViewportPointToRay(vp.X/2,vp.Y/2)
+local range=tonumber(attr(tool or S.ActiveTool,"range")) or 2000
+local unit=ray.Direction.Unit
+local dir=unit*range
+local excluded={cam}
+if LP.Character then excluded[#excluded+1]=LP.Character end
+local out={
+ok=true,
+hit=false,
+origin={ray.Origin.X,ray.Origin.Y,ray.Origin.Z},
+direction={dir.X,dir.Y,dir.Z},
+range=range,
+firstHit=nil,
+nextHit=nil,
+multiHitChain={},
+hitChainCount=0,
+firstCharacterIndex=nil,
+firstExplicitBlockIndex=nil,
+explicitBlockCount=0,
+explicitBlocks={},
+chainStopReason=nil
+}
+local currentOrigin=ray.Origin
+local remaining=range
+local targetHumanoid=nil
+local targetModel=nil
+for index=1,C.MAX_HIT_CHAIN do
+if remaining<=C.RAY_EPSILON then
+out.chainStopReason="ALCANCE_ESGOTADO"
+break
+end
+local params=RaycastParams.new()
+params.FilterType=Enum.RaycastFilterType.Exclude
+params.FilterDescendantsInstances=excluded
+params.IgnoreWater=false
+local ok,result=pcall(function()
+return Workspace:Raycast(currentOrigin,unit*remaining,params)
+end)
+if not ok then
+if index==1 then
+return {ok=false,reason=tostring(result),range=range}
+end
+out.chainStopReason="ERRO_RAYCAST_"..tostring(index)
+break
+end
+if not result then
+out.chainStopReason="CAMINHO_LIVRE_APOS_"..tostring(index-1).."_IMPACTOS"
+break
+end
+local item=describe(result,currentOrigin)
+item.chainIndex=index
+item.segmentDistance=(result.Position-currentOrigin).Magnitude
+item.totalDistance=(result.Position-ray.Origin).Magnitude
+out.multiHitChain[#out.multiHitChain+1]=item
+out.hit=true
+if index==1 then out.firstHit=item end
+if index==2 then out.nextHit=item end
+if item.explicitProjectileBlock then
+out.explicitBlockCount+=1
+if not out.firstExplicitBlockIndex then out.firstExplicitBlockIndex=index end
