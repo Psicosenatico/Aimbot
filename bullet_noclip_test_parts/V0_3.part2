@@ -1,0 +1,112 @@
+local function humFrom(i)
+ local cur=i
+ for _=1,6 do
+  if not cur then break end
+  if cur:IsA("Model") then
+   local h=cur:FindFirstChildOfClass("Humanoid")
+   if h then return h,cur end
+  end
+  cur=cur.Parent
+ end
+end
+local function weaponInfo(tool)
+ local a={}
+ for _,k in ipairs({"_ammo","range","rateOfFire","fireMode","damage","projectileType","rayRadius","raysPerShot","spread"}) do
+  local ok,v=pcall(function() return tool:GetAttribute(k) end)
+  if ok and v~=nil then a[k]=v end
+ end
+ return {name=tool.Name,path=full(tool),attributes=a}
+end
+local function shotRead(tool,delta)
+ if S.closed then return end
+ local cam=Workspace.CurrentCamera
+ if not cam then return end
+ local range=tool:GetAttribute("range")
+ if type(range)~="number" or range<=0 then range=1200 end
+ local origin=cam.CFrame.Position
+ local dir=cam.CFrame.LookVector*range
+ local rp=RaycastParams.new()
+ rp.FilterType=Enum.RaycastFilterType.Exclude
+ rp.IgnoreWater=true
+ rp.FilterDescendantsInstances=LP.Character and {LP.Character} or {}
+ local hit
+ local ok,e=pcall(function() hit=Workspace:Raycast(origin,dir,rp) end)
+ if not ok then err("shotRay",e) end
+ local h,m=nil,nil
+ if hit then h,m=humFrom(hit.Instance) end
+ local hitDiag=nil
+ if hit and hit.Instance and hit.Instance:IsA("BasePart") then
+  local info,why=classify(hit.Instance)
+  local reg=S.candidates[hit.Instance]
+  local state=readPartState(hit.Instance)
+  local currentCanQuery=nil
+  if state.canQueryReadOk then currentCanQuery=state.canQuery end
+  hitDiag={
+   wouldBeCandidate=info~=nil,wouldKind=info and info.kind or nil,classifyReason=info and info.reason or why,
+   registered=reg~=nil,registeredKind=reg and reg.kind or nil,currentCanQuery=currentCanQuery,state=state,
+   sameRegisteredInstance=reg~=nil,registeredDebugId=reg and reg.debugId or nil,
+  }
+  if S.enabled and info and not reg then
+   S.unregisteredWallHits+=1
+   event("UNREGISTERED_WALL_HIT",{path=full(hit.Instance),kind=info.kind,shape=info.shape,state=state})
+  elseif S.enabled and reg and state.canQueryReadOk and state.canQuery==false then
+   S.unexpectedQueryableCandidates+=1
+   event("UNEXPECTED_QUERY_HIT",{path=full(hit.Instance),kind=reg.kind,state=state})
+  elseif S.enabled and reg and state.canQueryReadOk and state.canQuery==true then
+   S.registeredHitQueryable+=1
+   if reg.applied and not reg.revertedObserved then
+    reg.revertedObserved=true
+    S.queryReverts+=1
+   end
+   event("REGISTERED_WALL_HIT_QUERYABLE",{path=full(hit.Instance),kind=reg.kind,state=state})
+  end
+ end
+ local rec={
+  index=#S.shots+1,unix=os.time(),time=os.clock(),enabled=S.enabled,ammoDelta=delta,weapon=weaponInfo(tool),candidateTotal=#S.order,
+  firstQueryableHit=hit and {path=full(hit.Instance),name=hit.Instance.Name,class=hit.Instance.ClassName,material=tostring(hit.Material),distance=(hit.Position-origin).Magnitude,humanoid=h~=nil,humanoidModel=m and full(m) or nil} or nil,
+  hitDiagnostic=hitDiag,
+ }
+ S.shots[#S.shots+1]=rec
+ if hitDiag and hitDiag.wouldBeCandidate then
+  local qText=hitDiag.currentCanQuery==false and "CQ=false" or (hitDiag.currentCanQuery==true and "CQ=true" or "CQ=?")
+  S.last=(S.enabled and "ATIVO • " or "OFF • ")..(hitDiag.registered and "parede registrada" or "parede NÃO registrada").." • "..qText.." • "..hit.Instance.Name
+ else
+  S.last=hit and ((S.enabled and "ATIVO • pós-parede: " or "OFF • primeiro hit: ")..hit.Instance.Name) or (S.enabled and "ATIVO • caminho livre" or "OFF • caminho livre")
+ end
+ event("SHOT",{shotIndex=rec.index,enabled=S.enabled,ammoDelta=delta,firstQueryableHit=rec.firstQueryableHit,hitDiagnostic=hitDiag})
+ updateUI()
+end
+local function unwatch(tool)
+ local list=S.toolConns[tool]
+ if not list then return end
+ for _,c in ipairs(list) do pcall(function() c:Disconnect() end) end
+ S.toolConns[tool]=nil
+end
+local function watch(tool)
+ if S.closed or not tool or not tool:IsA("Tool") or S.toolConns[tool] then return end
+ local ammo=tool:GetAttribute("_ammo")
+ local rof=tool:GetAttribute("rateOfFire")
+ if ammo==nil and rof==nil then return end
+ local last=ammo
+ local list={}
+ S.toolConns[tool]=list
+ list[#list+1]=tool:GetAttributeChangedSignal("_ammo"):Connect(function()
+  local cur=tool:GetAttribute("_ammo")
+  if type(cur)=="number" and type(last)=="number" and cur<last then shotRead(tool,last-cur) end
+  last=cur
+ end)
+ list[#list+1]=tool.AncestryChanged:Connect(function(_,par) if par==nil then unwatch(tool) end end)
+ event("WEAPON_WATCH",{path=full(tool),ammo=ammo,rateOfFire=rof})
+end
+local function scanWeapons(reason)
+ local n=0
+ local b=LP:FindFirstChildOfClass("Backpack")
+ if b then
+  for _,x in ipairs(b:GetChildren()) do if x:IsA("Tool") then watch(x); n+=1 end end
+ end
+ if LP.Character then
+  for _,x in ipairs(LP.Character:GetChildren()) do if x:IsA("Tool") then watch(x); n+=1 end end
+ end
+ event("WEAPON_SCAN",{reason=reason,seen=n})
+end
+
