@@ -1,0 +1,113 @@
+-- V0.5 RESPECT-CAN-COLLIDE DIAGNOSTIC PATCH
+-- Read-only diagnostic: preserves V0.4 behavior and adds a same-shot ray with
+-- RaycastParams.RespectCanCollide=true. It does not hook or rewrite game calls.
+
+C.VERSION="V0.5"
+S.respectCanCollideCandidateHits=0
+S.respectCanCollideCharacterHits=0
+S.respectCanCollideProtectedHits=0
+S.respectCanCollideOtherHits=0
+S.respectCanCollideNoHit=0
+S.respectCanCollideErrors=0
+
+local function respectRayForShot(tool)
+ local cam=Workspace.CurrentCamera
+ if not cam then return nil,false,"SEM_CAMERA" end
+ local range=tool:GetAttribute("range")
+ if type(range)~="number" or range<=0 then range=1200 end
+ local origin=cam.CFrame.Position
+ local dir=cam.CFrame.LookVector*range
+ local rp=RaycastParams.new()
+ rp.FilterType=Enum.RaycastFilterType.Exclude
+ rp.IgnoreWater=true
+ rp.RespectCanCollide=true
+ rp.FilterDescendantsInstances=LP.Character and {LP.Character} or {}
+ local hit=nil
+ local ok,e=pcall(function() hit=Workspace:Raycast(origin,dir,rp) end)
+ if not ok then return nil,false,tostring(e) end
+ return hitRecord(hit,origin),true,nil
+end
+
+local _shotReadV04=shotRead
+shotRead=function(tool,delta)
+ _shotReadV04(tool,delta)
+ local rec=S.shots[#S.shots]
+ if not rec then return end
+ local info,ok,e=respectRayForShot(tool)
+ rec.respectCanCollideRayOk=ok
+ rec.respectCanCollideRayHit=info
+ rec.respectCanCollideRayError=e
+ if not ok then
+  S.respectCanCollideErrors+=1
+  event("RESPECT_CAN_COLLIDE_ERROR",{shotIndex=rec.index,error=e})
+  updateUI()
+  return
+ end
+ if info then
+  local candidateMeta=nil
+  for p,m in pairs(S.candidates) do
+   if p and p.Parent and m and m.path==info.path then candidateMeta=m;break end
+  end
+  if candidateMeta then
+   S.respectCanCollideCandidateHits+=1
+   rec.respectCanCollideHitCandidate=true
+   rec.respectCanCollideCandidateKind=candidateMeta.kind
+   event("RESPECT_CAN_COLLIDE_HIT_CANDIDATE",{shotIndex=rec.index,hit=info,kind=candidateMeta.kind})
+  elseif info.humanoid then
+   S.respectCanCollideCharacterHits+=1
+  elseif info.protected then
+   S.respectCanCollideProtectedHits+=1
+  else
+   S.respectCanCollideOtherHits+=1
+  end
+ else
+  S.respectCanCollideNoHit+=1
+ end
+ updateUI()
+end
+
+local _payloadV04=payload
+payload=function()
+ local t=_payloadV04()
+ t.version=C.VERSION
+ t.policy=t.policy or {}
+ t.policy.mode="MAP_WALL_ONLY_DIAGNOSTIC_V05"
+ t.policy.respectCanCollideProbe="Mesmo tiro, RaycastParams.RespectCanCollide=true, sem alterar CanCollide e sem interceptar chamadas internas do jogo."
+ t.policy.diagnosticNote="V0.5 preserva baseline normal + candidateExcludedRay e adiciona respectCanCollideRay. Se a candidata reaparecer apenas com RespectCanCollide=true, a diferença CanQuery x CanCollide passa a ser a hipótese prioritária."
+ t.summary=t.summary or {}
+ t.summary.respectCanCollideCandidateHits=S.respectCanCollideCandidateHits
+ t.summary.respectCanCollideCharacterHits=S.respectCanCollideCharacterHits
+ t.summary.respectCanCollideProtectedHits=S.respectCanCollideProtectedHits
+ t.summary.respectCanCollideOtherHits=S.respectCanCollideOtherHits
+ t.summary.respectCanCollideNoHit=S.respectCanCollideNoHit
+ t.summary.respectCanCollideErrors=S.respectCanCollideErrors
+ return t
+end
+
+save=function()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+ if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_5_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then
+  local a,b=pcall(writefile,name,json)
+  if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+ end
+ if typeof(setclipboard)=="function" then
+  local a,b=pcall(setclipboard,json)
+  if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+ end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
+
+local _updateUIV04=updateUI
+updateUI=function()
+ _updateUIV04()
+ Reader.Text=string.gsub(Reader.Text,"Leitor V0%.4","Leitor V0.5")
+ Reader.Text=Reader.Text..string.format("\nRespectCanCollide → candidata: %d • alvo: %d • protegido: %d\nErros RCC: %d",S.respectCanCollideCandidateHits,S.respectCanCollideCharacterHits,S.respectCanCollideProtectedHits,S.respectCanCollideErrors)
+ ver.Text=C.VERSION
+end
+
+local rtV05=ENV[C.KEY]
+if type(rtV05)=="table" then rtV05.version=C.VERSION end
+event("V05_READY",{respectCanCollideProbe=true,internalCallHook=false})
+pcall(updateUI)
