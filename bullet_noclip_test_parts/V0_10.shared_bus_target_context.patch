@@ -1,0 +1,238 @@
+-- V0.10 SHARED SHOT BUS + TARGET PROTECTION CONTEXT
+-- Preserves V0.8/V0.9 mechanics. Adds a shared runtime bus so Weapon Research can
+-- consume the exact client-side result measured by Bullet NoClip instead of inferring it
+-- from an independent ray. Also snapshots target protection/team context observationally.
+
+C.VERSION="V0.10"
+local BUS_KEY_V010="__PSICO_BULLET_RESEARCH_SHARED_BUS_V1"
+local busV010=ENV[BUS_KEY_V010]
+if type(busV010)~="table" then
+ busV010={version="V1",records={},seq=0,maxRecords=420,createdUnix=os.time()}
+ ENV[BUS_KEY_V010]=busV010
+end
+busV010.version="V1"
+busV010.records=type(busV010.records)=="table" and busV010.records or {}
+busV010.maxRecords=420
+
+S.sharedBusWrites=0
+S.targetContextCaptured=0
+S.targetContextWithForceField=0
+S.targetContextPlayers=0
+S.targetContextBots=0
+S.targetContextUnknown=0
+S.targetContextErrors=0
+
+local CollectionServiceV010=game:GetService("CollectionService")
+
+local function attrsV010(o)
+ if not o then return nil end
+ local ok,v=pcall(function() return o:GetAttributes() end)
+ return ok and type(v)=="table" and v or nil
+end
+
+local function tagsV010(o)
+ if not o then return nil end
+ local ok,v=pcall(function() return CollectionServiceV010:GetTags(o) end)
+ return ok and type(v)=="table" and v or nil
+end
+
+local function modelByPathV010(path)
+ if type(path)~="string" or path=="" then return nil end
+ for _,plr in ipairs(Players:GetPlayers()) do
+  local ch=plr.Character
+  if ch and full(ch)==path then return ch,plr,"PLAYER" end
+ end
+ local soldiers=Workspace:FindFirstChild("Soldiers")
+ if soldiers then
+  for _,m in ipairs(soldiers:GetChildren()) do
+   if m:IsA("Model") and full(m)==path then return m,nil,"BOT_SOLDIER" end
+  end
+ end
+ for _,m in ipairs(Workspace:GetChildren()) do
+  if m:IsA("Model") and full(m)==path and m:FindFirstChildOfClass("Humanoid") then
+   return m,nil,"WORKSPACE_CHARACTER"
+  end
+ end
+ return nil,nil,"UNKNOWN"
+end
+
+local function localTeamV010()
+ local t=LP.Team
+ return {
+  name=t and t.Name or nil,
+  teamColor=t and tostring(t.TeamColor) or nil,
+  neutral=LP.Neutral,
+  attributes=attrsV010(LP),
+  tags=tagsV010(LP),
+ }
+end
+
+local function forceFieldsV010(model)
+ local out={}
+ if not model then return out end
+ for _,d in ipairs(model:GetDescendants()) do
+  if d:IsA("ForceField") then
+   out[#out+1]={path=full(d),name=d.Name,visible=pcall(function() return d.Visible end) and d.Visible or nil,attributes=attrsV010(d),tags=tagsV010(d)}
+  end
+ end
+ return out
+end
+
+local function barrierPartByDebugV010(barrier)
+ if not barrier then return nil end
+ local ids={}
+ if barrier.forceField and barrier.forceField.debugId then ids[tostring(barrier.forceField.debugId)]=true end
+ if barrier.smoothPlastic and barrier.smoothPlastic.debugId then ids[tostring(barrier.smoothPlastic.debugId)]=true end
+ for p,m in pairs(S.candidates) do
+  if p and p.Parent and m and ids[tostring(m.debugId)] then return p,m end
+ end
+ return nil,nil
+end
+
+local function barrierSideV010(barrier,targetModel)
+ local p=barrierPartByDebugV010(barrier)
+ local root=targetModel and (targetModel:FindFirstChild("HumanoidRootPart") or targetModel.PrimaryPart)
+ if not p or not root or not root:IsA("BasePart") then return nil end
+ local ok,res=pcall(function()
+  local localPos=p.CFrame:PointToObjectSpace(root.Position)
+  local s=p.Size
+  local thinAxis=math.abs(s.X)<=math.abs(s.Z) and "X" or "Z"
+  local signed=thinAxis=="X" and localPos.X or localPos.Z
+  local longCoord=thinAxis=="X" and localPos.Z or localPos.X
+  local thinSize=thinAxis=="X" and math.abs(s.X) or math.abs(s.Z)
+  local longSize=thinAxis=="X" and math.abs(s.Z) or math.abs(s.X)
+  return {
+   thinAxis=thinAxis,signedThinOffset=signed,side=signed>=0 and "POSITIVE" or "NEGATIVE",
+   absoluteThinOffset=math.abs(signed),insideThickness=math.abs(signed)<=thinSize*0.5+0.05,
+   insideLongSpan=math.abs(longCoord)<=longSize*0.5+0.05,
+   insideHeight=math.abs(localPos.Y)<=math.abs(s.Y)*0.5+0.05,
+   localPosition={localPos.X,localPos.Y,localPos.Z},
+   barrierSize={s.X,s.Y,s.Z},barrierDebugId=safeDebugId(p),barrierPath=full(p)
+  }
+ end)
+ return ok and res or nil
+end
+
+local function targetContextV010(rec)
+ local hit=rec and rec.diagnosticBaselineHit
+ local path=hit and hit.humanoidModel or nil
+ if not path then
+  local tr=rec and rec.wallTraversal
+  for _,b in ipairs((tr and tr.compositeBundles) or {}) do
+   local after=b.firstImpactAfterExit
+   if after and after.humanoidModel then path=after.humanoidModel;break end
+  end
+ end
+ if not path then return nil end
+ local model,plr,kind=modelByPathV010(path)
+ if not model then return {modelPath=path,kind=kind,resolved=false} end
+ local hum=model:FindFirstChildOfClass("Humanoid")
+ local root=model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+ local ff=forceFieldsV010(model)
+ local team=nil
+ if plr then
+  local t=plr.Team
+  team={name=t and t.Name or nil,teamColor=t and tostring(t.TeamColor) or nil,neutral=plr.Neutral,attributes=attrsV010(plr),tags=tagsV010(plr)}
+ end
+ local ctx={
+  resolved=true,kind=kind,modelPath=full(model),modelName=model.Name,
+  modelAttributes=attrsV010(model),modelTags=tagsV010(model),
+  humanoidPath=hum and full(hum) or nil,humanoidHealth=hum and hum.Health or nil,humanoidMaxHealth=hum and hum.MaxHealth or nil,
+  humanoidAttributes=attrsV010(hum),humanoidTags=tagsV010(hum),
+  forceFields=ff,forceFieldCount=#ff,
+  playerName=plr and plr.Name or nil,playerUserId=plr and plr.UserId or nil,team=team,
+  localTeam=localTeamV010(),rootPosition=root and {root.Position.X,root.Position.Y,root.Position.Z} or nil,
+ }
+ if rec.teamBarrier then ctx.teamBarrierSide=barrierSideV010(rec.teamBarrier,model) end
+ return ctx
+end
+
+local function writeBusV010(rec)
+ if not rec then return end
+ local ctx=nil
+ local ok,c=pcall(targetContextV010,rec)
+ if ok then ctx=c else S.targetContextErrors+=1 end
+ rec.targetProtectionContext=ctx
+ if ctx then
+  S.targetContextCaptured+=1
+  if (ctx.forceFieldCount or 0)>0 then S.targetContextWithForceField+=1 end
+  if ctx.kind=="PLAYER" then S.targetContextPlayers+=1
+  elseif ctx.kind=="BOT_SOLDIER" then S.targetContextBots+=1
+  else S.targetContextUnknown+=1 end
+ end
+ busV010.seq=(tonumber(busV010.seq) or 0)+1
+ local w=rec.weapon or {}
+ local entry={
+  seq=busV010.seq,unix=rec.unix,time=rec.time,shotIndex=rec.index,version=C.VERSION,
+  weaponName=w.name,ammoDelta=rec.ammoDelta,enabled=rec.enabled,
+  wallDiagnosticCategory=rec.wallDiagnosticCategory,
+  teamBarrierClientState=rec.teamBarrierClientState,
+  teamBarrier=rec.teamBarrier,
+  diagnosticBaselineHit=rec.diagnosticBaselineHit,
+  wallTraversal=rec.wallTraversal,
+  targetProtectionContext=ctx,
+ }
+ local tr=rec.wallTraversal
+ entry.clientReachedCharacter=(rec.diagnosticBaselineHit and rec.diagnosticBaselineHit.humanoid==true) or false
+ entry.crossedCandidate=(tr and (tr.candidateIntersectionCount or 0)>0) or false
+ entry.normalWallClientReached=entry.clientReachedCharacter and entry.crossedCandidate and rec.wallDiagnosticCategory~="BARREIRA_PROTECAO_TIME"
+ busV010.records[#busV010.records+1]=entry
+ while #busV010.records>(busV010.maxRecords or 420) do table.remove(busV010.records,1) end
+ busV010.last=entry
+ S.sharedBusWrites+=1
+ rec.sharedBusSeq=entry.seq
+ event("V010_SHARED_BUS_WRITE",{shotIndex=rec.index,seq=entry.seq,clientReachedCharacter=entry.clientReachedCharacter,wallDiagnosticCategory=entry.wallDiagnosticCategory,targetKind=ctx and ctx.kind or nil,forceFieldCount=ctx and ctx.forceFieldCount or nil})
+end
+
+local _shotReadV09=shotRead
+shotRead=function(tool,delta)
+ _shotReadV09(tool,delta)
+ local rec=S.shots[#S.shots]
+ if rec then writeBusV010(rec) end
+ updateUI()
+end
+
+local _payloadV09=payload
+payload=function()
+ local t=_payloadV09()
+ t.version=C.VERSION
+ t.policy=t.policy or {}
+ t.policy.sharedRuntimeBus="V0.10 publica o resultado EXATO do raycast local do NoClip em um bus de runtime para o Weapon Research; nenhum RemoteEvent é chamado ou alterado."
+ t.policy.targetProtectionContext="Snapshot observacional de Team, atributos/tags, ForceField do personagem, HP e lado geométrico da barreira; não altera o alvo."
+ t.summary=t.summary or {}
+ t.summary.sharedBusWrites=S.sharedBusWrites
+ t.summary.targetContextCaptured=S.targetContextCaptured
+ t.summary.targetContextWithForceField=S.targetContextWithForceField
+ t.summary.targetContextPlayers=S.targetContextPlayers
+ t.summary.targetContextBots=S.targetContextBots
+ t.summary.targetContextUnknown=S.targetContextUnknown
+ t.summary.targetContextErrors=S.targetContextErrors
+ return t
+end
+
+save=function()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+ if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_10_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then
+  local a,b=pcall(writefile,name,json)
+  if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+ end
+ if typeof(setclipboard)=="function" then
+  local a,b=pcall(setclipboard,json)
+  if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+ end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
+
+local _updateUIV09=updateUI
+updateUI=function()
+ _updateUIV09()
+ Reader.Text=string.gsub(Reader.Text,"Leitor V0%.9","Leitor V0.10")
+ Reader.Text=Reader.Text..string.format("\nSync Research: %d tiros publicados\nContexto alvo: %d • ForceField: %d • erros: %d",S.sharedBusWrites,S.targetContextCaptured,S.targetContextWithForceField,S.targetContextErrors)
+ ver.Text=C.VERSION
+end
+local rtV010=ENV[C.KEY]
+if type(rtV010)=="table" then rtV010.version=C.VERSION end
+event("V010_READY",{sharedBus=BUS_KEY_V010,targetProtectionContext=true,preservesV08Mechanism=true})
+pcall(updateUI)
