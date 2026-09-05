@@ -1,0 +1,5 @@
+-- V2.3.4 patch: authoritative shot classification is frozen at _ammo decrease.
+C.VERSION="V2.3.4"
+C.DAMAGE_SAMPLE_DELAYS={0.08,0.18,0.35,0.60}
+S.ShotLockMode=true
+S.UIRefresh=nil
