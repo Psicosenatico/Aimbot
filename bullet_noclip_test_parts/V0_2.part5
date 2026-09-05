@@ -1,0 +1,3 @@
+S.conns[#S.conns+1]=LP.CharacterAdded:Connect(function(ch) task.wait(.5); if S.closed then return end; S.conns[#S.conns+1]=ch.ChildAdded:Connect(function(x) task.defer(function() watch(x) end) end); scanWeapons("RESPAWN"); updateUI() end)
+if Workspace.CurrentCamera then local ok,sig=pcall(function() return Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize") end); if ok then S.conns[#S.conns+1]=sig:Connect(resize) end end
+scan("INITIAL"); scanWeapons("INITIAL"); event("START",{version=C.VERSION,runId=S.runId,candidates=#S.order,named=S.counts.NAMED_WALL,shape=S.counts.SHAPE_WALL,classifier={heightMin=C.HEIGHT,thinMax=C.THIN,spanMin=C.SPAN}}); resize(); updateUI()
