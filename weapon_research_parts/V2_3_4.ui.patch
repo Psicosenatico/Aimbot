@@ -1,0 +1,17 @@
+-- V2.3.4 UI patch
+local _updateUIV233=updateUI
+updateUI=function()
+ _updateUIV233()
+ Ver.Text=C.VERSION
+ Sub.Text="SHOT-LOCK • CLASSIFICAÇÃO NO INSTANTE DO _ammo"
+ if S.Started and not S.ExportBusy then
+  local lockText=S.LastShotLockText or "AGUARDANDO PRIMEIRO SHOT-LOCK"
+  MHelp.Text="SHOT-LOCK: "..lockText
+  HHelp.Text=(S.LastLocationText or "SEM LOCAL").."\n"..lockText
+ end
+ Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.3","PESQUISA DE ARMAS V2.3.4")
+ Text.Text=string.gsub(Text.Text,"CLASSIFICAÇÃO AUTOMÁTICA POR DISPARO","CLASSIFICAÇÃO CONGELADA NO EVENTO DE _ammo")
+ Text.Text=string.gsub(Text.Text,"DANO • HP %+ baseline para armas Auto","DANO • probe vira AMBÍGUO se outro tiro sobrepor")
+end
+S.UIRefresh=updateUI
+pcall(updateUI)
