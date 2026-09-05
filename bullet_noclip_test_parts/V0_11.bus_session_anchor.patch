@@ -1,0 +1,71 @@
+-- V0.11 SHARED-BUS SESSION ANCHOR
+-- Preserves all V0.8/V0.9/V0.10 mechanics. Starts a fresh shared-bus session for each
+-- NoClip runtime and tags every bus record with the NoClip runId, allowing Weapon Research
+-- to learn a relative shot-index offset when NoClip started recording before Research.
+
+C.VERSION="V0.11"
+S.v011BusSessionResets=0
+S.v011BusTaggedRecords=0
+
+-- A new NoClip execution owns a fresh synchronization session. Old records from a prior
+-- execution must never participate in a new Research match.
+busV010.records={}
+busV010.seq=0
+busV010.last=nil
+busV010.ownerRunId=S.runId
+busV010.sessionStartedUnix=os.time()
+busV010.sessionStartedClock=os.clock()
+S.v011BusSessionResets+=1
+
+local _writeBusV010Session=writeBusV010
+writeBusV010=function(rec)
+ _writeBusV010Session(rec)
+ local entry=busV010.last
+ if entry and rec and tonumber(entry.shotIndex)==tonumber(rec.index) then
+  entry.runId=S.runId
+  entry.noClipShotIndex=rec.index
+  entry.busSessionStartedUnix=busV010.sessionStartedUnix
+  rec.sharedBusRunId=S.runId
+  S.v011BusTaggedRecords+=1
+ end
+end
+
+local _payloadV010Session=payload
+payload=function()
+ local t=_payloadV010Session()
+ t.version=C.VERSION
+ t.policy=t.policy or {}
+ t.policy.sharedBusSession="V0.11 limpa registros antigos a cada nova execução do NoClip e marca cada registro com runId; Research aprende offset RELATIVO de índices em vez de exigir igualdade absoluta."
+ t.summary=t.summary or {}
+ t.summary.v011BusSessionResets=S.v011BusSessionResets
+ t.summary.v011BusTaggedRecords=S.v011BusTaggedRecords
+ t.summary.v011BusOwnerRunId=busV010.ownerRunId
+ return t
+end
+
+save=function()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+ if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_11_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then
+  local a,b=pcall(writefile,name,json)
+  if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+ end
+ if typeof(setclipboard)=="function" then
+  local a,b=pcall(setclipboard,json)
+  if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+ end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
+
+local _updateUIV010Session=updateUI
+updateUI=function()
+ _updateUIV010Session()
+ Reader.Text=string.gsub(Reader.Text,"Leitor V0%.10","Leitor V0.11")
+ Reader.Text=Reader.Text..string.format("\nBus V0.11: sessão nova • %d registros marcados",S.v011BusTaggedRecords)
+ ver.Text=C.VERSION
+end
+local rtV011=ENV[C.KEY]
+if type(rtV011)=="table" then rtV011.version=C.VERSION end
+event("V011_READY",{freshBusSession=true,ownerRunId=S.runId,relativeIndexSync=true,preservesV08Mechanism=true})
+pcall(updateUI)
