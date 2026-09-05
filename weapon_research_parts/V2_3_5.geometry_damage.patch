@@ -1,0 +1,257 @@
+-- V2.3.5 GEOMETRY-SHADOW + PRE-AMMO DAMAGE PATCH
+-- Keeps AMMO_DECREASE_LOCK as the category authority.
+-- Adds an OBB geometry shadow ray that can see candidate walls even while CanQuery=false.
+-- Damage can use a same-target Tool.Activated health baseline only as a timing baseline;
+-- it never replaces the locked category.
+
+C.VERSION="V2.3.5"
+C.PRE_HEALTH_MAX_AGE=0.55
+S.GeometryCandidates={}
+S.GeometryCandidateCount=0
+S.GeometryOverlayHits=0
+S.GeometryOverlayTargetBehindWall=0
+S.PoppedPreTriggerByTool={}
+
+local function refreshGeometryCandidates()
+ local out={}
+ local m=Workspace:FindFirstChild("Map")
+ if m then
+  for _,p in ipairs(m:GetDescendants()) do
+   if p:IsA("BasePart") then
+    local explicit=explicitBlockInfo(p)
+    local scope=hierarchyScope(p,explicit)
+    if scope=="MAPA" then
+     local subtype,reason,shape=mapSubtypeInfo(p)
+     if subtype=="MAP_WALL_NAMED_CANDIDATE" or subtype=="MAP_WALL_SHAPE_CANDIDATE" then
+      out[#out+1]={part=p,path=full(p),subtype=subtype,reason=reason,shape=shape}
+     end
+    end
+   end
+  end
+ end
+ S.GeometryCandidates=out
+ S.GeometryCandidateCount=#out
+ log("GEOMETRY_CANDIDATE_SCAN",{count=#out},"V2.3.5 • candidatas geométricas: "..tostring(#out))
+ return #out
+end
+
+local function slabAxis(o,d,h,tmin,tmax)
+ if math.abs(d)<1e-7 then
+  if o < -h or o > h then return nil,nil,false end
+  return tmin,tmax,true
+ end
+ local t1=(-h-o)/d
+ local t2=( h-o)/d
+ if t1>t2 then t1,t2=t2,t1 end
+ if t1>tmin then tmin=t1 end
+ if t2<tmax then tmax=t2 end
+ if tmin>tmax then return nil,nil,false end
+ return tmin,tmax,true
+end
+
+local function rayObbDistance(origin,unit,maxDistance,p)
+ if not p or not p.Parent then return nil end
+ local ok,cf,size=pcall(function() return p.CFrame,p.Size end)
+ if not ok or typeof(cf)~="CFrame" or typeof(size)~="Vector3" then return nil end
+ local ro=cf:PointToObjectSpace(origin)
+ local rd=cf:VectorToObjectSpace(unit)
+ local hx,hy,hz=math.abs(size.X)*0.5,math.abs(size.Y)*0.5,math.abs(size.Z)*0.5
+ local tmin,tmax=0,maxDistance
+ local good
+ tmin,tmax,good=slabAxis(ro.X,rd.X,hx,tmin,tmax); if not good then return nil end
+ tmin,tmax,good=slabAxis(ro.Y,rd.Y,hy,tmin,tmax); if not good then return nil end
+ tmin,tmax,good=slabAxis(ro.Z,rd.Z,hz,tmin,tmax); if not good then return nil end
+ if tmin>=0 and tmin<=maxDistance then return tmin end
+ if tmax>=0 and tmax<=maxDistance then return tmax end
+ return nil
+end
+
+local function nearestGeometryCandidate(ref)
+ if not ref or not ref.ok or type(ref.origin)~="table" or type(ref.direction)~="table" then return nil end
+ local origin=Vector3.new(ref.origin[1] or 0,ref.origin[2] or 0,ref.origin[3] or 0)
+ local direction=Vector3.new(ref.direction[1] or 0,ref.direction[2] or 0,ref.direction[3] or 0)
+ local maxDistance=direction.Magnitude
+ if maxDistance<=0 then return nil end
+ local unit=direction.Unit
+ local best=nil
+ for _,c in ipairs(S.GeometryCandidates or {}) do
+  local p=c.part
+  if p and p.Parent then
+   local d=rayObbDistance(origin,unit,maxDistance,p)
+   if d and (not best or d<best.distance) then
+    local okId,v=pcall(function() return p:GetDebugId(0) end)
+    best={distance=d,path=c.path,subtype=c.subtype,reason=c.reason,size=c.shape and c.shape.size or nil,debugId=okId and tostring(v) or nil}
+   end
+  end
+ end
+ return best
+end
+
+local _classifyShotV234=classifyShot
+classifyShot=function(ref)
+ local category,reason,meta=_classifyShotV234(ref)
+ meta=meta or {}
+ local geom=nearestGeometryCandidate(ref)
+ if not geom then return category,reason,meta end
+ meta.geometryShadowCandidate=geom
+ meta.geometryShadowUsed=false
+ local visibleDistance=nil
+ local chain=ref and ref.multiHitChain or {}
+ if chain[1] then visibleDistance=tonumber(chain[1].totalDistance or chain[1].distance) end
+ local geomBeforeVisible=(visibleDistance==nil) or (geom.distance+0.02<visibleDistance)
+ if not geomBeforeVisible then return category,reason,meta end
+ S.GeometryOverlayHits+=1
+ meta.geometryShadowUsed=true
+ meta.geometryShadowReason="candidata OBB intersecta o raio antes do primeiro hit consultável"
+ if category=="ALVO_LIVRE" and ref and ref.firstCharacterIndex==1 then
+  S.GeometryOverlayTargetBehindWall+=1
+  meta.policy="CANDIDATO_PAREDE_MAPA_REQUER_TESTE"
+  meta.scope="MAPA"
+  meta.mapDecision="PAREDE"
+  meta.classificationSource="AMMO_DECREASE_LOCK_PLUS_GEOMETRY_SHADOW"
+  return "ALVO_ATRAS_MAPA_PAREDE","SHOT-LOCK vê personagem, mas OBB de parede candidata está antes dele • "..tostring(geom.path),meta
+ end
+ if category=="TIRO_LIVRE" or (ref and (not ref.hit or not ref.firstHit)) then
+  meta.policy="CANDIDATO_PAREDE_MAPA_REQUER_TESTE"
+  meta.scope="MAPA"
+  meta.mapDecision="PAREDE"
+  meta.classificationSource="AMMO_DECREASE_LOCK_PLUS_GEOMETRY_SHADOW"
+  return "ESTRUTURA_MAPA_PAREDE","nenhum hit consultável antes da candidata OBB • "..tostring(geom.path),meta
+ end
+ return category,reason,meta
+end
+
+local _popPendingTriggerV234=popPendingTrigger
+popPendingTrigger=function(tool)
+ local e,age=_popPendingTriggerV234(tool)
+ S.PoppedPreTriggerByTool[tool]={entry=e,age=age,time=clock()}
+ return e,age
+end
+
+local _startDamageProbeV234=startDamageProbe
+startDamageProbe=function(shot,locked,tool,shotToken)
+ local popped=S.PoppedPreTriggerByTool[tool]
+ S.PoppedPreTriggerByTool[tool]=nil
+ local pre=popped and popped.entry or nil
+ local age=popped and tonumber(popped.age) or nil
+ local lockedTarget=locked and locked.target or nil
+ local preTarget=pre and pre.target or nil
+ local sameTarget=lockedTarget and preTarget and lockedTarget.modelPath~=nil and lockedTarget.modelPath==preTarget.modelPath
+ local preHealth=sameTarget and tonumber(preTarget.health) or nil
+ local lockedHealth=lockedTarget and tonumber(lockedTarget.health) or nil
+ local usablePre=sameTarget and age and age>=0 and age<=C.PRE_HEALTH_MAX_AGE and preHealth~=nil and lockedHealth~=nil
+ if usablePre then
+  local immediateDrop=math.max(0,preHealth-lockedHealth)
+  shot.preShotHealthBaseline={source="TOOL_ACTIVATED_PRE_SHOT_SAME_TARGET",age=age,targetPath=lockedTarget.modelPath,healthBefore=preHealth,healthAtAmmoLock=lockedHealth,immediateDrop=immediateDrop}
+  if immediateDrop>0.001 then
+   shot.damageProbe={status="QUEDA_DE_HP_OBSERVADA",reliable=true,target=lockedTarget,healthBefore=preHealth,healthAtAmmoDecrease=lockedHealth,healthMinimum=lockedHealth,observedDamage=immediateDrop,died=lockedHealth<=0,samples={},baselineSource="TOOL_ACTIVATED_PRE_SHOT_SAME_TARGET",damageTiming="PRE_TRIGGER_TO_AMMO_LOCK",preTriggerAge=age,causalConfidence="CORRELACAO_TEMPORAL_MESMO_ALVO",classificationAuthority=shot.classificationAuthority,shotToken=shotToken,overlapped=false}
+   log("DAMAGE_BEFORE_AMMO_LOCK",{shotIndex=shot.shotIndex,category=shot.autoCategory,target=lockedTarget.modelPath,healthBefore=preHealth,healthAtAmmoLock=lockedHealth,observedDamage=immediateDrop,preTriggerAge=age,classificationAuthority=shot.classificationAuthority},string.format("#%d • HP %.2f→%.2f antes do _ammo",shot.shotIndex,preHealth,lockedHealth))
+   return true
+  end
+ end
+ local ok=_startDamageProbeV234(shot,locked,tool,shotToken)
+ if shot.damageProbe then
+  shot.damageProbe.preShotBaselineAvailable=usablePre==true
+  shot.damageProbe.preShotSameTarget=sameTarget==true
+  shot.damageProbe.preTriggerAge=age
+  if not usablePre then shot.damageProbe.baselineMayAlreadyBePostDamage=true end
+ end
+ return ok
+end
+
+local _damageSummaryV234=damageSummary
+damageSummary=function()
+ local out=_damageSummaryV234()
+ out.preAmmoDamageObserved=0
+ out.preAmmoObservedDamage=0
+ out.geometryShadowTargetBehindWall=S.GeometryOverlayTargetBehindWall or 0
+ for _,shot in ipairs(S.Shots) do
+  local p=shot.damageProbe
+  if p and p.damageTiming=="PRE_TRIGGER_TO_AMMO_LOCK" and p.status=="QUEDA_DE_HP_OBSERVADA" then
+   out.preAmmoDamageObserved+=1
+   out.preAmmoObservedDamage+=(tonumber(p.observedDamage) or 0)
+  end
+ end
+ return out
+end
+
+local _beginSessionV234=beginSession
+beginSession=function()
+ refreshGeometryCandidates()
+ local ok=_beginSessionV234()
+ if ok then log("GEOMETRY_SHADOW_MODE",{candidates=S.GeometryCandidateCount,classificationAuthority="AMMO_DECREASE_LOCK",geometryMethod="ORIENTED_BOUNDING_BOX_RAY_INTERSECTION",canQueryIndependent=true},"V2.3.5 • OBB shadow ativo e independente de CanQuery") end
+ return ok
+end
+
+local _resetSessionV234=resetSession
+resetSession=function()
+ _resetSessionV234()
+ S.GeometryOverlayHits=0
+ S.GeometryOverlayTargetBehindWall=0
+ S.PoppedPreTriggerByTool={}
+end
+
+local _exportTableV234=exportTable
+exportTable=function()
+ local t=_exportTableV234()
+ t.version=C.VERSION
+ t.mode="SHOT_LOCK_PLUS_CANQUERY_INDEPENDENT_GEOMETRY"
+ t.openEndedResearch=t.openEndedResearch or {}
+ t.openEndedResearch.geometryShadow={method="ORIENTED_BOUNDING_BOX_RAY_INTERSECTION",independentOfCanQuery=true,candidateCount=S.GeometryCandidateCount,overlayHits=S.GeometryOverlayHits,targetBehindCandidateWall=S.GeometryOverlayTargetBehindWall}
+ t.openEndedResearch.preAmmoHealthBaseline={maxAge=C.PRE_HEALTH_MAX_AGE,rule="Só usa Tool.Activated como baseline de HP quando o alvo é o MESMO do AMMO_DECREASE_LOCK; a categoria continua sendo do SHOT-LOCK."}
+ t.interpretationRules=t.interpretationRules or {}
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.5: paredes candidatas são reconstruídas por interseção OBB e continuam detectáveis mesmo quando o Bullet NoClip coloca CanQuery=false."
+ t.interpretationRules[#t.interpretationRules+1]="O snapshot pré-gatilho pode fornecer apenas o HP anterior quando é o mesmo alvo e tem idade <=0.55s; nunca substitui a categoria congelada no _ammo."
+ t.interpretationRules[#t.interpretationRules+1]="damageTiming=PRE_TRIGGER_TO_AMMO_LOCK indica que a queda de HP já ocorreu antes do callback de _ammo; causalidade continua sendo correlação temporal, não prova exclusiva."
+ return t
+end
+
+local _updateUIV234=updateUI
+updateUI=function()
+ _updateUIV234()
+ Ver.Text=C.VERSION
+ Sub.Text="SHOT-LOCK + OBB • INDEPENDENTE DE CanQuery"
+ Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.4","PESQUISA DE ARMAS V2.3.5")
+ if S.Started and not S.ExportBusy then
+  local last=S.Shots[#S.Shots]
+  if last and last.classificationMeta and last.classificationMeta.geometryShadowUsed then MHelp.Text="SHOT-LOCK + OBB: "..tostring(last.autoCategoryLabel or last.autoCategory) end
+ end
+end
+S.UIRefresh=updateUI
+
+local rt235=ENV[RUNTIME_KEY]
+if type(rt235)=="table" then rt235.version=C.VERSION end
+
+local oldExport235=Export
+local NewExport235=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+round(NewExport235,8)
+pcall(function() oldExport235:Destroy() end)
+Export=NewExport235
+Export.Activated:Connect(function()
+ if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+ if S.ExportBusy then Status.Text="Exportação já está em andamento.";Status.TextColor3=COL.yellow;return end
+ if S.Recording then pauseSession("EXPORT") end
+ S.ExportBusy=true
+ Status.Text="Preparando JSON V2.3.5 • aguardando probes válidos."
+ Status.TextColor3=COL.yellow
+ updateUI()
+ local sessionId=S.SessionId
+ task.spawn(function()
+  while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+  if not Gui.Parent or S.SessionId~=sessionId then return end
+  local data,encErr=encode()
+  if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+  local name="Psicosenatico_WeaponResearch_V2_3_5_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+  local saved=false
+  if typeof(writefile)=="function" then saved=pcall(function() writefile(name,data) end) end
+  if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..name;Status.TextColor3=COL.green
+  elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+  else Status.Text="Não foi possível salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+  S.ExportBusy=false;updateUI()
+ end)
+end)
+
+refreshGeometryCandidates()
+live("SISTEMA","V2.3.5 • SHOT-LOCK preservado; OBB detecta candidatas mesmo com CanQuery=false.")
+live("SISTEMA","HP pré-gatilho só é usado como baseline quando o alvo coincide com o SHOT-LOCK.")
+pcall(updateUI)
