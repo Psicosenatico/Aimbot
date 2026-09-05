@@ -1,6 +1,6 @@
--- PSICOSENATICO • BULLET NOCLIP TEST V0.9
--- V0.8 mecanismo por CollisionGroup existente + V0.9 diagnóstico separado da barreira de proteção de time.
-local SOURCE_COMMIT="2e19eeb7076da03518ca3ead938ed384f6519420"
+-- PSICOSENATICO • BULLET NOCLIP TEST V0.10
+-- V0.8 mecanismo por CollisionGroup existente + V0.9 barreira de time + V0.10 shared bus/contexto do alvo.
+local SOURCE_COMMIT="73a42b65541a06dd4a338136492b93a2e4373226"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/bullet_noclip_test_parts/"
 local PARTS={
     "V0_3.part1",
@@ -16,22 +16,23 @@ local PARTS={
     "V0_6.collision_group_split.patch",
     "V0_7.wall_traversal.patch",
     "V0_8.existing_group_strategy.patch",
-    "V0_9.team_barrier.patch"
+    "V0_9.team_barrier.patch",
+    "V0_10.shared_bus_target_context.patch"
 }
 local chunks={}
 for i,name in ipairs(PARTS) do
     local ok,body=pcall(function() return game:HttpGet(BASE..name) end)
     if not ok or type(body)~="string" or #body==0 then
-        error("PSICOSENATICO V0.9: falha ao carregar parte "..tostring(i).." ("..name.."): "..tostring(body))
+        error("PSICOSENATICO V0.10: falha ao carregar parte "..tostring(i).." ("..name.."): "..tostring(body))
     end
     chunks[i]=body
 end
 local source=table.concat(chunks)
-if not string.find(source,'C.VERSION="V0.9"',1,true) then
-    error("PSICOSENATICO V0.9: patch de barreira de time não encontrado na fonte remontada")
+if not string.find(source,'C.VERSION="V0.10"',1,true) then
+    error("PSICOSENATICO V0.10: patch shared bus/contexto não encontrado na fonte remontada")
 end
 local compiler=loadstring
-if type(compiler)~="function" then error("PSICOSENATICO V0.9: loadstring indisponível") end
+if type(compiler)~="function" then error("PSICOSENATICO V0.10: loadstring indisponível") end
 local fn,err=compiler(source)
-if not fn then error("PSICOSENATICO V0.9: erro de compilação: "..tostring(err)) end
+if not fn then error("PSICOSENATICO V0.10: erro de compilação: "..tostring(err)) end
 return fn()
