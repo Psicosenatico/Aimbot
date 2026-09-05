@@ -1,0 +1,97 @@
+local function drag(frame,handle)
+ local dragging=false
+ local inputRef,start,pos
+ S.conns[#S.conns+1]=handle.InputBegan:Connect(function(i)
+  if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+   dragging=true; start=i.Position; pos=frame.Position
+   i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then dragging=false end end)
+  end
+ end)
+ S.conns[#S.conns+1]=handle.InputChanged:Connect(function(i)
+  if i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch then inputRef=i end
+ end)
+ S.conns[#S.conns+1]=UIS.InputChanged:Connect(function(i)
+  if dragging and i==inputRef and start and pos then
+   local d=i.Position-start
+   frame.Position=UDim2.new(pos.X.Scale,pos.X.Offset+d.X,pos.Y.Scale,pos.Y.Offset+d.Y)
+  end
+ end)
+end
+drag(Main,Head)
+drag(Float,Float)
+updateUI=function()
+ if S.closed or not Gui.Parent then return end
+ State.Text=S.enabled and "Estado: ATIVO • somente paredes candidatas" or "Estado: DESATIVADO • restaurado"
+ State.TextColor3=S.enabled and Color3.fromRGB(111,221,145) or Color3.fromRGB(223,190,111)
+ Toggle.Text=S.enabled and "DESATIVAR NO CLIP" or "ATIVAR NO CLIP"
+ Toggle.BackgroundColor3=S.enabled and Color3.fromRGB(108,50,55) or Color3.fromRGB(43,92,61)
+ Stats.Text=string.format("Candidatas: %d • Wall: %d • Forma: %d • Tiros: %d",#S.order,S.counts.NAMED_WALL,S.counts.SHAPE_WALL,#S.shots)
+ Last.Text="Última leitura: "..S.last
+ Float.Text=S.enabled and "NC✓" or "NC"
+ Reader.Text=string.format("Leitor V0.3\nEstado: %s\nCandidatas: %d • aplicadas: %d\nAmostras CQ: %d • reversões: %d\nHits CQ=false: %d • hits CQ=true: %d\nErros: %d",S.enabled and "ATIVO" or "OFF",#S.order,S.applyVerified,S.persistenceSamples,S.queryReverts,S.unexpectedQueryableCandidates,S.registeredHitQueryable,S.errors)
+end
+local function resize()
+ local cam=Workspace.CurrentCamera
+ if not cam then return end
+ local v=cam.ViewportSize
+ local w=math.max(320,math.min(390,math.floor(v.X*.92)))
+ local h=math.max(285,math.min(300,math.floor(v.Y*.70)))
+ Main.Size=UDim2.fromOffset(w,h)
+ Reader.Size=UDim2.new(1,-28,1,-254)
+end
+local function cleanup()
+ if S.closed then return end
+ S.closed=true
+ S.enabled=false
+ for p,m in pairs(S.candidates) do if p.Parent and m.applied then restore(p,m) end end
+ for tool,_ in pairs(S.toolConns) do unwatch(tool) end
+ for _,c in ipairs(S.conns) do pcall(function() c:Disconnect() end) end
+ S.conns={}
+ event("CLOSED",{shots=#S.shots,candidates=#S.order})
+ pcall(function() Gui:Destroy() end)
+ if type(ENV[C.KEY])=="table" and ENV[C.KEY].cleanup==cleanup then ENV[C.KEY]=nil end
+end
+ENV[C.KEY]={version=C.VERSION,cleanup=cleanup}
+Toggle.Activated:Connect(function() setEnabled(not S.enabled,"UI"); updateUI() end)
+Export.Activated:Connect(function()
+ local ok,msg=save()
+ Reader.Text=msg
+ Export.Text=ok and "EXPORTADO ✓" or "FALHA"
+ task.delay(1.2,function() if Export.Parent then Export.Text="EXPORTAR DIAGNÓSTICO"; updateUI() end end)
+end)
+Min.Activated:Connect(function() Main.Visible=false; Float.Visible=true end)
+Float.Activated:Connect(function() Float.Visible=false; Main.Visible=true end)
+Close.Activated:Connect(cleanup)
+
+local m=map()
+if m then
+ S.conns[#S.conns+1]=m.DescendantAdded:Connect(function(o)
+  if o:IsA("BasePart") then
+   task.defer(function()
+    if not S.closed then
+     local info=classify(o)
+     if info and register(o,info) then updateUI() end
+    end
+   end)
+  end
+ end)
+end
+local b=LP:FindFirstChildOfClass("Backpack")
+if b then S.conns[#S.conns+1]=b.ChildAdded:Connect(function(x) task.defer(function() watch(x) end) end) end
+if LP.Character then S.conns[#S.conns+1]=LP.Character.ChildAdded:Connect(function(x) task.defer(function() watch(x) end) end) end
+S.conns[#S.conns+1]=LP.CharacterAdded:Connect(function(ch)
+ task.wait(.5)
+ if S.closed then return end
+ S.conns[#S.conns+1]=ch.ChildAdded:Connect(function(x) task.defer(function() watch(x) end) end)
+ scanWeapons("RESPAWN")
+ updateUI()
+end)
+if Workspace.CurrentCamera then
+ local ok,sig=pcall(function() return Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize") end)
+ if ok then S.conns[#S.conns+1]=sig:Connect(resize) end
+end
+scan("INITIAL")
+scanWeapons("INITIAL")
+event("START",{version=C.VERSION,runId=S.runId,candidates=#S.order,named=S.counts.NAMED_WALL,shape=S.counts.SHAPE_WALL,classifier={heightMin=C.HEIGHT,thinMax=C.THIN,spanMin=C.SPAN},persistenceCheckpoints={"IMMEDIATE","NEXT_FRAME","PLUS_0_05S","PLUS_0_25S"}})
+resize()
+updateUI()
