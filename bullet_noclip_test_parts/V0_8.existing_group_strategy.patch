@@ -1,0 +1,356 @@
+-- V0.8 EXISTING COLLISION-GROUP STRATEGY
+-- Fixes the V0.6/V0.7 activation failure on clients that cannot register or mutate
+-- collision groups. V0.8 never creates a group and never changes the collision matrix.
+-- It discovers groups already present in the experience and empirically validates them
+-- with local ray probes before moving any candidate wall.
+
+C.VERSION="V0.8"
+S.v08DiscoveredGroups={}
+S.v08CompatibilityTests={}
+S.v08SelectedPassGroup=nil
+S.v08PrepareMethod="EXISTING_GROUP_EMPIRICAL_RAY_PROBE"
+S.v08ProbeErrors=0
+S.v08GroupPersistenceSamples=0
+S.v08GroupReverts=0
+S.v08ActivationAttempts=0
+S.v08ActivationBlocked=0
+
+local function characterGroupsV08()
+ local groups={}
+ local ch=LP.Character
+ if ch then
+  for _,d in ipairs(ch:GetDescendants()) do
+   if d:IsA("BasePart") then
+    local ok,g=pcall(function() return d.CollisionGroup end)
+    if ok and type(g)=="string" and g~="" then groups[g]=(groups[g] or 0)+1 end
+   end
+  end
+ end
+ return groups
+end
+
+local function addGroupNameV08(set,name,source)
+ if type(name)~="string" or name=="" then return end
+ local e=set[name]
+ if not e then e={name=name,sources={}};set[name]=e end
+ e.sources[source or "UNKNOWN"]=true
+end
+
+local function collectExistingGroupsV08()
+ local found={}
+ addGroupNameV08(found,"Default","BUILTIN")
+ local ch=LP.Character
+ if ch then
+  for _,d in ipairs(ch:GetDescendants()) do
+   if d:IsA("BasePart") then
+    local ok,g=pcall(function() return d.CollisionGroup end)
+    if ok then addGroupNameV08(found,g,"LOCAL_CHARACTER") end
+   end
+  end
+ end
+ local okDesc,desc=pcall(function() return Workspace:GetDescendants() end)
+ if okDesc and type(desc)=="table" then
+  for _,d in ipairs(desc) do
+   if d:IsA("BasePart") then
+    local ok,g=pcall(function() return d.CollisionGroup end)
+    if ok then addGroupNameV08(found,g,"WORKSPACE_PART") end
+   end
+  end
+ end
+ local function ingestRegistered(list,source)
+  if type(list)~="table" then return end
+  for _,item in ipairs(list) do
+   if type(item)=="string" then
+    addGroupNameV08(found,item,source)
+   elseif type(item)=="table" then
+    addGroupNameV08(found,item.name or item.Name or item.group or item.Group,source)
+   end
+  end
+ end
+ local okW,listW=pcall(function() return Workspace:GetRegisteredCollisionGroups() end)
+ if okW then ingestRegistered(listW,"WORLDROOT_REGISTERED") end
+ local okP,listP=pcall(function() return PhysicsService:GetRegisteredCollisionGroups() end)
+ if okP then ingestRegistered(listP,"PHYSICS_REGISTERED") end
+ local out={}
+ for name,e in pairs(found) do
+  local sources={}
+  for s,_ in pairs(e.sources) do sources[#sources+1]=s end
+  table.sort(sources)
+  out[#out+1]={name=name,sources=sources}
+ end
+ table.sort(out,function(a,b) return string.lower(a.name)<string.lower(b.name) end)
+ S.v08DiscoveredGroups=out
+ return out
+end
+
+local function probeRayAgainstPartV08(probe,rayGroup)
+ local rp=RaycastParams.new()
+ rp.FilterType=Enum.RaycastFilterType.Include
+ rp.FilterDescendantsInstances={probe}
+ rp.IgnoreWater=true
+ rp.RespectCanCollide=true
+ local okGroup,eGroup=pcall(function() rp.CollisionGroup=rayGroup end)
+ if not okGroup then return nil,false,"RAY_GROUP:"..tostring(eGroup) end
+ local origin=probe.Position-Vector3.new(0,0,6)
+ local hit=nil
+ local okRay,eRay=pcall(function() hit=Workspace:Raycast(origin,Vector3.new(0,0,12),rp) end)
+ if not okRay then return nil,false,"RAYCAST:"..tostring(eRay) end
+ return hit and hit.Instance==probe,true,nil
+end
+
+local function empiricalGroupTestV08(group,charGroups,probe)
+ local result={group=group,assignOk=false,defaultRayHit=nil,characterGroupHits={},safe=false,errors={}}
+ local okAssign,eAssign=pcall(function() probe.CollisionGroup=group end)
+ result.assignOk=okAssign and probe.CollisionGroup==group
+ if not result.assignOk then
+  result.errors[#result.errors+1]="ASSIGN:"..tostring(eAssign)
+  return result
+ end
+ local defaultHit,okDefault,eDefault=probeRayAgainstPartV08(probe,"Default")
+ if not okDefault then
+  result.errors[#result.errors+1]=tostring(eDefault)
+ else
+  result.defaultRayHit=defaultHit==true
+ end
+ local allCharacterHit=true
+ for cg,_ in pairs(charGroups) do
+  local hit,ok,e=probeRayAgainstPartV08(probe,cg)
+  if not ok then
+   allCharacterHit=false
+   result.characterGroupHits[cg]={ok=false,error=e}
+  else
+   result.characterGroupHits[cg]={ok=true,hit=hit==true}
+   if hit~=true then allCharacterHit=false end
+  end
+ end
+ result.safe=(result.assignOk and result.defaultRayHit==false and allCharacterHit)
+ return result
+end
+
+local function chooseExistingPassGroupV08()
+ local charGroups=characterGroupsV08()
+ S.groupStrategyCharacterGroups=charGroups
+ if next(charGroups)==nil then return nil,"SEM_GRUPO_DE_COLISAO_DO_PERSONAGEM" end
+ if charGroups.Default then
+  return nil,"PERSONAGEM_USA_DEFAULT; nenhum grupo ignorado por Default pode preservar colisao fisica desse personagem"
+ end
+ local groups=collectExistingGroupsV08()
+ local probe=Instance.new("Part")
+ probe.Name="__PSICO_COLLISION_PROBE_V08"
+ probe.Anchored=true
+ probe.CanCollide=true
+ probe.CanQuery=true
+ probe.CanTouch=false
+ probe.Transparency=1
+ probe.Size=Vector3.new(4,4,1)
+ probe.CFrame=CFrame.new(0,-50000,0)
+ pcall(function() probe.CastShadow=false end)
+ probe.Parent=Workspace
+ local tests={}
+ local selected=nil
+ for _,g in ipairs(groups) do
+  if g.name~="Default" then
+   local ok,res=pcall(empiricalGroupTestV08,g.name,charGroups,probe)
+   if ok and type(res)=="table" then
+    tests[#tests+1]=res
+    if res.safe and not selected then selected=g.name end
+   else
+    S.v08ProbeErrors+=1
+    tests[#tests+1]={group=g.name,safe=false,errors={"PROBE_EXCEPTION:"..tostring(res)}}
+   end
+  end
+ end
+ pcall(function() probe:Destroy() end)
+ S.v08CompatibilityTests=tests
+ if not selected then return nil,"SEM_COLLISION_GROUP_EXISTENTE_COMPATIVEL" end
+ return selected,nil
+end
+
+local function prepareExistingGroupStrategyV08()
+ S.v08ActivationAttempts+=1
+ local selected,why=chooseExistingPassGroupV08()
+ if not selected then
+  S.groupStrategyReady=false
+  S.groupStrategyBlockedReason=why
+  S.v08SelectedPassGroup=nil
+  S.v08ActivationBlocked+=1
+  event("V08_EXISTING_GROUP_BLOCKED",{reason=why,characterGroups=S.groupStrategyCharacterGroups,discoveredGroups=S.v08DiscoveredGroups,tests=S.v08CompatibilityTests})
+  return false,why
+ end
+ S.v08SelectedPassGroup=selected
+ S.groupStrategyReady=true
+ S.groupStrategyBlockedReason=nil
+ event("V08_EXISTING_GROUP_READY",{selectedGroup=selected,characterGroups=S.groupStrategyCharacterGroups,discoveredGroups=S.v08DiscoveredGroups,tests=S.v08CompatibilityTests})
+ return true,nil
+end
+
+-- The V0.6 respawn listener closes over this local variable. Replacing it here prevents
+-- a respawn from retrying the client-side RegisterCollisionGroup path.
+prepareGroupStrategyV06=prepareExistingGroupStrategyV08
+
+local function groupPersistenceSampleV08(p,meta,label)
+ if S.closed or not p or not p.Parent then return end
+ local state=readPartState(p)
+ S.v08GroupPersistenceSamples+=1
+ meta.v08Persistence=meta.v08Persistence or {}
+ meta.v08Persistence[#meta.v08Persistence+1]={label=label,unix=os.time(),time=os.clock(),state=state}
+ if S.enabled and meta.applied and state.collisionGroup~=S.v08SelectedPassGroup then
+  S.v08GroupReverts+=1
+  event("V08_GROUP_REVERTED",{path=meta.path,debugId=meta.debugId,label=label,expected=S.v08SelectedPassGroup,state=state})
+ end
+end
+
+local function scheduleGroupPersistenceV08(p,meta)
+ task.defer(function()
+  if S.closed then return end
+  local ok=pcall(function() RunService.Heartbeat:Wait() end)
+  if ok then groupPersistenceSampleV08(p,meta,"NEXT_FRAME") end
+ end)
+ task.delay(0.05,function() if not S.closed then groupPersistenceSampleV08(p,meta,"PLUS_0_05S") end end)
+ task.delay(0.25,function() if not S.closed then groupPersistenceSampleV08(p,meta,"PLUS_0_25S") end end)
+end
+
+apply=function(p,meta)
+ if not p or not p.Parent or not S.groupStrategyReady or not S.v08SelectedPassGroup then return false end
+ local before=readPartState(p)
+ if meta.originalCollisionGroup==nil then meta.originalCollisionGroup=before.collisionGroup or "Default" end
+ if meta.originalCanQuery==nil and before.canQueryReadOk then meta.originalCanQuery=before.canQuery end
+ -- V0.8 does NOT rely on CanQuery. Restore/keep the original value and change only the
+ -- part's group to an already-existing, preconfigured compatible group.
+ local okQ,eQ=true,nil
+ if meta.originalCanQuery~=nil then okQ,eQ=pcall(function() p.CanQuery=meta.originalCanQuery end) end
+ local okG,eG=pcall(function() p.CollisionGroup=S.v08SelectedPassGroup end)
+ local after=readPartState(p)
+ meta.lastApplyBefore=before
+ meta.lastApplyAfter=after
+ meta.v08PassGroup=S.v08SelectedPassGroup
+ meta.groupApplied=okG and after.collisionGroup==S.v08SelectedPassGroup and after.canCollide==true
+ meta.applyVerified=meta.groupApplied
+ meta.applied=meta.groupApplied
+ if meta.applied then
+  S.applyVerified+=1
+  S.groupApplied+=1
+  groupPersistenceSampleV08(p,meta,"IMMEDIATE")
+  scheduleGroupPersistenceV08(p,meta)
+  event("V08_GROUP_APPLY",{path=meta.path,debugId=meta.debugId,fromGroup=meta.originalCollisionGroup,toGroup=S.v08SelectedPassGroup,canCollide=after.canCollide,canQuery=after.canQuery,canQueryRestored=okQ})
+ else
+  S.applyVerifyFailed+=1
+  S.groupApplyFailed+=1
+  event("V08_GROUP_APPLY_FAILED",{path=meta.path,debugId=meta.debugId,before=before,after=after,selectedGroup=S.v08SelectedPassGroup,groupWriteOk=okG,groupError=tostring(eG),canQueryRestoreOk=okQ,canQueryError=tostring(eQ)})
+ end
+ return meta.applied
+end
+
+restore=function(p,meta)
+ if not p or not p.Parent then return false end
+ local before=readPartState(p)
+ local targetGroup=meta.originalCollisionGroup or (meta.baselineState and meta.baselineState.collisionGroup) or "Default"
+ local okG,eG=pcall(function() p.CollisionGroup=targetGroup end)
+ local okQ,eQ=true,nil
+ if meta.originalCanQuery~=nil then okQ,eQ=pcall(function() p.CanQuery=meta.originalCanQuery end) end
+ local after=readPartState(p)
+ meta.lastRestoreBefore=before
+ meta.lastRestoreAfter=after
+ meta.groupApplied=false
+ meta.applied=false
+ local restored=okG and after.collisionGroup==targetGroup and (meta.originalCanQuery==nil or (after.canQueryReadOk and after.canQuery==meta.originalCanQuery))
+ if restored then S.groupRestored+=1 else S.groupRestoreFailed+=1 end
+ event("V08_GROUP_RESTORE",{path=meta.path,debugId=meta.debugId,targetGroup=targetGroup,restored=restored,after=after,groupError=tostring(eG),canQueryError=tostring(eQ)})
+ return restored
+end
+
+setEnabled=function(v,reason)
+ if S.closed or S.enabled==v then return end
+ if v then
+  scan("V08_ENABLE_REFRESH")
+  local ok,why=prepareExistingGroupStrategyV08()
+  if not ok then
+   S.last="V0.8 BLOQUEADO • "..tostring(why)
+   updateUI()
+   return
+  end
+  S.enabled=true
+  local n=0
+  for p,m in pairs(S.candidates) do
+   if p.Parent and not m.applied and apply(p,m) then n+=1 end
+  end
+  if n==0 and #S.order>0 then
+   S.enabled=false
+   S.groupStrategyReady=false
+   S.groupStrategyBlockedReason="GRUPO_COMPATIVEL_ENCONTRADO_MAS_NENHUMA_PAREDE_ACEITOU_O_GRUPO"
+   S.last="V0.8 BLOQUEADO • "..S.groupStrategyBlockedReason
+   event("V08_NOCLIP_APPLY_ZERO",{selectedGroup=S.v08SelectedPassGroup,total=#S.order})
+  else
+   S.last=string.format("V0.8 ATIVO • grupo %s • %d/%d paredes",tostring(S.v08SelectedPassGroup),n,#S.order)
+   event("NOCLIP_ON",{reason=reason,changed=n,total=#S.order,mechanism="EXISTING_COLLISION_GROUP",selectedGroup=S.v08SelectedPassGroup})
+  end
+ else
+  S.enabled=false
+  local n=0
+  for p,m in pairs(S.candidates) do
+   if p.Parent and m.applied and restore(p,m) then n+=1 end
+  end
+  S.last=string.format("V0.8 DESATIVADO • restauradas %d/%d",n,#S.order)
+  event("NOCLIP_OFF",{reason=reason,changed=n,total=#S.order,mechanism="EXISTING_COLLISION_GROUP"})
+ end
+ updateUI()
+end
+
+local _payloadV07=payload
+payload=function()
+ local t=_payloadV07()
+ t.version=C.VERSION
+ t.policy=t.policy or {}
+ t.policy.mode="MAP_WALL_EXISTING_COLLISION_GROUP_V08"
+ t.policy.primaryMechanism="V0.8 não registra grupos e não altera a matriz de colisão. Seleciona apenas um CollisionGroup já existente que o probe comprova ser ignorado por raycast Default e ainda consultável pelo(s) grupo(s) físico(s) do personagem local."
+ t.policy.v06ClientRegistrationDeprecated=true
+ t.policy.canQueryRole="CanQuery é preservado no valor original; a separação V0.8 depende exclusivamente de um grupo existente compatível."
+ t.summary=t.summary or {}
+ t.summary.v08SelectedPassGroup=S.v08SelectedPassGroup
+ t.summary.v08DiscoveredGroups=S.v08DiscoveredGroups
+ t.summary.v08CompatibilityTests=S.v08CompatibilityTests
+ t.summary.v08PrepareMethod=S.v08PrepareMethod
+ t.summary.v08ProbeErrors=S.v08ProbeErrors
+ t.summary.v08GroupPersistenceSamples=S.v08GroupPersistenceSamples
+ t.summary.v08GroupReverts=S.v08GroupReverts
+ t.summary.v08ActivationAttempts=S.v08ActivationAttempts
+ t.summary.v08ActivationBlocked=S.v08ActivationBlocked
+ return t
+end
+
+save=function()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+ if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_8_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then
+  local a,b=pcall(writefile,name,json)
+  if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+ end
+ if typeof(setclipboard)=="function" then
+  local a,b=pcall(setclipboard,json)
+  if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+ end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
+
+local _updateUIV07=updateUI
+updateUI=function()
+ _updateUIV07()
+ Reader.Text=string.gsub(Reader.Text,"Leitor V0%.7","Leitor V0.8")
+ local selected=S.v08SelectedPassGroup and tostring(S.v08SelectedPassGroup) or "nenhum"
+ local mode=S.groupStrategyReady and ("OK • "..selected) or (S.groupStrategyBlockedReason and ("BLOQUEADO • "..tostring(S.groupStrategyBlockedReason)) or "aguardando teste")
+ Reader.Text=Reader.Text..string.format("\nV0.8 grupo existente: %s\nGrupos encontrados: %d • probes: %d • erros: %d\nPersistência grupo: %d • reversões: %d",mode,#(S.v08DiscoveredGroups or {}),#(S.v08CompatibilityTests or {}),S.v08ProbeErrors,S.v08GroupPersistenceSamples,S.v08GroupReverts)
+ ver.Text=C.VERSION
+ if S.enabled then
+  State.Text="Estado: ATIVO • grupo existente "..selected
+ elseif S.groupStrategyBlockedReason then
+  State.Text="Estado: DESATIVADO • "..tostring(S.groupStrategyBlockedReason)
+ else
+  State.Text="Estado: DESATIVADO • restaurado"
+ end
+end
+
+local rtV08=ENV[C.KEY]
+if type(rtV08)=="table" then rtV08.version=C.VERSION end
+event("V08_READY",{mechanism="EXISTING_COLLISION_GROUP_EMPIRICAL_PROBE",registerCollisionGroup=false,mutateCollisionMatrix=false})
+pcall(updateUI)
