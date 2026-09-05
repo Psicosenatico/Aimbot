@@ -1,0 +1,101 @@
+local Players=game:GetService("Players")
+local HttpService=game:GetService("HttpService")
+local UIS=game:GetService("UserInputService")
+local CoreGui=game:GetService("CoreGui")
+local Workspace=game:GetService("Workspace")
+local LP=Players.LocalPlayer or Players.PlayerAdded:Wait()
+
+local C={
+ VERSION="V0.2", GUI="PsicosenaticoBulletNoclipTest_V0_2",
+ KEY="__PSICO_BULLET_NOCLIP_TEST_V0_2", THIN=5, HEIGHT=5, SPAN=8,
+}
+local ENV=_G
+if typeof(getgenv)=="function" then local ok,e=pcall(getgenv); if ok and type(e)=="table" then ENV=e end end
+for _,k in ipairs({"__PSICO_BULLET_NOCLIP_TEST_V0_1",C.KEY}) do
+ if type(ENV[k])=="table" and type(ENV[k].cleanup)=="function" then pcall(ENV[k].cleanup) end
+end
+
+local S={enabled=false,closed=false,started=os.time(),runId="",events={},shots={},candidates={},order={},counts={NAMED_WALL=0,SHAPE_WALL=0},conns={},toolConns={},errors=0,last="Nenhuma leitura ainda.",applyVerified=0,applyVerifyFailed=0,unexpectedQueryableCandidates=0,unregisteredWallHits=0}
+local updateUI=function() end
+local function full(o) local ok,v=pcall(function() return o:GetFullName() end); return ok and tostring(v) or tostring(o and o.Name or "?") end
+local function event(t,d) S.events[#S.events+1]={index=#S.events+1,unix=os.time(),time=os.clock(),type=t,data=d or {}} end
+local function err(w,e) S.errors=S.errors+1; event("ERROR",{where=w,message=tostring(e)}) end
+local function map() return Workspace:FindFirstChild("Map") end
+local function tycoons() return Workspace:FindFirstChild("Tycoons") end
+local function runId() local ok,v=pcall(function() return HttpService:GenerateGUID(false) end); return ok and v or tostring(os.time()) end
+S.runId=runId()
+
+local function explicitBlock(p)
+ local cur=p
+ for _=1,10 do
+  if not cur or cur==Workspace then break end
+  local ok,v=pcall(function() return cur:GetAttribute("BulletsCannotPierce") end)
+  if ok and v==true then return true end
+  if string.lower(cur.Name)=="lasergate" then return true end
+  cur=cur.Parent
+ end
+ return false
+end
+local function protectedMap(p)
+ if explicitBlock(p) then return true,"LASERGATE_OR_EXPLICIT" end
+ local t=tycoons(); if t and p:IsDescendantOf(t) then return true,"TYCOON_BASE" end
+ local m=map(); local combat=m and m:FindFirstChild("CombatObstacles")
+ if combat and p:IsDescendantOf(combat) then return true,"COMBAT_OBSTACLE" end
+ local q=string.lower(full(p))
+ for _,w in ipairs({"ground","mountain","terrainpart","teamcolors","teamcolor","spawn"}) do
+  if string.find(q,w,1,true) then return true,"PROTECTED_"..string.upper(w) end
+ end
+ return false,nil
+end
+local function hasWallName(p,m)
+ local cur=p
+ while cur and cur~=m do
+  if string.find(string.lower(cur.Name),"wall",1,true) then return true,full(cur) end
+  cur=cur.Parent
+ end
+ return false,nil
+end
+local function shapeCandidate(p)
+ local s=p.Size; local x,y,z=math.abs(s.X),math.abs(s.Y),math.abs(s.Z)
+ local thin=math.min(x,z); local span=math.max(x,z)
+ local ok=(y>=C.HEIGHT and thin<=C.THIN and span>=C.SPAN)
+ local floorLike=(y<=3 and span>=10 and thin>=6)
+ return ok,{size={x,y,z},thin=thin,span=span,height=y,profile=ok and "VERTICAL_THIN_PANEL_V233" or (floorLike and "FLOOR_LIKE" or "GENERIC")}
+end
+local function classify(p)
+ if not p or not p:IsA("BasePart") then return nil end
+ local m=map(); if not m or not p:IsDescendantOf(m) then return nil end
+ local prot,why=protectedMap(p); if prot then return nil,why end
+ local named,marker=hasWallName(p,m)
+ if named then local _,shape=shapeCandidate(p); return {kind="NAMED_WALL",reason="nome/caminho contém Wall",marker=marker,shape=shape} end
+ local ok,shape=shapeCandidate(p)
+ if ok then return {kind="SHAPE_WALL",reason="painel vertical fino",marker=full(p),shape=shape} end
+ return nil,"MAP_GENERIC_REVIEW"
+end
+local function apply(p,meta)
+ if not p or not p.Parent then return false end
+ local ok,e=pcall(function() p.CanQuery=false end)
+ if not ok then err("apply",e); return false end
+ local readOk,current=pcall(function() return p.CanQuery end)
+ meta.applied=readOk and current==false
+ meta.applyVerified=meta.applied
+ if meta.applied then
+  S.applyVerified+=1
+ else
+  S.applyVerifyFailed+=1
+  event("APPLY_VERIFY_FAILED",{path=meta.path,readOk=readOk,currentCanQuery=current})
+ end
+ return meta.applied
+end
+local function restore(p,meta)
+ if not p or not p.Parent then return false end
+ local ok,e=pcall(function() p.CanQuery=meta.originalCanQuery end)
+ if not ok then err("restore",e); return false end
+ meta.applied=false; return true
+end
+local function register(p,info)
+ if S.closed or S.candidates[p] then return false end
+ local ok,cq=pcall(function() return p.CanQuery end); if not ok then return false end
+ local meta={path=full(p),name=p.Name,class=p.ClassName,kind=info.kind,reason=info.reason,marker=info.marker,shape=info.shape,originalCanQuery=cq,applied=false}
+ S.candidates[p]=meta; S.order[#S.order+1]=p; S.counts[info.kind]=(S.counts[info.kind] or 0)+1
+ if S.enabled then apply(p,meta) end
