@@ -1,0 +1,60 @@
+-- V2.3.9 SYNC INDEX GUARD
+-- Hardens the V0.10 shared-bus match for high-rate automatic weapons.
+-- A NoClip record is authoritative only when shotIndex + weapon + time window all match.
+-- If the NoClip callback has not written the current record yet, Research keeps a miss and
+-- retries later/export instead of accidentally binding the previous 0.06s automatic shot.
+
+local _attachNoClipSyncLooseV239=attachNoClipSyncV239
+attachNoClipSyncV239=function(shot,countStats)
+ if not shot then return nil end
+ if shot.noClipSync and shot.noClipSync.matched and shot.noClipSync.indexGuardVerified==true then return shot.noClipSync end
+ local bus=ENV[BUS_KEY_V239]
+ local st=tonumber(shot.time)
+ local sw=shotWeaponNameV239(shot)
+ local si=tonumber(shot.shotIndex)
+ local best=nil
+ local bestDt=math.huge
+ if type(bus)=="table" and type(bus.records)=="table" and st and si then
+  for i=#bus.records,1,-1 do
+   local r=bus.records[i]
+   local rt=tonumber(r and r.time)
+   local ri=tonumber(r and r.shotIndex)
+   if rt and ri then
+    local dt=math.abs(rt-st)
+    if ri==si and dt<=C.NOCLIP_SYNC_MAX_DT and (not sw or not r.weaponName or r.weaponName==sw) and dt<bestDt then
+     best=r;bestDt=dt
+    end
+    if rt<st-C.NOCLIP_SYNC_MAX_DT and ri<si then break end
+   end
+  end
+ end
+ if best then
+  shot.noClipSync={
+   matched=true,indexGuardVerified=true,source="BULLET_NOCLIP_V010_SHARED_RUNTIME_BUS_INDEX_GUARDED",
+   seq=best.seq,deltaTime=bestDt,shotIndex=best.shotIndex,weaponName=best.weaponName,enabled=best.enabled,
+   wallDiagnosticCategory=best.wallDiagnosticCategory,teamBarrierClientState=best.teamBarrierClientState,
+   clientReachedCharacter=best.clientReachedCharacter==true,crossedCandidate=best.crossedCandidate==true,
+   normalWallClientReached=best.normalWallClientReached==true,
+   diagnosticBaselineHit=best.diagnosticBaselineHit,teamBarrier=best.teamBarrier,
+  }
+  shot.targetProtectionContext=best.targetProtectionContext
+  if countStats then S.NoClipSyncMatches+=1 end
+  return shot.noClipSync
+ end
+ shot.noClipSync={matched=false,indexGuardVerified=false,source="INDEX_MATCH_NOT_AVAILABLE_YET",expectedShotIndex=si,maxDelta=C.NOCLIP_SYNC_MAX_DT}
+ if countStats then S.NoClipSyncMisses+=1 end
+ return shot.noClipSync
+end
+
+local _exportTableSyncGuardV239=exportTable
+exportTable=function()
+ local t=_exportTableSyncGuardV239()
+ t.openEndedResearch=t.openEndedResearch or {}
+ t.openEndedResearch.noClipRuntimeSync=t.openEndedResearch.noClipRuntimeSync or {}
+ t.openEndedResearch.noClipRuntimeSync.indexGuard=true
+ t.openEndedResearch.noClipRuntimeSync.matchRule="shotIndex EXATO + weaponName compatível + |deltaTime| <= 0.080s"
+ t.openEndedResearch.noClipRuntimeSync.highRateSafety="Não aceita tiro vizinho como fallback; um miss pode ser reconciliado posteriormente/export."
+ return t
+end
+
+live("SISTEMA","V2.3.9 • sync guard: índice exato + arma + tempo; protegido contra tiro vizinho em 1000 RPM.")
