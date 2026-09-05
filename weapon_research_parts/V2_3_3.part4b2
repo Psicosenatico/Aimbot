@@ -1,0 +1,125 @@
+if resumeSession() then
+Status.Text="Retomado • a mesma sessão continua."
+Status.TextColor3=COL.green
+else
+Status.Text="Equipe uma arma antes de retomar."
+Status.TextColor3=COL.red
+end
+end
+updateUI()
+end)
+Export.Activated:Connect(function()
+if not S.Started then
+Status.Text="Inicie a coleta antes de exportar."
+Status.TextColor3=COL.yellow
+return
+end
+if S.ExportBusy then
+Status.Text="Exportação já está em andamento."
+Status.TextColor3=COL.yellow
+return
+end
+if S.Recording then pauseSession("EXPORT") end
+S.ExportBusy=true
+Status.Text="Preparando JSON • aguardando leituras de dano pendentes."
+Status.TextColor3=COL.yellow
+updateUI()
+local sessionId=S.SessionId
+task.spawn(function()
+while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do
+task.wait(0.05)
+end
+if not Gui.Parent or S.SessionId~=sessionId then return end
+local data,err=encode()
+if not data then
+S.ExportBusy=false
+Status.Text="Falha JSON: "..tostring(err)
+Status.TextColor3=COL.red
+updateUI()
+return
+end
+local name="Psicosenatico_WeaponResearch_V2_3_3_"
+..tostring(game.PlaceId)
+.."_"
+..tostring(os.time())
+..".json"
+local saved=false
+if typeof(writefile)=="function" then
+saved=pcall(function()
+writefile(name,data)
+end)
+end
+if saved then
+S.Exported=true
+Status.Text="✓ ARQUIVO EXPORTADO: "..name
+Status.TextColor3=COL.green
+elseif typeof(setclipboard)=="function" and pcall(function()
+setclipboard(data)
+end) then
+S.Exported=true
+Status.Text="✓ JSON COPIADO."
+Status.TextColor3=COL.green
+else
+Status.Text="Não foi possível salvar ou copiar o JSON."
+Status.TextColor3=COL.red
+end
+S.ExportBusy=false
+updateUI()
+end)
+end)
+Min.Activated:Connect(function()
+Main.Visible=false
+HUD.Visible=true
+updateUI()
+end)
+Open.Activated:Connect(function()
+HUD.Visible=false
+Main.Visible=true
+end)
+local function cleanup()
+S.Recording=false
+S.ExportBusy=false
+S.SessionId+=1
+for _,list in pairs(S.ToolConnections) do
+for _,c in ipairs(list) do
+pcall(function() c:Disconnect() end)
+end
+end
+for _,c in ipairs(S.Connections) do
+pcall(function() c:Disconnect() end)
+end
+pcall(function() Gui:Destroy() end)
+local rt=ENV[RUNTIME_KEY]
+if type(rt)=="table" and rt.cleanup==cleanup then
+ENV[RUNTIME_KEY]=nil
+end
+end
+ENV[RUNTIME_KEY]={
+version=C.VERSION,
+cleanup=cleanup
+}
+Close.Activated:Connect(cleanup)
+if Workspace.CurrentCamera then
+local ok,sig=pcall(function()
+return Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize")
+end)
+if ok and sig then
+S.Connections[#S.Connections+1]=sig:Connect(resize)
+end
+end
+scanWeapons("INITIAL_SCAN")
+live("SISTEMA","Pesquisa V2.3.3 pronta.")
+live("SISTEMA","Escopo ativo • Workspace.Map = candidato; Workspace.Tycoons = protegido.")
+live("SISTEMA","LaserGate/BulletsCannotPierce permanece protegido e separado.")
+live("SISTEMA","Modo livre • sem limite de tiros • pausa preserva os dados.")
+live("SISTEMA","Cada disparo é classificado automaticamente por trajetória e local.")
+live("SISTEMA","Multi-hit ativo • até 12 camadas por disparo.")
+live("SISTEMA","BulletsCannotPierce=true reconhecido como BLOQUEIO_EXPLICITO.")
+live("SISTEMA","Confirmação de dano ativa • baseline adicional para armas Auto.")
+updateUI()
+task.spawn(function()
+while Gui.Parent do
+pcall(updateUI)
+task.wait(0.75)
+end
+end)
