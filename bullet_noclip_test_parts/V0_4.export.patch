@@ -1,0 +1,31 @@
+-- V0.4 export patch
+local _payloadV03=payload
+payload=function()
+ local t=_payloadV03()
+ t.version=C.VERSION
+ t.policy=t.policy or {}
+ t.policy.mode="MAP_WALL_ONLY_V233_MATCH_DIAGNOSTIC_V04"
+ t.policy.filteredRayMechanism="Segundo raycast diagnóstico exclui explicitamente apenas as Instances registradas como NAMED_WALL/SHAPE_WALL; Tycoons/LaserGate/terreno/genérico continuam consultáveis."
+ t.policy.diagnosticNote="V0.4 preserva o teste CanQuery e adiciona baselineRay x candidateExcludedRay no mesmo evento de redução de _ammo. Isso NÃO é prova de dano nem altera RemoteEvents."
+ t.summary=t.summary or {}
+ t.summary.filteredCandidateBypassToCharacter=S.filteredCandidateBypassToCharacter
+ t.summary.filteredStoppedByProtected=S.filteredStoppedByProtected
+ t.summary.filteredNoHit=S.filteredNoHit
+ t.summary.filteredRayErrors=S.filteredRayErrors
+ return t
+end
+
+save=function()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+ if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_4_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then
+  local a,b=pcall(writefile,name,json)
+  if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+ end
+ if typeof(setclipboard)=="function" then
+  local a,b=pcall(setclipboard,json)
+  if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+ end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
