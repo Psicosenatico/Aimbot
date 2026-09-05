@@ -1,0 +1,250 @@
+confirmedShotRecords=#S.Shots,
+roundsConsumed=S.RoundCount,
+uniqueLocations=#S.LocationOrder,
+errors=S.Errors,
+byCategory=categorySummary(),
+damage=damageSummary()
+},
+architecture=S.Architecture,
+sourceInspection=S.SourceInspection,
+boundarySurvey=S.BoundarySurvey,
+explicitProjectileBlockers={
+attribute="BulletsCannotPierce",
+value=true,
+totalDetected=S.ExplicitBlockerScanTotal,
+stored=S.ExplicitBlockers
+},
+locations=buildLocationSummary(),
+tools=serializeTools(),
+shots=S.Shots,
+events=S.Events,
+interpretationRules={
+"Não existe limite programado de tiros; a sessão continua até ser pausada, fechada ou reiniciada.",
+"Cada redução confirmada de _ammo gera um registro e é classificada automaticamente pela trajetória observada.",
+"TIRO_LIVRE = nenhum impacto no alcance do raycast de referência.",
+"ESTRUTURA_BASE = geometria sob Workspace.Tycoons; protegida e marcada para NÃO atravessar.",
+"ESTRUTURA_MAPA_PAREDE = Wall nomeada ou painel vertical provável dentro de Workspace.Map; apenas candidata e requer teste.",
+"ESTRUTURA_MAPA_OBSTACULO = item sob Workspace.Map.CombatObstacles; separado para teste, sem liberação automática.",
+"ESTRUTURA_MAPA_TERRENO_PROTEGIDO = Ground/Mountain/TerrainPart; nunca candidato automático ao Wall Penetration.",
+"ESTRUTURA_MAPA_LOGICA_PROTEGIDA = team colors/spawn/lógica do mapa; nunca candidato automático.",
+"ESTRUTURA_MAPA_GENERICA_REVISAR = geometria de Workspace.Map sem marcador suficiente; não atravessar por padrão.",
+"OUTRA_ESTRUTURA = geometria fora de Workspace.Tycoons/Map; não atravessar por padrão até revisão.",
+"LASERGATE_PROTEGIDO = LaserGate/BulletsCannotPierce=true; sempre protegido e separado.",
+"ALVO_ATRAS_ESTRUTURA_BASE = personagem atrás de geometria de Workspace.Tycoons; manter proteção da base.",
+"ALVO_ATRAS_MAPA_PAREDE = personagem atrás somente de parede(s) candidata(s) do mapa.",
+"ALVO_ATRAS_MAPA_OBSTACULO = personagem atrás de obstáculo(s) de combate do mapa.",
+"ALVO_ATRAS_MAPA_TERRENO_PROTEGIDO = personagem atrás de terreno protegido do mapa.",
+"ALVO_ATRAS_MAPA_LOGICA_PROTEGIDA = personagem atrás de estrutura lógica protegida do mapa.",
+"ALVO_ATRAS_MAPA_GENERICA_REVISAR = personagem atrás de geometria genérica/mista de Workspace.Map; revisar.",
+"ALVO_ATRAS_OUTRA_ESTRUTURA = personagem atrás de geometria fora de Map/Tycoons; revisar.",
+"ALVO_ATRAS_LASERGATE_PROTEGIDO = personagem atrás de LaserGate; manter proteção.",
+"ALVO_LIVRE = personagem é o primeiro impacto.",
+"locations agrupa tiros por categoria, objeto principal e célula espacial de 20 studs; o caminho e a posição completos continuam no tiro individual.",
+"multiHitChain percorre cumulativamente até 12 peças/impactos alinhados e não simula canPierce.",
+"damageProbe observa Humanoid.Health usando Tool.Activated e, em armas Auto, uma baseline temporal pós-tiro para o próximo disparo da rajada.",
+"QUEDA_DE_HP_OBSERVADA indica correlação temporal com o disparo, não prova causal exclusiva.",
+"SEM_QUEDA_DE_HP_OBSERVADA significa somente que nenhuma redução foi observada na janela configurada.",
+"POSSIVEL_LIMITE_MAPA é heurístico e não substitui uma regra exclusivamente do servidor.",
+"Nenhum RemoteEvent é disparado e nenhum ModuleScript é executado via require()."
+}
+}
+end
+local function encode()
+local ok,v=pcall(function()
+return HttpService:JSONEncode(exportTable())
+end)
+return ok and v or nil,ok and nil or v
+end
+local COL={
+bg=Color3.fromRGB(10,10,13),
+panel=Color3.fromRGB(19,19,24),
+panel2=Color3.fromRGB(28,28,35),
+text=Color3.fromRGB(245,245,248),
+sub=Color3.fromRGB(158,158,172),
+blue=Color3.fromRGB(22,55,105),
+blue2=Color3.fromRGB(32,82,145),
+green=Color3.fromRGB(65,210,118),
+red=Color3.fromRGB(235,38,52),
+yellow=Color3.fromRGB(242,184,57)
+}
+local function new(class,p)
+local o=Instance.new(class)
+for k,v in pairs(p or {}) do o[k]=v end
+return o
+end
+local function round(o,r)
+new("UICorner",{Parent=o,CornerRadius=UDim.new(0,r or 8)})
+end
+local function label(parent,text,size,pos,ts)
+return new("TextLabel",{
+Parent=parent,
+BackgroundTransparency=1,
+Text=text,
+Size=size,
+Position=pos,
+TextColor3=COL.text,
+Font=Enum.Font.Gotham,
+TextSize=ts or 10,
+TextXAlignment=Enum.TextXAlignment.Left,
+TextYAlignment=Enum.TextYAlignment.Center
+})
+end
+local Gui=new("ScreenGui",{
+Parent=GP,
+Name=C.GUI,
+ResetOnSpawn=false,
+IgnoreGuiInset=true
+})
+local Main=new("Frame",{
+Parent=Gui,
+BackgroundColor3=COL.bg,
+BorderSizePixel=0,
+AnchorPoint=Vector2.new(0.5,0.5),
+Position=UDim2.fromScale(0.5,0.5)
+})
+round(Main,15)
+local function resize()
+local cam=Workspace.CurrentCamera
+if not cam then return end
+local v=cam.ViewportSize
+Main.Size=UDim2.fromOffset(
+math.max(320,math.min(math.floor(v.X*0.94),v.X-14)),
+math.max(285,math.min(math.floor(v.Y*0.72),v.Y-14))
+)
+end
+resize()
+local Header=new("Frame",{
+Parent=Main,
+Size=UDim2.new(1,0,0,56),
+BackgroundColor3=COL.panel,
+BorderSizePixel=0
+})
+round(Header,15)
+label(Header,"PSICOSENATICO • PESQUISA DE ARMAS",UDim2.new(1,-140,0,24),UDim2.fromOffset(14,5),14)
+local Ver=label(Header,"V2.3.3",UDim2.fromOffset(48,16),UDim2.fromOffset(14,32),9)
+Ver.TextColor3=COL.blue2
+local Sub=label(Header,"PESQUISA LIVRE • CLASSIFICAÇÃO AUTOMÁTICA",UDim2.new(1,-190,0,16),UDim2.fromOffset(66,32),8)
+Sub.TextColor3=COL.sub
+local Min=new("TextButton",{
+Parent=Header,
+Size=UDim2.fromOffset(36,32),
+Position=UDim2.new(1,-82,0,11),
+Text="—",
+BackgroundColor3=COL.panel2,
+TextColor3=COL.text,
+Font=Enum.Font.GothamBold,
+TextSize=17,
+BorderSizePixel=0
+})
+round(Min,9)
+local Close=new("TextButton",{
+Parent=Header,
+Size=UDim2.fromOffset(36,32),
+Position=UDim2.new(1,-41,0,11),
+Text="×",
+BackgroundColor3=COL.red,
+TextColor3=COL.text,
+Font=Enum.Font.GothamBold,
+TextSize=19,
+BorderSizePixel=0
+})
+round(Close,9)
+local Status=label(Main,"Pronto • equipe uma arma.",UDim2.new(1,-28,0,19),UDim2.fromOffset(14,59),9)
+Status.TextColor3=COL.sub
+local Start=new("TextButton",{
+Parent=Main,
+Size=UDim2.new(0.5,-17,0,34),
+Position=UDim2.fromOffset(14,81),
+Text="INICIAR",
+BackgroundColor3=COL.blue2,
+TextColor3=COL.text,
+Font=Enum.Font.GothamBold,
+TextSize=10,
+BorderSizePixel=0
+})
+round(Start,8)
+local Export=new("TextButton",{
+Parent=Main,
+Size=UDim2.new(0.5,-17,0,34),
+Position=UDim2.new(0.5,3,0,81),
+Text="EXPORTAR",
+BackgroundColor3=COL.blue,
+TextColor3=COL.text,
+Font=Enum.Font.GothamBold,
+TextSize=10,
+BorderSizePixel=0
+})
+round(Export,8)
+local Mission=new("Frame",{
+Parent=Main,
+Position=UDim2.fromOffset(14,120),
+Size=UDim2.new(1,-28,0,48),
+BackgroundColor3=COL.panel2,
+BorderSizePixel=0
+})
+round(Mission,8)
+local MTitle=label(Mission,"MISSÃO: AGUARDANDO",UDim2.new(1,-18,0,20),UDim2.fromOffset(9,4),10)
+MTitle.Font=Enum.Font.GothamBold
+local MHelp=label(Mission,"O fluxo será automático após iniciar.",UDim2.new(1,-18,0,18),UDim2.fromOffset(9,25),8)
+MHelp.TextColor3=COL.sub
+local Summary=label(Main,"",UDim2.new(1,-28,0,18),UDim2.fromOffset(14,171),8)
+Summary.TextColor3=COL.sub
+local Viewer=new("ScrollingFrame",{
+Parent=Main,
+Position=UDim2.fromOffset(14,193),
+Size=UDim2.new(1,-28,1,-202),
+BackgroundColor3=COL.panel,
+BorderSizePixel=0,
+CanvasSize=UDim2.new(),
+AutomaticCanvasSize=Enum.AutomaticSize.Y,
+ScrollBarThickness=5,
+ScrollingDirection=Enum.ScrollingDirection.Y
+})
+round(Viewer,9)
+local Text=new("TextLabel",{
+Parent=Viewer,
+BackgroundTransparency=1,
+Position=UDim2.fromOffset(8,7),
+Size=UDim2.new(1,-16,0,0),
+AutomaticSize=Enum.AutomaticSize.Y,
+Text="",
+TextColor3=COL.text,
+Font=Enum.Font.Code,
+TextSize=9,
+TextWrapped=false,
+TextXAlignment=Enum.TextXAlignment.Left,
+TextYAlignment=Enum.TextYAlignment.Top
+})
+local HUD=new("Frame",{
+Parent=Gui,
+Visible=false,
+Active=true,
+Size=UDim2.fromOffset(340,74),
+Position=UDim2.fromScale(0.04,0.18),
+BackgroundColor3=COL.bg,
+BorderSizePixel=0
+})
+round(HUD,12)
+local HTitle=label(HUD,"AGUARDANDO",UDim2.new(1,-78,0,24),UDim2.fromOffset(12,7),10)
+HTitle.Font=Enum.Font.GothamBold
+local HHelp=label(HUD,"",UDim2.new(1,-78,0,36),UDim2.fromOffset(12,31),8)
+HHelp.TextWrapped=true
+HHelp.TextColor3=COL.sub
+local Open=new("TextButton",{
+Parent=HUD,
+Size=UDim2.fromOffset(60,48),
+Position=UDim2.new(1,-68,0,13),
+Text="ABRIR",
+BackgroundColor3=COL.blue,
+TextColor3=COL.text,
+Font=Enum.Font.GothamBold,
+TextSize=9,
+BorderSizePixel=0
+})
+round(Open,8)
+local function draggable(target,handle)
+local dragging,input,start,pos=false,nil,nil,nil
+S.Connections[#S.Connections+1]=handle.InputBegan:Connect(function(i)
+if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+dragging=true
+start=i.Position
