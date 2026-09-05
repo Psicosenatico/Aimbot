@@ -1,0 +1,252 @@
+-- V2.3.4 SHOT-LOCK PATCH
+-- Tool.Activated is auxiliary only. The authoritative category/target snapshot is taken
+-- synchronously from the _ammo decrease callback for that exact shot record.
+
+scheduleAutoBaseline=function(tool)
+ local d=S.Tools[tool]
+ if type(d)=="table" then
+  d.autoBaseline=nil
+  d.autoBaselineToken=(tonumber(d.autoBaselineToken) or 0)+1
+ end
+end
+
+popAutoBaseline=function(tool)
+ return nil,nil
+end
+
+damageSummary=function()
+ local out={
+  probes=0,damageObserved=0,noDropObserved=0,noTarget=0,pending=0,
+  overlapAmbiguous=0,reliableProbes=0,lockedAmmoMatches=0,
+  totalObservedDamage=0,byCategory={}
+ }
+ for _,shot in ipairs(S.Shots) do
+  local category=shot.autoCategory or "SEM_CLASSIFICACAO"
+  local p=shot.damageProbe
+  local b=out.byCategory[category]
+  if not b then
+   b={label=categoryLabel(category),probes=0,damageObserved=0,noDropObserved=0,noTarget=0,pending=0,overlapAmbiguous=0,reliableProbes=0,lockedAmmoMatches=0,totalObservedDamage=0}
+   out.byCategory[category]=b
+  end
+  if shot.classificationAuthority=="AMMO_DECREASE_LOCK" then
+   out.lockedAmmoMatches+=1
+   b.lockedAmmoMatches+=1
+  end
+  if p then
+   out.probes+=1; b.probes+=1
+   if p.reliable==true then out.reliableProbes+=1; b.reliableProbes+=1 end
+   if p.status=="QUEDA_DE_HP_OBSERVADA" then
+    out.damageObserved+=1; b.damageObserved+=1
+    local d=tonumber(p.observedDamage) or 0
+    out.totalObservedDamage+=d; b.totalObservedDamage+=d
+   elseif p.status=="SEM_QUEDA_DE_HP_OBSERVADA" then
+    out.noDropObserved+=1; b.noDropObserved+=1
+   elseif p.status=="PENDENTE" then
+    out.pending+=1; b.pending+=1
+   elseif p.status=="SOBREPOSTO_POR_PROXIMO_TIRO" then
+    out.overlapAmbiguous+=1; b.overlapAmbiguous+=1
+   elseif p.status=="SEM_ALVO_NO_GATILHO" or p.status=="SEM_HP_ANTES" or p.status=="ALVO_INDISPONIVEL" then
+    out.noTarget+=1; b.noTarget+=1
+   end
+  end
+ end
+ return out
+end
+
+startDamageProbe=function(shot,trigger,tool,shotToken)
+ if not trigger or not trigger.targetHumanoid or trigger.healthBefore==nil then
+  local status="SEM_ALVO_NO_GATILHO"
+  if trigger and trigger.targetHumanoid and trigger.healthBefore==nil then status="SEM_HP_ANTES" end
+  shot.damageProbe={status=status,target=trigger and trigger.target or nil,samples={},reliable=false,classificationAuthority=shot.classificationAuthority}
+  return false
+ end
+ local hum=trigger.targetHumanoid
+ local before=tonumber(trigger.healthBefore)
+ local sessionId=S.SessionId
+ shot.damageProbe={
+  status="PENDENTE",target=trigger.target,healthBefore=before,maxHealth=trigger.maxHealth,
+  baselineSource=trigger.source,healthAtAmmoDecrease=tonumber(prop(hum,"Health")),observedDamage=0,
+  healthMinimum=before,died=false,samples={},reliable=true,overlapped=false,
+  classificationAuthority=shot.classificationAuthority,shotToken=shotToken
+ }
+ S.PendingDamageProbes+=1
+ task.spawn(function()
+  local lastDelay=0
+  local minHealth=before
+  local validSamples=0
+  local h0=shot.damageProbe.healthAtAmmoDecrease
+  if type(h0)=="number" then minHealth=math.min(minHealth,h0) end
+  for _,delay in ipairs(C.DAMAGE_SAMPLE_DELAYS) do
+   task.wait(math.max(0,delay-lastDelay))
+   lastDelay=delay
+   if S.SessionId~=sessionId then return end
+   local td=S.Tools[tool]
+   if type(td)=="table" and tonumber(td.shotToken)~=tonumber(shotToken) then
+    shot.damageProbe.status="SOBREPOSTO_POR_PROXIMO_TIRO"
+    shot.damageProbe.reliable=false
+    shot.damageProbe.overlapped=true
+    break
+   end
+   local exists=hum and hum.Parent~=nil
+   local h=exists and tonumber(prop(hum,"Health")) or nil
+   shot.damageProbe.samples[#shot.damageProbe.samples+1]={delay=delay,health=h,targetExists=exists}
+   if type(h)=="number" then validSamples+=1; minHealth=math.min(minHealth,h) end
+  end
+  if S.SessionId~=sessionId then return end
+  if shot.damageProbe.status~="SOBREPOSTO_POR_PROXIMO_TIRO" then
+   local drop=math.max(0,before-minHealth)
+   shot.damageProbe.healthMinimum=minHealth
+   shot.damageProbe.observedDamage=drop
+   shot.damageProbe.died=minHealth<=0
+   if validSamples==0 and shot.damageProbe.healthAtAmmoDecrease==nil then
+    shot.damageProbe.status="ALVO_INDISPONIVEL"
+    shot.damageProbe.reliable=false
+   elseif drop>0.001 then
+    shot.damageProbe.status="QUEDA_DE_HP_OBSERVADA"
+   else
+    shot.damageProbe.status="SEM_QUEDA_DE_HP_OBSERVADA"
+   end
+  end
+  log("DAMAGE_PROBE_RESULT",{
+   category=shot.autoCategory,locationId=shot.locationId,target=shot.damageProbe.target,
+   healthBefore=before,healthMinimum=shot.damageProbe.healthMinimum,observedDamage=shot.damageProbe.observedDamage,
+   status=shot.damageProbe.status,reliable=shot.damageProbe.reliable,overlapped=shot.damageProbe.overlapped,
+   classificationAuthority=shot.classificationAuthority
+  },string.format("%s • dano:%s • confiável:%s",tostring(shot.autoCategory),tostring(shot.damageProbe.status),tostring(shot.damageProbe.reliable)))
+  S.PendingDamageProbes=math.max(0,S.PendingDamageProbes-1)
+  if type(S.UIRefresh)=="function" then pcall(S.UIRefresh) end
+ end)
+ return true
+end
+
+registerWeapon=function(tool,reason)
+ if not isWeapon(tool) or S.Tools[tool] then return end
+ S.Tools[tool]={
+  name=tool.Name,reason=reason,firstPath=full(tool),initial=weapon(tool),
+  lastAmmo=tonumber(attr(tool,"_ammo")),autoBaseline=nil,autoBaselineToken=0,lastUsedAutoBaselineTime=nil,
+  shotToken=0
+ }
+ log("WEAPON_FOUND",{reason=reason,snapshot=weapon(tool)},"Arma: "..tool.Name)
+ addToolConn(tool,tool.Equipped:Connect(function()
+  S.ActiveTool=tool
+  local d=S.Tools[tool]
+  if d then
+   d.lastAmmo=tonumber(attr(tool,"_ammo")); d.autoBaseline=nil; d.autoBaselineToken=(tonumber(d.autoBaselineToken) or 0)+1
+   d.lastUsedAutoBaselineTime=nil; d.shotToken=0
+  end
+  log("WEAPON_EQUIPPED",{name=tool.Name},tool.Name.." equipada")
+ end))
+ addToolConn(tool,tool.Unequipped:Connect(function()
+  if S.ActiveTool==tool then S.ActiveTool=nil end
+  local d=S.Tools[tool]
+  if d then d.autoBaseline=nil; d.autoBaselineToken=(tonumber(d.autoBaselineToken) or 0)+1 end
+  log("WEAPON_UNEQUIPPED",{name=tool.Name},tool.Name.." desequipada")
+ end))
+ addToolConn(tool,tool.Activated:Connect(function()
+  if not S.Recording or S.ExportBusy then return end
+  local trigger=makeTriggerSnapshot(tool,"TOOL_ACTIVATED_PRE_SHOT")
+  pushPendingTrigger(tool,trigger)
+  local previewCategory,previewReason=classifyShot(trigger.referenceRay)
+  log("SHOT_TRIGGER",{weapon=tool.Name,previewCategory=previewCategory,previewReason=previewReason,hasTarget=trigger.target~=nil,source="TOOL_ACTIVATED_PRE_SHOT"},tool.Name.." • pré-tiro • "..categoryLabel(previewCategory))
+ end))
+ for _,name in ipairs(C.ATTRS) do
+  local ok,sig=pcall(function() return tool:GetAttributeChangedSignal(name) end)
+  if ok and sig then
+   addToolConn(tool,sig:Connect(function()
+    local value=attr(tool,name)
+    local d=S.Tools[tool]
+    if name=="_ammo" and d then
+     local before,after=tonumber(d.lastAmmo),tonumber(value)
+     if before and after and after<before and S.Recording and not S.ExportBusy then
+      local raw=before-after
+      d.shotToken=(tonumber(d.shotToken) or 0)+1
+      local shotToken=d.shotToken
+      local preTrigger,preTriggerAge=popPendingTrigger(tool)
+      local preCategory,preReason=nil,nil
+      if preTrigger and preTrigger.sessionId==S.SessionId then
+       preCategory,preReason=classifyShot(preTrigger.referenceRay)
+      else
+       preTrigger=nil
+      end
+      local locked=makeTriggerSnapshot(tool,"AMMO_DECREASE_LOCK")
+      local ref=locked.referenceRay
+      local category,categoryReason,categoryMeta=classifyShot(ref)
+      local loc=resolveLocation(ref,category,categoryReason)
+      local shotIndex=#S.Shots+1
+      local changed=(preCategory~=nil and preCategory~=category) or false
+      local shot={
+       shotIndex=shotIndex,time=clock(),unix=unix(),source="AMMO_DECREASE",ammoBefore=before,ammoAfter=after,ammoDelta=raw,
+       classificationAuthority="AMMO_DECREASE_LOCK",classificationLockedAtTime=locked.time,classificationLockedAtUnix=locked.unix,
+       triggerMatched=true,triggerAge=0,triggerMatchSource="AMMO_DECREASE_LOCK",referenceRaySource="AMMO_DECREASE_LOCK",
+       preTriggerMatched=preTrigger~=nil,preTriggerAge=preTriggerAge,preTriggerCategory=preCategory,preTriggerCategoryReason=preReason,
+       preTriggerReferenceRay=preTrigger and preTrigger.referenceRay or nil,categoryChangedSinceTrigger=changed,
+       weapon=weapon(tool),referenceRay=ref,assessment=ref and ref.assessment or "LEITURA_INDISPONIVEL",
+       autoCategory=category,autoCategoryLabel=categoryLabel(category),autoCategoryReason=categoryReason,
+       classificationMeta=categoryMeta,wallPenetrationPolicy=categoryMeta and categoryMeta.policy or nil,
+       structureScope=categoryMeta and categoryMeta.scope or nil,baseRootPath=categoryMeta and categoryMeta.baseRootPath or nil,
+       baseRootName=categoryMeta and categoryMeta.baseRootName or nil,mapDecision=categoryMeta and categoryMeta.mapDecision or nil,
+       mapLayers=categoryMeta and categoryMeta.mapLayers or nil,locationId=loc and loc.id or nil,
+       locationPrimaryPath=loc and loc.primaryPath or nil,locationPositionCell=loc and loc.positionCell or nil,
+       shotToken=shotToken
+      }
+      S.Shots[#S.Shots+1]=shot
+      S.RoundCount+=raw
+      S.CategoryCounts[category]=(S.CategoryCounts[category] or 0)+1
+      S.LastCategory=category; S.LastCategoryLabel=categoryLabel(category); S.LastLocationId=loc and loc.id or nil
+      S.LastLocationText=(loc and (loc.id.." • "..tostring(loc.primaryName))) or "SEM LOCAL"
+      S.LastAssessment=shot.assessment
+      S.LastShotLockText=string.format("#%d • %s%s",shotIndex,categoryLabel(category),changed and " • mudou desde o gatilho" or "")
+      if loc then loc.records+=1; loc.rounds+=raw end
+      startDamageProbe(shot,locked,tool,shotToken)
+      log("SHOT_AMMO_CONFIRMED",{
+       shotIndex=shotIndex,weapon=tool.Name,ammoDelta=raw,category=category,locationId=shot.locationId,
+       assessment=shot.assessment,classificationAuthority=shot.classificationAuthority,
+       preTriggerCategory=preCategory,categoryChangedSinceTrigger=changed
+      },string.format("#%d • LOCK • %s • %s",shotIndex,categoryLabel(category),tostring(shot.locationId or "SEM_LOCAL")))
+      if changed then
+       log("CATEGORY_CHANGED_SINCE_TRIGGER",{shotIndex=shotIndex,preTriggerCategory=preCategory,lockedCategory=category,preTriggerAge=preTriggerAge},"Categoria mudou entre gatilho e _ammo; vale o SHOT-LOCK")
+      end
+      live("CLASSIFICACAO_LOCK",S.LastShotLockText)
+      if type(S.UIRefresh)=="function" then pcall(S.UIRefresh) end
+     end
+     d.lastAmmo=after or value
+    elseif S.Recording then
+     log("ATTRIBUTE_CHANGED",{weapon=tool.Name,attribute=name,value=value},tool.Name.." • "..name.."="..tostring(value))
+    end
+   end))
+  end
+ end
+end
+
+local _resetSessionV233=resetSession
+resetSession=function()
+ _resetSessionV233()
+ S.LastShotLockText=nil
+ for _,d in pairs(S.Tools) do if type(d)=="table" then d.shotToken=0 end end
+end
+
+local _beginSessionV233=beginSession
+beginSession=function()
+ local ok=_beginSessionV233()
+ if ok then
+  log("SHOT_LOCK_MODE",{authority="AMMO_DECREASE_LOCK",toolActivatedRole="AUXILIARY_PRE_SHOT",autoBaselineForClassification=false},"V2.3.4 • classificação congelada no _ammo")
+ end
+ return ok
+end
+
+local _exportTableV233=exportTable
+exportTable=function()
+ local t=_exportTableV233()
+ t.version=C.VERSION
+ t.mode="SHOT_LOCKED_AMMO_DECREASE_CLASSIFICATION"
+ t.openEndedResearch=t.openEndedResearch or {}
+ t.openEndedResearch.classificationAuthority="AMMO_DECREASE_LOCK"
+ t.openEndedResearch.toolActivatedRole="AUXILIARY_PRE_SHOT_COMPARISON"
+ t.openEndedResearch.autoBaselineUsedForClassification=false
+ t.openEndedResearch.damageOverlapRule="Se outro tiro ocorrer durante a janela do probe, o resultado vira SOBREPOSTO_POR_PROXIMO_TIRO e não conta como dano confiável."
+ t.interpretationRules=t.interpretationRules or {}
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.4: autoCategory é congelada a partir do raycast executado dentro da redução de _ammo; a atualização visual do menu não participa da classificação."
+ t.interpretationRules[#t.interpretationRules+1]="Tool.Activated é apenas snapshot pré-tiro auxiliar; se divergir do SHOT-LOCK, categoryChangedSinceTrigger=true e prevalece AMMO_DECREASE_LOCK."
+ t.interpretationRules[#t.interpretationRules+1]="SOBREPOSTO_POR_PROXIMO_TIRO é ambíguo e não deve ser tratado como evidência de penetração."
+ return t
+end
