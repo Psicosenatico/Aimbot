@@ -1,6 +1,6 @@
 -- PSICOSENATICO • BULLET NOCLIP TEST V0.10
 -- V0.8 mecanismo por CollisionGroup existente + V0.9 barreira de time + V0.10 shared bus/contexto do alvo.
-local SOURCE_COMMIT="73a42b65541a06dd4a338136492b93a2e4373226"
+local SOURCE_COMMIT="2ac9c58d532146daa61e41540cbe354433c97de8"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/bullet_noclip_test_parts/"
 local PARTS={
     "V0_3.part1",
