@@ -1,0 +1,500 @@
+out.explicitBlocks[#out.explicitBlocks+1]={
+chainIndex=index,
+path=item.explicitBlockPath or item.instance,
+name=item.explicitBlockName or item.instanceName,
+class=item.explicitBlockClass or item.instanceClass,
+totalDistance=item.totalDistance
+}
+end
+if item.hasHumanoid and not out.firstCharacterIndex then
+out.firstCharacterIndex=index
+out.chainStopReason="PERSONAGEM_ENCONTRADO"
+targetModel=result.Instance and result.Instance:FindFirstAncestorOfClass("Model") or nil
+targetHumanoid=targetModel and targetModel:FindFirstChildOfClass("Humanoid") or nil
+break
+end
+excluded[#excluded+1]=result.Instance
+local travelled=(result.Position-ray.Origin).Magnitude+C.RAY_EPSILON
+remaining=range-travelled
+currentOrigin=result.Position+unit*C.RAY_EPSILON
+if index==C.MAX_HIT_CHAIN then
+out.chainStopReason="MAX_CAMADAS_ATINGIDO"
+end
+end
+out.hitChainCount=#out.multiHitChain
+out.assessment=assessment(out)
+return out,targetHumanoid,targetModel
+end
+local function categoryLabel(category)
+return C.CATEGORY_LABELS[category] or tostring(category or "-")
+end
+local function chainScopeInfo(ref)
+local info={
+firstLaser=nil,
+firstBase=nil,
+firstMap=nil,
+firstOther=nil,
+baseRootPath=nil,
+baseRootName=nil
+}
+local chain=ref and ref.multiHitChain or {}
+local characterIndex=ref and ref.firstCharacterIndex or nil
+local maxIndex=characterIndex and math.max(0,characterIndex-1) or #chain
+for i,item in ipairs(chain) do
+if i>maxIndex then break end
+if not item.hasHumanoid then
+local scope=item.structureScope
+if scope=="LASERGATE_PROTEGIDO" and not info.firstLaser then
+info.firstLaser=i
+elseif scope=="BASE_PLAYER" and not info.firstBase then
+info.firstBase=i
+info.baseRootPath=item.baseRootPath
+info.baseRootName=item.baseRootName
+elseif scope=="MAPA" and not info.firstMap then
+info.firstMap=i
+elseif scope=="OUTRA_ESTRUTURA" and not info.firstOther then
+info.firstOther=i
+end
+end
+end
+return info
+end
+local function mapChainDecision(ref)
+local chain=ref and ref.multiHitChain or {}
+local characterIndex=ref and ref.firstCharacterIndex or nil
+local maxIndex=characterIndex and math.max(0,characterIndex-1) or #chain
+local out={items={},firstIndex=nil,firstItem=nil,counts={}}
+for i,item in ipairs(chain) do
+if i>maxIndex then break end
+if item.structureScope=="MAPA" and not item.hasHumanoid then
+local subtype=item.mapSubtype or "MAP_GENERIC_REVIEW"
+out.items[#out.items+1]={index=i,subtype=subtype,path=item.instance,policy=item.penetrationPolicy,reason=item.mapSubtypeReason}
+out.counts[subtype]=(out.counts[subtype] or 0)+1
+if not out.firstIndex then out.firstIndex=i; out.firstItem=item end
+end
+end
+if #out.items==0 then return out end
+local c=out.counts
+if c.MAP_TERRAIN_PROTECTED then
+out.decision="TERRENO_PROTEGIDO"
+out.policy="PROTEGIDO_NAO_ATRAVESSAR"
+out.reason="trajetória contém Ground/Mountain/TerrainPart"
+elseif c.MAP_GAMEPLAY_PROTECTED then
+out.decision="LOGICA_PROTEGIDA"
+out.policy="PROTEGIDO_NAO_ATRAVESSAR"
+out.reason="trajetória contém estrutura lógica/team colors/spawn"
+elseif c.MAP_GENERIC_REVIEW then
+out.decision="GENERICA_REVISAR"
+out.policy="REVISAR_NAO_ATRAVESSAR_POR_PADRAO"
+out.reason="trajetória contém geometria genérica do mapa sem marcador forte de parede"
+elseif c.MAP_COMBAT_OBSTACLE_REVIEW and (c.MAP_WALL_NAMED_CANDIDATE or c.MAP_WALL_SHAPE_CANDIDATE) then
+out.decision="GENERICA_REVISAR"
+out.policy="REVISAR_NAO_ATRAVESSAR_POR_PADRAO"
+out.reason="trajetória mistura obstáculo de combate e parede candidata"
+elseif c.MAP_COMBAT_OBSTACLE_REVIEW then
+out.decision="OBSTACULO"
+out.policy="CANDIDATO_OBSTACULO_REQUER_TESTE"
+out.reason="trajetória contém somente obstáculo(s) de combate do mapa"
+elseif c.MAP_WALL_NAMED_CANDIDATE or c.MAP_WALL_SHAPE_CANDIDATE then
+out.decision="PAREDE"
+out.policy="CANDIDATO_PAREDE_MAPA_REQUER_TESTE"
+out.reason="toda geometria de Workspace.Map antes do alvo é candidata a parede"
+else
+out.decision="GENERICA_REVISAR"
+out.policy="REVISAR_NAO_ATRAVESSAR_POR_PADRAO"
+out.reason="subtipo de mapa não reconhecido"
+end
+return out
+end
+local function mapCategoryForDecision(decision,behindTarget)
+local prefix=behindTarget and "ALVO_ATRAS_MAPA_" or "ESTRUTURA_MAPA_"
+if decision=="PAREDE" then return prefix.."PAREDE" end
+if decision=="OBSTACULO" then return prefix.."OBSTACULO" end
+if decision=="TERRENO_PROTEGIDO" then return prefix.."TERRENO_PROTEGIDO" end
+if decision=="LOGICA_PROTEGIDA" then return prefix.."LOGICA_PROTEGIDA" end
+return prefix.."GENERICA_REVISAR"
+end
+local function classifyShot(ref)
+if not ref or not ref.ok then
+return "LEITURA_INDISPONIVEL","raycast de referência indisponível",{policy="REVISAR"}
+end
+if not ref.hit or not ref.firstHit then
+return "TIRO_LIVRE","nenhum impacto dentro do alcance",{policy="SEM_GEOMETRIA"}
+end
+local characterIndex=ref.firstCharacterIndex
+if characterIndex==1 then
+return "ALVO_LIVRE","personagem é o primeiro impacto",{policy="ALVO_DIRETO",scope="PERSONAGEM"}
+end
+local info=chainScopeInfo(ref)
+if characterIndex and characterIndex>1 then
+if info.firstLaser then
+return "ALVO_ATRAS_LASERGATE_PROTEGIDO",string.format(
+"LaserGate/BulletsCannotPierce na camada %d antes do personagem na camada %d",
+info.firstLaser,characterIndex
+),{policy="PROTEGIDO_NAO_ATRAVESSAR",scope="LASERGATE_PROTEGIDO",scopeIndex=info.firstLaser}
+end
+if info.firstBase then
+return "ALVO_ATRAS_ESTRUTURA_BASE",string.format(
+"estrutura de Workspace.Tycoons na camada %d antes do personagem na camada %d",
+info.firstBase,characterIndex
+),{policy="PROTEGIDO_NAO_ATRAVESSAR",scope="BASE_PLAYER",scopeIndex=info.firstBase,baseRootPath=info.baseRootPath,baseRootName=info.baseRootName}
+end
+if info.firstOther then
+return "ALVO_ATRAS_OUTRA_ESTRUTURA",string.format(
+"geometria fora de Workspace.Map/Tycoons na camada %d antes do personagem na camada %d",
+info.firstOther,characterIndex
+),{policy="REVISAR_NAO_ATRAVESSAR_POR_PADRAO",scope="OUTRA_ESTRUTURA",scopeIndex=info.firstOther}
+end
+if info.firstMap then
+local md=mapChainDecision(ref)
+local category=mapCategoryForDecision(md.decision,true)
+return category,string.format(
+"%s • personagem na camada %d após %d camada(s) de Workspace.Map",
+tostring(md.reason or "estrutura do mapa"),characterIndex,#md.items
+),{policy=md.policy,scope="MAPA",scopeIndex=md.firstIndex,mapDecision=md.decision,mapLayers=md.items}
+end
+return "ALVO_ATRAS_OUTRA_ESTRUTURA",string.format(
+"personagem na camada %d após geometria não classificada",
+characterIndex
+),{policy="REVISAR_NAO_ATRAVESSAR_POR_PADRAO",scope="OUTRA_ESTRUTURA",scopeIndex=info.firstOther}
+end
+if info.firstLaser then
+return "LASERGATE_PROTEGIDO",string.format(
+"LaserGate/BulletsCannotPierce detectado na camada %d",info.firstLaser
+),{policy="PROTEGIDO_NAO_ATRAVESSAR",scope="LASERGATE_PROTEGIDO",scopeIndex=info.firstLaser}
+end
+if info.firstBase then
+return "ESTRUTURA_BASE",string.format(
+"estrutura descendente de Workspace.Tycoons detectada na camada %d",info.firstBase
+),{policy="PROTEGIDO_NAO_ATRAVESSAR",scope="BASE_PLAYER",scopeIndex=info.firstBase,baseRootPath=info.baseRootPath,baseRootName=info.baseRootName}
+end
+if info.firstOther then
+return "OUTRA_ESTRUTURA",string.format(
+"geometria fora de Workspace.Map/Tycoons na camada %d; cadeia com %d impacto(s)",
+info.firstOther,#(ref.multiHitChain or {})
+),{policy="REVISAR_NAO_ATRAVESSAR_POR_PADRAO",scope="OUTRA_ESTRUTURA",scopeIndex=info.firstOther}
+end
+if ref.firstHit.classification=="POSSIVEL_LIMITE_MAPA" and ref.firstHit.structureScope=="MAPA" then
+return "POSSIVEL_LIMITE_MAPA","primeiro impacto de Workspace.Map possui indícios heurísticos de limite",{policy="PROTEGIDO_NAO_ATRAVESSAR_POR_PADRAO",scope="MAPA"}
+end
+if info.firstMap then
+local md=mapChainDecision(ref)
+local category=mapCategoryForDecision(md.decision,false)
+return category,tostring(md.reason or "estrutura do mapa"),{policy=md.policy,scope="MAPA",scopeIndex=md.firstIndex,mapDecision=md.decision,mapLayers=md.items}
+end
+return "OUTRA_ESTRUTURA",string.format(
+"geometria não classificada; cadeia com %d impacto(s); fim: %s",
+#(ref.multiHitChain or {}),tostring(ref.chainStopReason or "DESCONHECIDO")
+),{policy="REVISAR_NAO_ATRAVESSAR_POR_PADRAO",scope="OUTRA_ESTRUTURA",scopeIndex=info.firstOther}
+end
+local function gridNumber(v)
+local g=C.LOCATION_GRID
+return math.floor((tonumber(v) or 0)/g+0.5)
+end
+local function locationHit(ref,category)
+if not ref then return nil end
+local chain=ref.multiHitChain or {}
+local wantedScope=nil
+local wantedMap=nil
+if category=="LASERGATE_PROTEGIDO" or category=="ALVO_ATRAS_LASERGATE_PROTEGIDO" then wantedScope="LASERGATE_PROTEGIDO" end
+if category=="ESTRUTURA_BASE" or category=="ALVO_ATRAS_ESTRUTURA_BASE" then wantedScope="BASE_PLAYER" end
+if category=="OUTRA_ESTRUTURA" or category=="ALVO_ATRAS_OUTRA_ESTRUTURA" then wantedScope="OUTRA_ESTRUTURA" end
+if category=="ESTRUTURA_MAPA_PAREDE" or category=="ALVO_ATRAS_MAPA_PAREDE" then wantedMap="PAREDE" end
+if category=="ESTRUTURA_MAPA_OBSTACULO" or category=="ALVO_ATRAS_MAPA_OBSTACULO" then wantedMap="OBSTACULO" end
+if category=="ESTRUTURA_MAPA_TERRENO_PROTEGIDO" or category=="ALVO_ATRAS_MAPA_TERRENO_PROTEGIDO" then wantedMap="TERRENO" end
+if category=="ESTRUTURA_MAPA_LOGICA_PROTEGIDA" or category=="ALVO_ATRAS_MAPA_LOGICA_PROTEGIDA" then wantedMap="LOGICA" end
+if category=="ESTRUTURA_MAPA_GENERICA_REVISAR" or category=="ALVO_ATRAS_MAPA_GENERICA_REVISAR" then wantedMap="GENERICA" end
+local maxIndex=ref.firstCharacterIndex and math.max(0,ref.firstCharacterIndex-1) or #chain
+if wantedScope then
+for i,item in ipairs(chain) do
+if i>maxIndex then break end
+if item.structureScope==wantedScope and not item.hasHumanoid then return item end
+end
+end
+if wantedMap then
+for i,item in ipairs(chain) do
+if i>maxIndex then break end
+if item.structureScope=="MAPA" and not item.hasHumanoid then
+local st=item.mapSubtype or "MAP_GENERIC_REVIEW"
+if wantedMap=="PAREDE" and (st=="MAP_WALL_NAMED_CANDIDATE" or st=="MAP_WALL_SHAPE_CANDIDATE") then return item end
+if wantedMap=="OBSTACULO" and st=="MAP_COMBAT_OBSTACLE_REVIEW" then return item end
+if wantedMap=="TERRENO" and st=="MAP_TERRAIN_PROTECTED" then return item end
+if wantedMap=="LOGICA" and st=="MAP_GAMEPLAY_PROTECTED" then return item end
+if wantedMap=="GENERICA" and st=="MAP_GENERIC_REVIEW" then return item end
+end
+end
+end
+if category=="ALVO_LIVRE" and ref.firstCharacterIndex then
+return chain[ref.firstCharacterIndex]
+end
+return ref.firstHit
+end
+local function resolveLocation(ref,category,reason)
+local item=locationHit(ref,category)
+local primaryPath="SEM_OBJETO"
+local primaryName="SEM_OBJETO"
+local modelPath=nil
+local pos=nil
+local explicitPath=nil
+local structureScope=nil
+local penetrationPolicy=nil
+local baseRootPath=nil
+local baseRootName=nil
+local mapSubtype=nil
+local mapSubtypeReason=nil
+local mapShapeProfile=nil
+if item then
+primaryPath=item.instance or "SEM_CAMINHO"
+primaryName=item.instanceName or item.modelName or "OBJETO"
+modelPath=item.model
+pos=item.position
+structureScope=item.structureScope
+penetrationPolicy=item.penetrationPolicy
+baseRootPath=item.baseRootPath
+baseRootName=item.baseRootName
+mapSubtype=item.mapSubtype
+mapSubtypeReason=item.mapSubtypeReason
+mapShapeProfile=item.mapShapeProfile
+if item.explicitProjectileBlock then
+explicitPath=item.explicitBlockPath or item.instance
+primaryPath=explicitPath or primaryPath
+primaryName=item.explicitBlockName or primaryName
+end
+end
+local cell="SEM_POSICAO"
+if type(pos)=="table" and #pos>=3 then
+cell=string.format("%d:%d:%d",gridNumber(pos[1]),gridNumber(pos[2]),gridNumber(pos[3]))
+end
+local key=table.concat({tostring(category),tostring(primaryPath),cell},"|")
+local id=S.LocationMap[key]
+local def=nil
+if id then
+def=S.LocationDefs[id]
+else
+id=string.format("L%04d",#S.LocationOrder+1)
+def={
+id=id,
+category=category,
+categoryLabel=categoryLabel(category),
+primaryPath=primaryPath,
+primaryName=primaryName,
+modelPath=modelPath,
+explicitBlockPath=explicitPath,
+structureScope=structureScope,
+penetrationPolicy=penetrationPolicy,
+baseRootPath=baseRootPath,
+baseRootName=baseRootName,
+mapSubtype=mapSubtype,
+mapSubtypeReason=mapSubtypeReason,
+mapShapeProfile=mapShapeProfile,
+positionCell=cell,
+firstPosition=pos,
+firstSeenUnix=unix(),
+firstSeenTime=clock(),
+firstReason=reason,
+records=0,
+rounds=0
+}
+S.LocationMap[key]=id
+S.LocationDefs[id]=def
+S.LocationOrder[#S.LocationOrder+1]=id
+end
+return def
+end
+local function categorySummary()
+local out={}
+for k,v in pairs(S.CategoryCounts) do
+out[k]={label=categoryLabel(k),records=v}
+end
+return out
+end
+local function buildLocationSummary()
+local out={}
+for _,id in ipairs(S.LocationOrder) do
+local d=S.LocationDefs[id]
+if d then
+out[#out+1]={
+id=d.id,
+category=d.category,
+categoryLabel=d.categoryLabel,
+primaryPath=d.primaryPath,
+primaryName=d.primaryName,
+modelPath=d.modelPath,
+explicitBlockPath=d.explicitBlockPath,
+structureScope=d.structureScope,
+penetrationPolicy=d.penetrationPolicy,
+baseRootPath=d.baseRootPath,
+baseRootName=d.baseRootName,
+mapSubtype=d.mapSubtype,
+mapSubtypeReason=d.mapSubtypeReason,
+mapShapeProfile=d.mapShapeProfile,
+positionCell=d.positionCell,
+firstPosition=d.firstPosition,
+firstSeenUnix=d.firstSeenUnix,
+records=0,
+rounds=0,
+damageObserved=0,
+noDamageObserved=0,
+noTargetForDamage=0,
+totalObservedDamage=0,
+targets={}
+}
+end
+end
+local byId={}
+for _,d in ipairs(out) do byId[d.id]=d end
+for _,shot in ipairs(S.Shots) do
+local d=byId[shot.locationId]
+if d then
+d.records+=1
+d.rounds+=(tonumber(shot.ammoDelta) or 1)
+local p=shot.damageProbe
+if p then
+if p.status=="QUEDA_DE_HP_OBSERVADA" then
+d.damageObserved+=1
+d.totalObservedDamage+=(tonumber(p.observedDamage) or 0)
+elseif p.status=="SEM_QUEDA_DE_HP_OBSERVADA" then
+d.noDamageObserved+=1
+elseif p.status=="SEM_ALVO_NO_GATILHO" or p.status=="SEM_HP_ANTES" or p.status=="ALVO_INDISPONIVEL" then
+d.noTargetForDamage+=1
+end
+if p.target and p.target.modelPath then
+d.targets[p.target.modelPath]=true
+end
+end
+end
+end
+for _,d in ipairs(out) do
+local arr={}
+for targetPath in pairs(d.targets) do arr[#arr+1]=targetPath end
+table.sort(arr)
+d.targets=arr
+end
+return out
+end
+local function boundarySurvey()
+local cam=Workspace.CurrentCamera
+if not cam then return end
+local origin=cam.CFrame.Position
+local dirs={
+{"CIMA",Vector3.new(0,1,0)},
+{"NORTE",Vector3.new(0,0,-1)},
+{"SUL",Vector3.new(0,0,1)},
+{"LESTE",Vector3.new(1,0,0)},
+{"OESTE",Vector3.new(-1,0,0)}
+}
+local p=RaycastParams.new()
+p.FilterType=Enum.RaycastFilterType.Exclude
+p.IgnoreWater=false
+p.FilterDescendantsInstances=LP.Character and {LP.Character,cam} or {cam}
+S.BoundarySurvey={}
+for _,v in ipairs(dirs) do
+local ok,r=pcall(function()
+return Workspace:Raycast(origin,v[2]*C.BOUNDARY_DISTANCE,p)
+end)
+S.BoundarySurvey[#S.BoundarySurvey+1]={
+direction=v[1],
+ok=ok,
+hit=ok and r~=nil or false,
+firstHit=ok and describe(r,origin) or nil,
+error=ok and nil or tostring(r)
+}
+end
+log("BOUNDARY_SURVEY",{rays=S.BoundarySurvey},"Leitura auxiliar de possíveis limites concluída")
+end
+local function objectPosition(o)
+if not o then return nil end
+if o:IsA("BasePart") then return o.Position end
+if o:IsA("Model") then
+local ok,p=pcall(function() return o:GetPivot().Position end)
+if ok then return p end
+end
+return nil
+end
+local function scanExplicitBlockers()
+local origin=nil
+local ch=LP.Character
+local root=ch and ch:FindFirstChild("HumanoidRootPart") or nil
+if root then origin=root.Position
+elseif Workspace.CurrentCamera then origin=Workspace.CurrentCamera.CFrame.Position end
+local found={}
+local total=0
+local ok,desc=pcall(function() return Workspace:GetDescendants() end)
+if ok and type(desc)=="table" then
+for _,o in ipairs(desc) do
+if attr(o,"BulletsCannotPierce")==true then
+total+=1
+local pos=objectPosition(o)
+local dist=(origin and pos) and (pos-origin).Magnitude or nil
+found[#found+1]={
+path=full(o),
+name=o.Name,
+class=o.ClassName,
+distanceFromPlayer=dist,
+transparency=prop(o,"Transparency"),
+canCollide=prop(o,"CanCollide"),
+canQuery=prop(o,"CanQuery"),
+size=(typeof(prop(o,"Size"))=="Vector3") and {prop(o,"Size").X,prop(o,"Size").Y,prop(o,"Size").Z} or nil,
+attributeValue=true
+}
+end
+end
+end
+table.sort(found,function(a,b)
+local da=tonumber(a.distanceFromPlayer) or math.huge
+local db=tonumber(b.distanceFromPlayer) or math.huge
+if da==db then return tostring(a.path)<tostring(b.path) end
+return da<db
+end)
+S.ExplicitBlockers=found
+S.ExplicitBlockerScanTotal=total
+log("EXPLICIT_BLOCKER_SCAN",{
+total=total,
+stored=#found,
+nearest=found[1]
+},string.format("BulletsCannotPierce=true • %d peça(s) detectada(s)",total))
+end
+local function lastCategoryLabel()
+return S.LastCategoryLabel or "AGUARDANDO DISPARO"
+end
+local function lastLocationText()
+return S.LastLocationText or "O scanner classificará automaticamente cada trajetória."
+end
+local function targetSnapshot(hum,model,ref)
+if not hum then return nil end
+local health=tonumber(prop(hum,"Health"))
+local maxHealth=tonumber(prop(hum,"MaxHealth"))
+return {
+modelName=model and model.Name or nil,
+modelPath=model and full(model) or nil,
+humanoidPath=full(hum),
+health=health,
+maxHealth=maxHealth,
+firstCharacterIndex=ref and ref.firstCharacterIndex or nil,
+layersBeforeTarget=(ref and ref.firstCharacterIndex) and math.max(0,ref.firstCharacterIndex-1) or nil,
+firstExplicitBlockIndex=ref and ref.firstExplicitBlockIndex or nil,
+explicitBlockBeforeTarget=(ref and ref.firstExplicitBlockIndex and ref.firstCharacterIndex and ref.firstExplicitBlockIndex<ref.firstCharacterIndex) and true or false,
+explicitBlocks=ref and ref.explicitBlocks or {}
+}
+end
+local function pushPendingTrigger(tool,entry)
+local q=S.PendingTriggers[tool]
+if type(q)~="table" then q={};S.PendingTriggers[tool]=q end
+q[#q+1]=entry
+while #q>8 do table.remove(q,1) end
+end
+local function popPendingTrigger(tool)
+local q=S.PendingTriggers[tool]
+if type(q)~="table" then return nil,nil end
+local now=clock()
+while #q>0 do
+local e=table.remove(q,1)
+local age=now-(tonumber(e.time) or now)
+if age>=0 and age<=C.DAMAGE_TRIGGER_MAX_AGE then
+return e,age
+end
+end
+return nil,nil
+end
+local function makeTriggerSnapshot(tool,source)
+local ref,targetHumanoid,targetModel=referenceRay(tool)
