@@ -1,0 +1,62 @@
+if resumeSession() then
+Status.Text="Retomado • a mesma sessão continua."
+Status.TextColor3=COL.green
+else
+Status.Text="Equipe uma arma antes de retomar."
+Status.TextColor3=COL.red
+end
+end
+updateUI()
+end)
+Export.Activated:Connect(function()
+if not S.Started then
+Status.Text="Inicie a coleta antes de exportar."
+Status.TextColor3=COL.yellow
+return
+end
+if S.ExportBusy then
+Status.Text="Exportação já está em andamento."
+Status.TextColor3=COL.yellow
+return
+end
+if S.Recording then pauseSession("EXPORT") end
+S.ExportBusy=true
+Status.Text="Preparando JSON • aguardando leituras de dano pendentes."
+Status.TextColor3=COL.yellow
+updateUI()
+local sessionId=S.SessionId
+task.spawn(function()
+while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do
+task.wait(0.05)
+end
+if not Gui.Parent or S.SessionId~=sessionId then return end
+local data,err=encode()
+if not data then
+S.ExportBusy=false
+Status.Text="Falha JSON: "..tostring(err)
+Status.TextColor3=COL.red
+updateUI()
+return
+end
+local name="Psicosenatico_WeaponResearch_V2_3_3_"
+..tostring(game.PlaceId)
+.."_"
+..tostring(os.time())
+..".json"
+local saved=false
+if typeof(writefile)=="function" then
+saved=pcall(function()
+writefile(name,data)
+end)
+end
+if saved then
+S.Exported=true
+Status.Text="✓ ARQUIVO EXPORTADO: "..name
+Status.TextColor3=COL.green
+elseif typeof(setclipboard)=="function" and pcall(function()
+setclipboard(data)
+end) then
+S.Exported=true
+Status.Text="✓ JSON COPIADO."
+Status.TextColor3=COL.green
+else
