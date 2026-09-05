@@ -1,0 +1,260 @@
+-- V0.12 TARGET-SEGMENT TEAM BARRIER + DIRECTION/TEAM NORMALIZATION
+-- Preserves V0.8 PlayerOnly mechanics unchanged.
+-- A ForceField+SmoothPlastic signature is only an effective team-protection barrier for a shot
+-- when that bundle is geometrically BETWEEN the ray origin and the resolved target.
+-- Also records shooter/target side, crossing direction and canonical target team.
+
+C.VERSION="V0.12"
+S.v012BarrierBetweenTarget=0
+S.v012BarrierBehindTarget=0
+S.v012TargetInsideBarrier=0
+S.v012BarrierNoTarget=0
+S.v012TeamResolvedFromModelAttribute=0
+S.v012BusCorrections=0
+
+local function canonicalTeamV012(ctx)
+ if type(ctx)~="table" then return nil,nil end
+ local current=ctx.team and ctx.team.name or nil
+ if current~=nil and tostring(current)~="" then
+  ctx.resolvedTeamName=tostring(current)
+  ctx.resolvedTeamSource="PLAYER_TEAM"
+  return ctx.resolvedTeamName,ctx.resolvedTeamSource
+ end
+ local attrs=ctx.modelAttributes
+ if type(attrs)=="table" then
+  for _,key in ipairs({"Team","Faction","Side"}) do
+   local v=attrs[key]
+   if v~=nil and tostring(v)~="" then
+    ctx.team=type(ctx.team)=="table" and ctx.team or {}
+    ctx.team.name=tostring(v)
+    ctx.team.source="MODEL_ATTRIBUTE_"..string.upper(key)
+    ctx.resolvedTeamName=tostring(v)
+    ctx.resolvedTeamSource=ctx.team.source
+    S.v012TeamResolvedFromModelAttribute+=1
+    return ctx.resolvedTeamName,ctx.resolvedTeamSource
+   end
+  end
+ end
+ ctx.resolvedTeamName=nil
+ ctx.resolvedTeamSource="UNRESOLVED"
+ return nil,ctx.resolvedTeamSource
+end
+
+local function pointSideV012(barrier,pos)
+ if not barrier or typeof(pos)~="Vector3" then return nil end
+ local p=barrierPartByDebugV010(barrier)
+ if not p or not p.Parent then return nil end
+ local ok,res=pcall(function()
+  local localPos=p.CFrame:PointToObjectSpace(pos)
+  local s=p.Size
+  local thinAxis=math.abs(s.X)<=math.abs(s.Z) and "X" or "Z"
+  local signed=thinAxis=="X" and localPos.X or localPos.Z
+  local thinSize=thinAxis=="X" and math.abs(s.X) or math.abs(s.Z)
+  return {
+   thinAxis=thinAxis,
+   signedThinOffset=signed,
+   absoluteThinOffset=math.abs(signed),
+   side=signed>=0 and "POSITIVE" or "NEGATIVE",
+   insideThickness=math.abs(signed)<=thinSize*0.5+0.05,
+   localPosition={localPos.X,localPos.Y,localPos.Z},
+   barrierDebugId=safeDebugId(p),barrierPath=full(p)
+  }
+ end)
+ return ok and res or nil
+end
+
+local function targetDistanceV012(rec,bundle)
+ local hit=rec and rec.diagnosticBaselineHit
+ if hit and hit.humanoid==true and tonumber(hit.distance) then
+  return tonumber(hit.distance),"NOCLIP_BASELINE_HUMANOID"
+ end
+ local after=bundle and bundle.firstImpactAfterExit
+ if after and after.humanoid==true and tonumber(after.distance) then
+  return tonumber(after.distance),"POST_EXIT_HUMANOID"
+ end
+ local ctx=rec and rec.targetProtectionContext
+ local tr=rec and rec.wallTraversal
+ if ctx and type(ctx.rootPosition)=="table" and tr and type(tr.rayOrigin)=="table" and type(tr.rayDirection)=="table" then
+  local o=Vector3.new(tr.rayOrigin[1] or 0,tr.rayOrigin[2] or 0,tr.rayOrigin[3] or 0)
+  local u=Vector3.new(tr.rayDirection[1] or 0,tr.rayDirection[2] or 0,tr.rayDirection[3] or 0)
+  local rp=Vector3.new(ctx.rootPosition[1] or 0,ctx.rootPosition[2] or 0,ctx.rootPosition[3] or 0)
+  if u.Magnitude>0 then return (rp-o):Dot(u.Unit),"TARGET_ROOT_PROJECTION" end
+ end
+ return nil,"TARGET_DISTANCE_UNAVAILABLE"
+end
+
+local function barrierSegmentRelationV012(rec,bundle,barrier)
+ local targetDistance,targetSource=targetDistanceV012(rec,bundle)
+ local entry=tonumber(bundle and bundle.entryDistance or barrier and barrier.entryDistance)
+ local exit=tonumber(bundle and bundle.exitDistance or barrier and barrier.exitDistance)
+ local relation="SEM_ALVO"
+ local between=false
+ if targetDistance and entry and exit then
+  if targetDistance>exit+0.05 then relation="BARREIRA_ENTRE_CAMERA_E_ALVO";between=true
+  elseif targetDistance<entry-0.05 then relation="BARREIRA_ATRAS_DO_ALVO"
+  else relation="ALVO_DENTRO_OU_NA_BARREIRA" end
+ end
+ local tr=rec and rec.wallTraversal
+ local shooterSide=nil
+ if tr and type(tr.rayOrigin)=="table" then
+  shooterSide=pointSideV012(barrier,Vector3.new(tr.rayOrigin[1] or 0,tr.rayOrigin[2] or 0,tr.rayOrigin[3] or 0))
+ end
+ local ctx=rec and rec.targetProtectionContext
+ local targetSide=ctx and ctx.teamBarrierSide or nil
+ if not targetSide and ctx and type(ctx.rootPosition)=="table" then
+  targetSide=pointSideV012(barrier,Vector3.new(ctx.rootPosition[1] or 0,ctx.rootPosition[2] or 0,ctx.rootPosition[3] or 0))
+ end
+ local direction="INDETERMINADA"
+ if shooterSide and targetSide and shooterSide.side and targetSide.side then
+  if shooterSide.side==targetSide.side then direction="MESMO_LADO_"..shooterSide.side
+  else direction=shooterSide.side.."_TO_"..targetSide.side end
+ end
+ return {
+  relation=relation,betweenCameraAndTarget=between,
+  targetDistance=targetDistance,targetDistanceSource=targetSource,
+  barrierEntryDistance=entry,barrierExitDistance=exit,
+  shooterSide=shooterSide,targetSide=targetSide,crossingDirection=direction
+ }
+end
+
+local function effectiveBarrierForShotV012(rec)
+ local tr=rec and rec.wallTraversal
+ if not tr or type(tr.compositeBundles)~="table" then return nil,nil,nil end
+ local rejected=nil
+ for i,b in ipairs(tr.compositeBundles) do
+  local barrier=classifyTeamBarrierBundleV09(b)
+  if barrier then
+   barrier.bundleIndex=i
+   barrier.firstImpactAfterExit=b.firstImpactAfterExit
+   barrier.gapToNextBundle=b.gapToNextBundle
+   local rel=barrierSegmentRelationV012(rec,b,barrier)
+   if rel.betweenCameraAndTarget then return barrier,b,rel end
+   rejected={barrier=barrier,bundle=b,relation=rel}
+  end
+ end
+ return nil,nil,rejected and rejected.relation or nil
+end
+
+local function patchBusRecordV012(rec)
+ local entry=busV010 and busV010.last
+ if not entry or not rec or tonumber(entry.shotIndex)~=tonumber(rec.index) then return end
+ entry.wallDiagnosticCategory=rec.wallDiagnosticCategory
+ entry.teamBarrierClientState=rec.teamBarrierClientState
+ entry.barrierSegmentRelation=rec.barrierSegmentRelation
+ entry.barrierBetweenCameraAndTarget=rec.barrierBetweenCameraAndTarget
+ entry.barrierCrossingDirection=rec.barrierCrossingDirection
+ entry.shooterBarrierSide=rec.shooterBarrierSide
+ entry.targetBarrierSide=rec.targetBarrierSide
+ entry.targetProtectionContext=rec.targetProtectionContext
+ entry.version=C.VERSION
+ S.v012BusCorrections+=1
+end
+
+local _shotReadV011=shotRead
+shotRead=function(tool,delta)
+ _shotReadV011(tool,delta)
+ local rec=S.shots[#S.shots]
+ if not rec then return end
+ if type(rec.targetProtectionContext)=="table" then canonicalTeamV012(rec.targetProtectionContext) end
+ local barrier,bundle,rel=effectiveBarrierForShotV012(rec)
+ if barrier and bundle and rel then
+  rec.teamBarrier=barrier
+  rec.barrierSegmentRelation=rel.relation
+  rec.barrierBetweenCameraAndTarget=true
+  rec.barrierCrossingDirection=rel.crossingDirection
+  rec.shooterBarrierSide=rel.shooterSide
+  rec.targetBarrierSide=rel.targetSide
+  rec.wallDiagnosticCategory="BARREIRA_PROTECAO_TIME"
+  rec.teamBarrierValidForTarget=true
+  -- Re-evaluate client state only for a barrier that is truly before the target.
+  rec.teamBarrierClientState=v09BaselineState(rec,bundle,barrier)
+  S.v012BarrierBetweenTarget+=1
+ else
+  local legacyWasBarrier=rec.wallDiagnosticCategory=="BARREIRA_PROTECAO_TIME" or rec.teamBarrier~=nil
+  rec.barrierSegmentRelation=rel and rel.relation or "SEM_BARREIRA_ASSINATURA"
+  rec.barrierBetweenCameraAndTarget=false
+  rec.barrierCrossingDirection=rel and rel.crossingDirection or "INDETERMINADA"
+  rec.shooterBarrierSide=rel and rel.shooterSide or nil
+  rec.targetBarrierSide=rel and rel.targetSide or nil
+  rec.teamBarrierValidForTarget=false
+  if legacyWasBarrier then
+   rec.wallDiagnosticCategoryLegacyV09="BARREIRA_PROTECAO_TIME"
+   if rec.barrierSegmentRelation=="BARREIRA_ATRAS_DO_ALVO" then
+    rec.wallDiagnosticCategory="BARREIRA_ATRAS_DO_ALVO"
+    rec.teamBarrierClientState="BARREIRA_ATRAS_DO_ALVO_NAO_BLOQUEADORA"
+    S.v012BarrierBehindTarget+=1
+   elseif rec.barrierSegmentRelation=="ALVO_DENTRO_OU_NA_BARREIRA" then
+    rec.wallDiagnosticCategory="ALVO_DENTRO_OU_NA_BARREIRA"
+    rec.teamBarrierClientState="ALVO_DENTRO_OU_NA_BARREIRA"
+    S.v012TargetInsideBarrier+=1
+   else
+    rec.wallDiagnosticCategory="BARREIRA_SEM_ALVO_VALIDADO"
+    rec.teamBarrierClientState="SEM_ALVO_PARA_VALIDAR_BARREIRA"
+    S.v012BarrierNoTarget+=1
+   end
+  end
+ end
+ patchBusRecordV012(rec)
+ event("V012_BARRIER_SEGMENT",{
+  shotIndex=rec.index,category=rec.wallDiagnosticCategory,relation=rec.barrierSegmentRelation,
+  betweenCameraAndTarget=rec.barrierBetweenCameraAndTarget,crossingDirection=rec.barrierCrossingDirection,
+  shooterSide=rec.shooterBarrierSide,targetSide=rec.targetBarrierSide,
+  targetTeam=rec.targetProtectionContext and rec.targetProtectionContext.resolvedTeamName or nil
+ })
+ updateUI()
+end
+
+local _payloadV011=payload
+payload=function()
+ local t=_payloadV011()
+ t.version=C.VERSION
+ t.policy=t.policy or {}
+ t.policy.teamBarrierTargetSegment="V0.12 só usa BARREIRA_PROTECAO_TIME como categoria efetiva quando o bundle ForceField+SmoothPlastic está geometricamente ENTRE a origem do tiro e o alvo resolvido."
+ t.policy.crossingDirection="Registra lado do atirador e do alvo no eixo fino do painel: NEGATIVE_TO_POSITIVE, POSITIVE_TO_NEGATIVE, MESMO_LADO_* ou INDETERMINADA."
+ t.policy.botTeamResolution="Para bots, Team/Faction/Side em modelAttributes é promovido para targetProtectionContext.team quando Player.Team não existe."
+ local summary={betweenTarget=0,behindTarget=0,targetInside=0,noTarget=0,directions={},targetTeams={}}
+ for _,rec in ipairs(S.shots) do
+  local r=rec.barrierSegmentRelation
+  if r=="BARREIRA_ENTRE_CAMERA_E_ALVO" then summary.betweenTarget+=1
+  elseif r=="BARREIRA_ATRAS_DO_ALVO" then summary.behindTarget+=1
+  elseif r=="ALVO_DENTRO_OU_NA_BARREIRA" then summary.targetInside+=1
+  elseif rec.wallDiagnosticCategoryLegacyV09=="BARREIRA_PROTECAO_TIME" then summary.noTarget+=1 end
+  if rec.barrierBetweenCameraAndTarget then
+   local d=tostring(rec.barrierCrossingDirection or "INDETERMINADA")
+   summary.directions[d]=(summary.directions[d] or 0)+1
+   local team=rec.targetProtectionContext and rec.targetProtectionContext.resolvedTeamName or "?"
+   summary.targetTeams[tostring(team)]=(summary.targetTeams[tostring(team)] or 0)+1
+  end
+ end
+ t.summary=t.summary or {}
+ t.summary.teamBarrierV012=summary
+ t.summary.v012BusCorrections=S.v012BusCorrections
+ t.summary.v012TeamResolvedFromModelAttribute=S.v012TeamResolvedFromModelAttribute
+ return t
+end
+
+save=function()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+ if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_12_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then
+  local a,b=pcall(writefile,name,json)
+  if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+ end
+ if typeof(setclipboard)=="function" then
+  local a,b=pcall(setclipboard,json)
+  if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+ end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
+
+local _updateUIV011=updateUI
+updateUI=function()
+ _updateUIV011()
+ Reader.Text=string.gsub(Reader.Text,"Leitor V0%.11","Leitor V0.12")
+ ver.Text=C.VERSION
+end
+local rtV012=ENV[C.KEY]
+if type(rtV012)=="table" then rtV012.version=C.VERSION end
+event("V012_READY",{targetSegmentBarrier=true,crossingDirection=true,canonicalBotTeam=true,preservesV08Mechanism=true})
+pcall(updateUI)
