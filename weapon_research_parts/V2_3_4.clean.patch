@@ -1,0 +1,41 @@
+-- V2.3.4 metadata/runtime cleanup: remove stale V2.3.3 auto-baseline wording.
+beginSession=function()
+ if not S.ActiveTool or not isWeapon(S.ActiveTool) then
+  live("AVISO","Equipe uma arma antes de iniciar.")
+  return false
+ end
+ resetSession()
+ S.Started=true
+ S.Recording=true
+ log("DIAGNOSTIC_STARTED",{
+  mode="SHOT_LOCKED_AMMO_DECREASE_CLASSIFICATION",
+  classificationAuthority="AMMO_DECREASE_LOCK",
+  toolActivatedRole="AUXILIARY_PRE_SHOT_COMPARISON"
+ },"Pesquisa V2.3.4 iniciada • SHOT-LOCK no _ammo • sem limite de tiros")
+ inspectArchitecture("DIAGNOSTIC_START")
+ scanExplicitBlockers()
+ boundarySurvey()
+ return true
+end
+
+local _exportTableV234=exportTable
+exportTable=function()
+ local t=_exportTableV234()
+ t.version=C.VERSION
+ t.mode="SHOT_LOCKED_AMMO_DECREASE_CLASSIFICATION"
+ if t.openEndedResearch then
+  t.openEndedResearch.autoBaselineMaxAge=nil
+  t.openEndedResearch.autoBaselineUsedForClassification=false
+  t.openEndedResearch.classificationAuthority="AMMO_DECREASE_LOCK"
+ end
+ local cleaned={}
+ for _,rule in ipairs(t.interpretationRules or {}) do
+  local txt=tostring(rule)
+  if not string.find(txt,"baseline temporal pós-tiro",1,true) and not string.find(txt,"baseline adicional para armas Auto",1,true) then
+   cleaned[#cleaned+1]=rule
+  end
+ end
+ cleaned[#cleaned+1]="Dano confiável exige probe não sobreposto; rajadas que alcançam o próximo disparo são marcadas SOBREPOSTO_POR_PROXIMO_TIRO."
+ t.interpretationRules=cleaned
+ return t
+end
