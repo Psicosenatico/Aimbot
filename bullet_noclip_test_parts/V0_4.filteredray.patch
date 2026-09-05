@@ -1,0 +1,123 @@
+-- V0.4 FILTERED-RAY PATCH
+-- The functional CanQuery experiment is preserved. In parallel, every shot now performs
+-- a second diagnostic ray that explicitly excludes only registered map-wall candidates.
+
+local function hitRecord(hit,origin)
+ if not hit then return nil end
+ local h,m=humFrom(hit.Instance)
+ local prot,why=nil,nil
+ if hit.Instance and hit.Instance:IsA("BasePart") then prot,why=protectedMap(hit.Instance) end
+ return {
+  path=full(hit.Instance),name=hit.Instance.Name,class=hit.Instance.ClassName,material=tostring(hit.Material),
+  distance=(hit.Position-origin).Magnitude,humanoid=h~=nil,humanoidModel=m and full(m) or nil,
+  state=(hit.Instance and hit.Instance:IsA("BasePart")) and readPartState(hit.Instance) or nil,
+  protected=prot==true,protectedReason=why
+ }
+end
+
+local function candidateExcludeList()
+ local list={}
+ if LP.Character then list[#list+1]=LP.Character end
+ for p,_ in pairs(S.candidates) do
+  if p and p.Parent then list[#list+1]=p end
+ end
+ return list
+end
+
+shotRead=function(tool,delta)
+ if S.closed then return end
+ local cam=Workspace.CurrentCamera
+ if not cam then return end
+ local range=tool:GetAttribute("range")
+ if type(range)~="number" or range<=0 then range=1200 end
+ local origin=cam.CFrame.Position
+ local dir=cam.CFrame.LookVector*range
+
+ local baseParams=RaycastParams.new()
+ baseParams.FilterType=Enum.RaycastFilterType.Exclude
+ baseParams.IgnoreWater=true
+ baseParams.FilterDescendantsInstances=LP.Character and {LP.Character} or {}
+ local baseHit=nil
+ local okBase,eBase=pcall(function() baseHit=Workspace:Raycast(origin,dir,baseParams) end)
+ if not okBase then err("shotRayBaseline",eBase) end
+
+ local filteredParams=RaycastParams.new()
+ filteredParams.FilterType=Enum.RaycastFilterType.Exclude
+ filteredParams.IgnoreWater=true
+ filteredParams.FilterDescendantsInstances=candidateExcludeList()
+ local filteredHit=nil
+ local okFiltered,eFiltered=pcall(function() filteredHit=Workspace:Raycast(origin,dir,filteredParams) end)
+ if not okFiltered then
+  S.filteredRayErrors+=1
+  err("shotRayCandidateExcluded",eFiltered)
+ end
+
+ local hitDiag=nil
+ if baseHit and baseHit.Instance and baseHit.Instance:IsA("BasePart") then
+  local info,why=classify(baseHit.Instance)
+  local reg=S.candidates[baseHit.Instance]
+  local state=readPartState(baseHit.Instance)
+  local currentCanQuery=nil
+  if state.canQueryReadOk then currentCanQuery=state.canQuery end
+  hitDiag={
+   wouldBeCandidate=info~=nil,wouldKind=info and info.kind or nil,classifyReason=info and info.reason or why,
+   registered=reg~=nil,registeredKind=reg and reg.kind or nil,currentCanQuery=currentCanQuery,state=state,
+   sameRegisteredInstance=reg~=nil,registeredDebugId=reg and reg.debugId or nil,
+   engineMismatch=(S.enabled and reg~=nil and state.canQueryReadOk and state.canQuery==false) or false,
+  }
+  if S.enabled and info and not reg then
+   S.unregisteredWallHits+=1
+   event("UNREGISTERED_WALL_HIT",{path=full(baseHit.Instance),kind=info.kind,shape=info.shape,state=state})
+  elseif S.enabled and reg and state.canQueryReadOk and state.canQuery==false then
+   S.unexpectedQueryableCandidates+=1
+   event("UNEXPECTED_QUERY_HIT",{path=full(baseHit.Instance),kind=reg.kind,state=state,meaning="Workspace:Raycast returned the same registered Instance even though client read CanQuery=false"})
+  elseif S.enabled and reg and state.canQueryReadOk and state.canQuery==true then
+   S.registeredHitQueryable+=1
+   if reg.applied and not reg.revertedObserved then reg.revertedObserved=true; S.queryReverts+=1 end
+   event("REGISTERED_WALL_HIT_QUERYABLE",{path=full(baseHit.Instance),kind=reg.kind,state=state})
+  end
+ end
+
+ local baseInfo=hitRecord(baseHit,origin)
+ local filteredInfo=hitRecord(filteredHit,origin)
+ local bypassToCharacter=false
+ local baselineWasCandidate=hitDiag and hitDiag.registered==true or false
+ if baselineWasCandidate and filteredInfo and filteredInfo.humanoid then
+  bypassToCharacter=true
+  S.filteredCandidateBypassToCharacter+=1
+  event("FILTERED_RAY_REACHED_CHARACTER",{baseline=baseInfo,filtered=filteredInfo,candidateTotal=#S.order})
+ elseif filteredInfo and filteredInfo.protected then
+  S.filteredStoppedByProtected+=1
+  event("FILTERED_RAY_STOPPED_BY_PROTECTED",{baseline=baseInfo,filtered=filteredInfo})
+ elseif not filteredInfo then
+  S.filteredNoHit+=1
+ end
+
+ local rec={
+  index=#S.shots+1,unix=os.time(),time=os.clock(),enabled=S.enabled,ammoDelta=delta,weapon=weaponInfo(tool),candidateTotal=#S.order,
+  classificationAuthority="AMMO_DECREASE_DIAGNOSTIC",
+  diagnosticBaselineHit=baseInfo,
+  candidateExcludedRayHit=filteredInfo,
+  candidateExcludedRayOk=okFiltered,
+  candidateExcludedRayReachedCharacter=bypassToCharacter,
+  firstQueryableHit=baseInfo,
+  hitDiagnostic=hitDiag,
+ }
+ S.shots[#S.shots+1]=rec
+ if bypassToCharacter then
+  S.last=(S.enabled and "ATIVO • " or "OFF • ").."filtro explícito alcançou personagem após candidata"
+ elseif hitDiag and hitDiag.wouldBeCandidate then
+  local qText=hitDiag.currentCanQuery==false and "CQ=false" or (hitDiag.currentCanQuery==true and "CQ=true" or "CQ=?")
+  S.last=(S.enabled and "ATIVO • " or "OFF • ")..(hitDiag.registered and "parede registrada" or "parede NÃO registrada").." • "..qText.." • "..baseHit.Instance.Name
+ elseif filteredInfo and filteredInfo.protected then
+  S.last="filtro explícito parou em protegido • "..tostring(filteredInfo.protectedReason)
+ else
+  S.last=baseInfo and ((S.enabled and "ATIVO • baseline: " or "OFF • baseline: ")..baseInfo.name) or (S.enabled and "ATIVO • caminho livre" or "OFF • caminho livre")
+ end
+ event("SHOT",{
+  shotIndex=rec.index,enabled=S.enabled,ammoDelta=delta,classificationAuthority=rec.classificationAuthority,
+  diagnosticBaselineHit=baseInfo,candidateExcludedRayHit=filteredInfo,
+  candidateExcludedRayReachedCharacter=bypassToCharacter,hitDiagnostic=hitDiag
+ })
+ updateUI()
+end
