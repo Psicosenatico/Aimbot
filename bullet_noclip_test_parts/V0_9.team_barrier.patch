@@ -1,0 +1,212 @@
+-- V0.9 TEAM-BARRIER DIAGNOSTIC PATCH
+-- Preserves the V0.8 existing CollisionGroup mechanism.
+-- Separates the large overlapping ForceField + SmoothPlastic team-protection barrier
+-- from ordinary map walls and records the client-side path state independently of HP.
+
+C.VERSION="V0.9"
+S.teamBarrierShots=0
+S.teamBarrierBundles=0
+S.teamBarrierClientReachedCharacter=0
+S.teamBarrierClientStopped=0
+S.teamBarrierClientPassedNoCharacter=0
+S.teamBarrierAmbiguous=0
+S.normalWallClientReachedCharacter=0
+
+local function v09Size3(v)
+ if type(v)=="table" then return tonumber(v[1] or v.X),tonumber(v[2] or v.Y),tonumber(v[3] or v.Z) end
+ return nil,nil,nil
+end
+
+local function v09MemberMeta(member)
+ local id=member and member.debugId
+ if not id then return nil,nil end
+ for p,m in pairs(S.candidates) do
+  if p and p.Parent and m and tostring(m.debugId)==tostring(id) then return m,p end
+ end
+ return nil,nil
+end
+
+local function v09EnrichMember(member)
+ if not member then return nil end
+ local meta,p=v09MemberMeta(member)
+ local state=p and readPartState(p) or nil
+ local material=(state and state.material) or (meta and meta.baselineState and meta.baselineState.material) or nil
+ local size=(state and state.size) or member.size or (meta and meta.baselineState and meta.baselineState.size) or nil
+ local attrs=nil
+ local tags=nil
+ if p then
+  local okA,a=pcall(function() return p:GetAttributes() end)
+  if okA and type(a)=="table" then attrs=a end
+  local okT,t=pcall(function() return game:GetService("CollectionService"):GetTags(p) end)
+  if okT and type(t)=="table" then tags=t end
+ end
+ return {
+  debugId=member.debugId,path=member.path,name=member.name,class=member.class,kind=member.kind,
+  material=material,size=size,collisionGroup=(state and state.collisionGroup) or member.collisionGroup,
+  canCollide=(state and state.canCollide),canQuery=(state and state.canQuery),attributes=attrs,tags=tags
+ },p
+end
+
+local function v09PanelSignature(info)
+ if not info then return false,nil end
+ local x,y,z=v09Size3(info.size)
+ if not x or not y or not z then return false,nil end
+ local horizontalLong=math.max(x,z)
+ local horizontalThin=math.min(x,z)
+ local ok=(y>=20 and horizontalLong>=80 and horizontalThin<=6.5)
+ return ok,{x=x,y=y,z=z,long=horizontalLong,thin=horizontalThin}
+end
+
+local function v09SimilarPanels(a,b)
+ local oka,sa=v09PanelSignature(a)
+ local okb,sb=v09PanelSignature(b)
+ if not oka or not okb then return false end
+ local function ratio(v1,v2)
+  local hi=math.max(math.abs(v1),math.abs(v2))
+  if hi<1e-6 then return 0 end
+  return math.abs(v1-v2)/hi
+ end
+ return ratio(sa.y,sb.y)<=0.18 and ratio(sa.long,sb.long)<=0.18 and ratio(sa.thin,sb.thin)<=0.45
+end
+
+local function v09MaterialKey(v)
+ local s=string.lower(tostring(v or ""))
+ if string.find(s,"forcefield",1,true) then return "ForceField" end
+ if string.find(s,"smoothplastic",1,true) then return "SmoothPlastic" end
+ return tostring(v or "UNKNOWN")
+end
+
+local function classifyTeamBarrierBundleV09(bundle)
+ if not bundle or type(bundle.members)~="table" or #bundle.members<2 then return nil end
+ local enriched={}
+ local force=nil
+ local smooth=nil
+ for _,member in ipairs(bundle.members) do
+  local info=v09EnrichMember(member)
+  if info then
+   enriched[#enriched+1]=info
+   local mat=v09MaterialKey(info.material)
+   if mat=="ForceField" and not force then force=info end
+   if mat=="SmoothPlastic" and not smooth then smooth=info end
+  end
+ end
+ if not force or not smooth or not v09SimilarPanels(force,smooth) then return nil end
+ return {
+  category="BARREIRA_PROTECAO_TIME",
+  signature="OVERLAPPING_LARGE_FORCEFIELD_PLUS_SMOOTHPLASTIC",
+  confidence="HIGH_SIGNATURE_PAIR",
+  entryDistance=bundle.entryDistance,exitDistance=bundle.exitDistance,
+  compositeThickness=bundle.compositeThickness,memberCount=bundle.memberCount,
+  forceField=force,smoothPlastic=smooth,members=enriched,
+ }
+end
+
+local function v09BaselineState(rec,bundle,barrier)
+ local hit=rec and rec.diagnosticBaselineHit
+ if not bundle or not barrier then return "SEM_BARREIRA",nil end
+ if hit and hit.humanoid and (tonumber(hit.distance) or math.huge)>((tonumber(bundle.exitDistance) or 0)+0.03) then
+  return "CLIENTE_ATINGIU_ALVO",hit
+ end
+ if hit then
+  local id=hit.state and hit.state.debugId or nil
+  for _,m in ipairs(barrier.members or {}) do
+   if id and m.debugId and tostring(id)==tostring(m.debugId) then return "CLIENTE_PAROU_NA_BARREIRA",hit end
+  end
+  local d=tonumber(hit.distance)
+  if d and d>=((tonumber(bundle.entryDistance) or 0)-0.08) and d<=((tonumber(bundle.exitDistance) or 0)+0.08) then
+   return "CLIENTE_PAROU_NA_BARREIRA",hit
+  end
+  if d and d>(tonumber(bundle.exitDistance) or math.huge) then return "CLIENTE_PASSOU_SEM_ALVO",hit end
+  return "CLIENTE_RESULTADO_AMBIGUO",hit
+ end
+ local after=bundle.firstImpactAfterExit
+ if after and after.humanoid then return "CLIENTE_PASSOU_SEM_ALVO_BASELINE_MAS_POS_SAIDA_ENXERGA_ALVO",after end
+ if not hit then return "CLIENTE_PASSOU_SEM_ALVO",nil end
+ return "CLIENTE_RESULTADO_AMBIGUO",hit
+end
+
+local _shotReadV08=shotRead
+shotRead=function(tool,delta)
+ _shotReadV08(tool,delta)
+ local rec=S.shots[#S.shots]
+ if not rec then return end
+ local traversal=rec.wallTraversal
+ local found=nil
+ if traversal and type(traversal.compositeBundles)=="table" then
+  for i,b in ipairs(traversal.compositeBundles) do
+   local barrier=classifyTeamBarrierBundleV09(b)
+   if barrier then
+    barrier.bundleIndex=i
+    barrier.firstImpactAfterExit=b.firstImpactAfterExit
+    barrier.gapToNextBundle=b.gapToNextBundle
+    found={bundle=b,barrier=barrier}
+    break
+   end
+  end
+ end
+ if found then
+  S.teamBarrierShots+=1
+  S.teamBarrierBundles+=1
+  rec.wallDiagnosticCategory="BARREIRA_PROTECAO_TIME"
+  rec.teamBarrier=found.barrier
+  local state,evidence=v09BaselineState(rec,found.bundle,found.barrier)
+  rec.teamBarrierClientState=state
+  rec.teamBarrierClientEvidence=evidence
+  rec.teamBarrierServerDamageState="DEPENDENTE_DO_WEAPON_RESEARCH"
+  if state=="CLIENTE_ATINGIU_ALVO" then S.teamBarrierClientReachedCharacter+=1
+  elseif state=="CLIENTE_PAROU_NA_BARREIRA" then S.teamBarrierClientStopped+=1
+  elseif string.find(state,"PASSOU",1,true) then S.teamBarrierClientPassedNoCharacter+=1
+  else S.teamBarrierAmbiguous+=1 end
+  S.last="BARREIRA TIME • "..state
+  event("TEAM_BARRIER_SHOT",{shotIndex=rec.index,state=state,barrier=rec.teamBarrier,baseline=rec.diagnosticBaselineHit})
+ elseif traversal and (traversal.candidateIntersectionCount or 0)>0 and rec.diagnosticBaselineHit and rec.diagnosticBaselineHit.humanoid then
+  S.normalWallClientReachedCharacter+=1
+ end
+ updateUI()
+end
+
+local _payloadV08=payload
+payload=function()
+ local t=_payloadV08()
+ t.version=C.VERSION
+ t.policy=t.policy or {}
+ t.policy.teamBarrierDiagnostic="V0.9 separa somente bundles que contenham painéis grandes sobrepostos ForceField + SmoothPlastic com dimensões semelhantes. É uma assinatura diagnóstica conservadora, não uma regra universal do jogo."
+ t.policy.teamBarrierDamage="Bullet NoClip registra apenas o estado do caminho local; dano/HP deve ser cruzado com Weapon Research V2.3.8."
+ t.summary=t.summary or {}
+ t.summary.teamBarrierShots=S.teamBarrierShots
+ t.summary.teamBarrierBundles=S.teamBarrierBundles
+ t.summary.teamBarrierClientReachedCharacter=S.teamBarrierClientReachedCharacter
+ t.summary.teamBarrierClientStopped=S.teamBarrierClientStopped
+ t.summary.teamBarrierClientPassedNoCharacter=S.teamBarrierClientPassedNoCharacter
+ t.summary.teamBarrierAmbiguous=S.teamBarrierAmbiguous
+ t.summary.normalWallClientReachedCharacter=S.normalWallClientReachedCharacter
+ return t
+end
+
+save=function()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+ if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_9_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then
+  local a,b=pcall(writefile,name,json)
+  if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+ end
+ if typeof(setclipboard)=="function" then
+  local a,b=pcall(setclipboard,json)
+  if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+ end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
+
+local _updateUIV08=updateUI
+updateUI=function()
+ _updateUIV08()
+ Reader.Text=string.gsub(Reader.Text,"Leitor V0%.8","Leitor V0.9")
+ Reader.Text=Reader.Text..string.format("\nBarreira time: %d tiros • cliente→alvo %d • bloqueado %d\nPassou sem alvo %d • ambíguo %d",S.teamBarrierShots,S.teamBarrierClientReachedCharacter,S.teamBarrierClientStopped,S.teamBarrierClientPassedNoCharacter,S.teamBarrierAmbiguous)
+ ver.Text=C.VERSION
+end
+
+local rtV09=ENV[C.KEY]
+if type(rtV09)=="table" then rtV09.version=C.VERSION end
+event("V09_READY",{teamBarrierSignature="FORCEFIELD_PLUS_SMOOTHPLASTIC_LARGE_OVERLAP",preservesV08Mechanism=true})
+pcall(updateUI)
