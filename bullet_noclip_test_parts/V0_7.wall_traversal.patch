@@ -1,0 +1,245 @@
+-- V0.7 WALL TRAVERSAL DIAGNOSTIC PATCH
+-- Observational only. Preserves V0.6 CollisionGroup Split and records geometric
+-- entry/exit intervals for every registered candidate intersected by the shot line.
+
+C.VERSION="V0.7"
+S.traversalShotsWithCandidates=0
+S.traversalMultiLayerShots=0
+S.traversalCompositeBundles=0
+S.traversalPostExitCharacterHits=0
+S.traversalPostExitCandidateHits=0
+S.traversalPostExitOtherHits=0
+S.traversalPostExitNoHit=0
+S.traversalErrors=0
+S.traversalMaxCompositeThickness=0
+
+local function slabIntervalV07(o,d,h,tmin,tmax)
+ if math.abs(d)<1e-7 then
+  if o < -h or o > h then return nil,nil,false end
+  return tmin,tmax,true
+ end
+ local t1=(-h-o)/d
+ local t2=( h-o)/d
+ if t1>t2 then t1,t2=t2,t1 end
+ if t1>tmin then tmin=t1 end
+ if t2<tmax then tmax=t2 end
+ if tmin>tmax then return nil,nil,false end
+ return tmin,tmax,true
+end
+
+local function rayObbIntervalV07(origin,unit,maxDistance,p)
+ if not p or not p.Parent then return nil end
+ local ok,cf,size=pcall(function() return p.CFrame,p.Size end)
+ if not ok or typeof(cf)~="CFrame" or typeof(size)~="Vector3" then return nil end
+ local ro=cf:PointToObjectSpace(origin)
+ local rd=cf:VectorToObjectSpace(unit)
+ local hx,hy,hz=math.abs(size.X)*0.5,math.abs(size.Y)*0.5,math.abs(size.Z)*0.5
+ local tmin,tmax=0,maxDistance
+ local good
+ tmin,tmax,good=slabIntervalV07(ro.X,rd.X,hx,tmin,tmax); if not good then return nil end
+ tmin,tmax,good=slabIntervalV07(ro.Y,rd.Y,hy,tmin,tmax); if not good then return nil end
+ tmin,tmax,good=slabIntervalV07(ro.Z,rd.Z,hz,tmin,tmax); if not good then return nil end
+ if tmax<0 or tmin>maxDistance then return nil end
+ local entry=math.max(0,tmin)
+ local exit=math.min(maxDistance,tmax)
+ if exit+1e-5<entry then return nil end
+ return entry,exit
+end
+
+local function candidateMetaByDebugIdV07(id)
+ if id==nil then return nil,nil end
+ for p,m in pairs(S.candidates) do
+  if p and p.Parent and m and tostring(m.debugId)==tostring(id) then return m,p end
+ end
+ return nil,nil
+end
+
+local function postExitRayV07(origin,unit,maxDistance,bundle)
+ local exitDistance=tonumber(bundle and bundle.exitDistance)
+ if not exitDistance or exitDistance>=maxDistance then return nil,true,nil end
+ local eps=0.08
+ local startDistance=math.min(maxDistance,exitDistance+eps)
+ local remaining=maxDistance-startDistance
+ if remaining<=0 then return nil,true,nil end
+ local exclusions={}
+ if LP.Character then exclusions[#exclusions+1]=LP.Character end
+ for _,member in ipairs(bundle._members or {}) do
+  if member._part and member._part.Parent then exclusions[#exclusions+1]=member._part end
+ end
+ local rp=RaycastParams.new()
+ rp.FilterType=Enum.RaycastFilterType.Exclude
+ rp.IgnoreWater=true
+ rp.FilterDescendantsInstances=exclusions
+ pcall(function() rp.CollisionGroup="Default" end)
+ local start=origin+unit*startDistance
+ local hit=nil
+ local ok,e=pcall(function() hit=Workspace:Raycast(start,unit*remaining,rp) end)
+ if not ok then return nil,false,tostring(e) end
+ if not hit then return nil,true,nil end
+ local info=hitRecord(hit,origin)
+ if info then
+  info.distanceFromCandidateExit=(tonumber(info.distance) or startDistance)-exitDistance
+  local debugId=info.state and info.state.debugId or nil
+  local meta=candidateMetaByDebugIdV07(debugId)
+  info.registeredCandidate=meta~=nil
+  info.registeredCandidateKind=meta and meta.kind or nil
+ end
+ return info,true,nil
+end
+
+local function traversalForShotV07(tool)
+ local cam=Workspace.CurrentCamera
+ if not cam then return {ok=false,reason="SEM_CAMERA"} end
+ local range=tool:GetAttribute("range")
+ if type(range)~="number" or range<=0 then range=1200 end
+ local origin=cam.CFrame.Position
+ local unit=cam.CFrame.LookVector.Unit
+ local intervals={}
+ for p,m in pairs(S.candidates) do
+  if p and p.Parent and m then
+   local entry,exit=rayObbIntervalV07(origin,unit,range,p)
+   if entry and exit then
+    local state=readPartState(p)
+    intervals[#intervals+1]={
+     entryDistance=entry,
+     exitDistance=exit,
+     effectiveThickness=math.max(0,exit-entry),
+     path=m.path or full(p),name=p.Name,class=p.ClassName,debugId=m.debugId or state.debugId,
+     kind=m.kind,collisionGroup=state.collisionGroup,canCollide=state.canCollide,canQuery=state.canQuery,
+     size=state.size,_part=p
+    }
+   end
+  end
+ end
+ table.sort(intervals,function(a,b)
+  if a.entryDistance==b.entryDistance then return a.exitDistance<b.exitDistance end
+  return a.entryDistance<b.entryDistance
+ end)
+ local bundles={}
+ local mergeEps=0.08
+ for _,item in ipairs(intervals) do
+  local b=bundles[#bundles]
+  if not b or item.entryDistance>b.exitDistance+mergeEps then
+   b={entryDistance=item.entryDistance,exitDistance=item.exitDistance,_members={}}
+   bundles[#bundles+1]=b
+  else
+   if item.exitDistance>b.exitDistance then b.exitDistance=item.exitDistance end
+  end
+  b._members[#b._members+1]=item
+ end
+ for _,b in ipairs(bundles) do
+  b.compositeThickness=math.max(0,b.exitDistance-b.entryDistance)
+  b.memberCount=#b._members
+  b.members={}
+  for _,member in ipairs(b._members) do
+   b.members[#b.members+1]={
+    entryDistance=member.entryDistance,exitDistance=member.exitDistance,effectiveThickness=member.effectiveThickness,
+    path=member.path,name=member.name,class=member.class,debugId=member.debugId,kind=member.kind,
+    collisionGroup=member.collisionGroup,canCollide=member.canCollide,canQuery=member.canQuery,size=member.size
+   }
+  end
+  local hit,ok,e=postExitRayV07(origin,unit,range,b)
+  b.firstImpactAfterExit=hit
+  b.postExitRayOk=ok
+  b.postExitRayError=e
+  if not ok then S.traversalErrors+=1
+  elseif not hit then S.traversalPostExitNoHit+=1
+  elseif hit.humanoid then S.traversalPostExitCharacterHits+=1
+  elseif hit.registeredCandidate then S.traversalPostExitCandidateHits+=1
+  else S.traversalPostExitOtherHits+=1 end
+  S.traversalMaxCompositeThickness=math.max(S.traversalMaxCompositeThickness,b.compositeThickness)
+  b._members=nil
+ end
+ for i=1,#bundles-1 do
+  bundles[i].gapToNextBundle=math.max(0,bundles[i+1].entryDistance-bundles[i].exitDistance)
+ end
+ local publicIntervals={}
+ for _,item in ipairs(intervals) do
+  publicIntervals[#publicIntervals+1]={
+   entryDistance=item.entryDistance,exitDistance=item.exitDistance,effectiveThickness=item.effectiveThickness,
+   path=item.path,name=item.name,class=item.class,debugId=item.debugId,kind=item.kind,
+   collisionGroup=item.collisionGroup,canCollide=item.canCollide,canQuery=item.canQuery,size=item.size
+  }
+ end
+ return {
+  ok=true,method="OBB_ENTRY_EXIT_INTERVALS",rayOrigin={origin.X,origin.Y,origin.Z},rayDirection={unit.X,unit.Y,unit.Z},range=range,
+  candidateIntersectionCount=#publicIntervals,bundleCount=#bundles,
+  candidateIntervals=publicIntervals,compositeBundles=bundles,
+  firstCandidateEntry=publicIntervals[1] and publicIntervals[1].entryDistance or nil,
+  lastCandidateExit=publicIntervals[#publicIntervals] and publicIntervals[#publicIntervals].exitDistance or nil
+ }
+end
+
+local _shotReadV06=shotRead
+shotRead=function(tool,delta)
+ _shotReadV06(tool,delta)
+ local rec=S.shots[#S.shots]
+ if not rec then return end
+ local ok,diag=pcall(traversalForShotV07,tool)
+ if ok and type(diag)=="table" then
+  rec.wallTraversal=diag
+  if (diag.candidateIntersectionCount or 0)>0 then
+   S.traversalShotsWithCandidates+=1
+   if (diag.candidateIntersectionCount or 0)>1 then S.traversalMultiLayerShots+=1 end
+   S.traversalCompositeBundles+=diag.bundleCount or 0
+   local first=diag.compositeBundles and diag.compositeBundles[1] or nil
+   if first then
+    local after=first.firstImpactAfterExit
+    local suffix=after and (" • pós-saída: "..tostring(after.name)) or " • pós-saída: livre"
+    S.last=string.format("travessia %.2f→%.2f (%.2f studs)%s",first.entryDistance,first.exitDistance,first.compositeThickness,suffix)
+   end
+  end
+ else
+  S.traversalErrors+=1
+  rec.wallTraversal={ok=false,reason=tostring(diag)}
+  event("WALL_TRAVERSAL_ERROR",{shotIndex=rec.index,error=tostring(diag)})
+ end
+ event("WALL_TRAVERSAL",{shotIndex=rec.index,diagnostic=rec.wallTraversal})
+ updateUI()
+end
+
+local _payloadV06=payload
+payload=function()
+ local t=_payloadV06()
+ t.version=C.VERSION
+ t.policy=t.policy or {}
+ t.policy.wallTraversalDiagnostic="V0.7 mede entrada/saída OBB de cada candidata, agrupa Parts sobrepostas e faz um raycast a partir de depois da saída para localizar o primeiro impacto posterior. É diagnóstico geométrico; não prova sozinho dano/penetração do servidor."
+ t.summary=t.summary or {}
+ t.summary.traversalShotsWithCandidates=S.traversalShotsWithCandidates
+ t.summary.traversalMultiLayerShots=S.traversalMultiLayerShots
+ t.summary.traversalCompositeBundles=S.traversalCompositeBundles
+ t.summary.traversalPostExitCharacterHits=S.traversalPostExitCharacterHits
+ t.summary.traversalPostExitCandidateHits=S.traversalPostExitCandidateHits
+ t.summary.traversalPostExitOtherHits=S.traversalPostExitOtherHits
+ t.summary.traversalPostExitNoHit=S.traversalPostExitNoHit
+ t.summary.traversalErrors=S.traversalErrors
+ t.summary.traversalMaxCompositeThickness=S.traversalMaxCompositeThickness
+ return t
+end
+
+save=function()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+ if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_7_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then
+  local a,b=pcall(writefile,name,json)
+  if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+ end
+ if typeof(setclipboard)=="function" then
+  local a,b=pcall(setclipboard,json)
+  if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+ end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
+
+local _updateUIV06=updateUI
+updateUI=function()
+ _updateUIV06()
+ Reader.Text=string.gsub(Reader.Text,"Leitor V0%.6","Leitor V0.7")
+ Reader.Text=Reader.Text..string.format("\nTravessia: tiros c/ candidata %d • multicamada %d\nPós-saída → alvo %d • candidata %d • outro %d • livre %d\nMaior espessura composta: %.2f",S.traversalShotsWithCandidates,S.traversalMultiLayerShots,S.traversalPostExitCharacterHits,S.traversalPostExitCandidateHits,S.traversalPostExitOtherHits,S.traversalPostExitNoHit,S.traversalMaxCompositeThickness)
+ ver.Text=C.VERSION
+end
+local rtV07=ENV[C.KEY]
+if type(rtV07)=="table" then rtV07.version=C.VERSION end
+event("V07_READY",{diagnostic="OBB_ENTRY_EXIT_PLUS_POST_EXIT_HIT",preservesV06=true})
+pcall(updateUI)
