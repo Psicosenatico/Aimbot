@@ -7,8 +7,8 @@ local Workspace=game:GetService("Workspace")
 local CollectionService=game:GetService("CollectionService")
 local LP=Players.LocalPlayer or Players.PlayerAdded:Wait()
 local C={
-VERSION="V2.3.1",
-GUI="PsicosenaticoWeaponResearch_V2_3_1",
+VERSION="V2.3.2",
+GUI="PsicosenaticoWeaponResearch_V2_3_2",
 MAX_LIVE=110,
 BOUNDARY_DISTANCE=10000,
 MAX_HIT_CHAIN=12,
@@ -20,10 +20,14 @@ AUTO_BASELINE_DELAY_MAX=0.06,
 DAMAGE_SAMPLE_DELAYS={0.10,0.25,0.50,0.90},
 CATEGORY_LABELS={
 TIRO_LIVRE="TIRO LIVRE",
-PAREDE_OU_ESTRUTURA="PAREDE / ESTRUTURA",
-BLOQUEIO_EXPLICITO="BLOQUEIO EXPLÍCITO",
-ALVO_ATRAS_PAREDE="ALVO ATRÁS DE PAREDE",
-ALVO_ATRAS_BLOQUEIO_EXPLICITO="ALVO ATRÁS DE BLOQUEIO",
+ESTRUTURA_MAPA="ESTRUTURA DO MAPA",
+ESTRUTURA_BASE="ESTRUTURA DA BASE • PROTEGIDA",
+OUTRA_ESTRUTURA="OUTRA ESTRUTURA • REVISAR",
+LASERGATE_PROTEGIDO="LASERGATE • PROTEGIDO",
+ALVO_ATRAS_ESTRUTURA_MAPA="ALVO ATRÁS DE ESTRUTURA DO MAPA",
+ALVO_ATRAS_ESTRUTURA_BASE="ALVO ATRÁS DE ESTRUTURA DA BASE",
+ALVO_ATRAS_OUTRA_ESTRUTURA="ALVO ATRÁS DE OUTRA ESTRUTURA",
+ALVO_ATRAS_LASERGATE_PROTEGIDO="ALVO ATRÁS DE LASERGATE PROTEGIDO",
 ALVO_LIVRE="ALVO LIVRE",
 POSSIVEL_LIMITE_MAPA="POSSÍVEL LIMITE DO MAPA",
 LEITURA_INDISPONIVEL="LEITURA INDISPONÍVEL"
@@ -56,6 +60,7 @@ PsicosenaticoWeaponResearch_V2_2_3=true,
 PsicosenaticoWeaponResearch_V2_2_4=true,
 PsicosenaticoWeaponResearch_V2_2_5=true,
 PsicosenaticoWeaponResearch_V2_3_0=true,
+PsicosenaticoWeaponResearch_V2_3_1=true,
 [C.GUI]=true
 }
 for _,x in ipairs(GP:GetChildren()) do
@@ -204,6 +209,42 @@ end
 end
 return {found=false}
 end
+local function startsWith(text,prefix)
+text=tostring(text or "")
+prefix=tostring(prefix or "")
+return string.sub(text,1,#prefix)==prefix
+end
+local function tycoonRootInfo(inst)
+local cur=inst
+while cur and cur~=Workspace do
+local parent=cur.Parent
+if parent and parent.Parent==Workspace and parent.Name=="Tycoons" then
+return {path=full(cur),name=cur.Name}
+end
+cur=parent
+end
+return nil
+end
+local function hierarchyScope(inst,explicit)
+if explicit and explicit.found then
+return "LASERGATE_PROTEGIDO","BulletsCannotPierce=true associado ao objeto"
+end
+local path=inst and full(inst) or ""
+if path=="Workspace.Tycoons" or startsWith(path,"Workspace.Tycoons.") then
+return "BASE_PLAYER","objeto descendente de Workspace.Tycoons"
+end
+if path=="Workspace.Map" or startsWith(path,"Workspace.Map.") then
+return "MAPA","objeto descendente de Workspace.Map"
+end
+return "OUTRA_ESTRUTURA","objeto fora de Workspace.Tycoons e Workspace.Map"
+end
+local function penetrationPolicyForScope(scope)
+if scope=="BASE_PLAYER" then return "PROTEGIDO_NAO_ATRAVESSAR" end
+if scope=="LASERGATE_PROTEGIDO" then return "PROTEGIDO_NAO_ATRAVESSAR" end
+if scope=="MAPA" then return "CANDIDATO_MAPA_REQUER_VALIDACAO" end
+if scope=="PERSONAGEM" then return "ALVO" end
+return "REVISAR_NAO_ATRAVESSAR_POR_PADRAO"
+end
 local function classify(inst,hasHumanoid,explicit)
 if not inst then return "SEM_IMPACTO",0,{} end
 if hasHumanoid then return "PERSONAGEM",0,{"modelo possui Humanoid"} end
@@ -266,6 +307,9 @@ local model=inst and inst:FindFirstAncestorOfClass("Model") or nil
 local hum=model and model:FindFirstChildOfClass("Humanoid") or nil
 local explicit=explicitBlockInfo(inst)
 local class,score,reasons=classify(inst,hum~=nil,explicit)
+local scope,scopeReason=hierarchyScope(inst,explicit)
+if hum then scope,scopeReason="PERSONAGEM","modelo possui Humanoid" end
+local tycoonRoot=(scope=="BASE_PLAYER" or scope=="LASERGATE_PROTEGIDO") and tycoonRootInfo(inst) or nil
 local size=prop(inst,"Size")
 local attrs,tags={},{}
 pcall(function() attrs=inst:GetAttributes() end)
@@ -282,6 +326,11 @@ distance=(result.Position-origin).Magnitude,
 position={result.Position.X,result.Position.Y,result.Position.Z},
 normal={result.Normal.X,result.Normal.Y,result.Normal.Z},
 classification=class,
+structureScope=scope,
+structureScopeReason=scopeReason,
+penetrationPolicy=penetrationPolicyForScope(scope),
+baseRootPath=tycoonRoot and tycoonRoot.path or nil,
+baseRootName=tycoonRoot and tycoonRoot.name or nil,
 boundaryScore=score,
 boundaryReasons=reasons,
 explicitProjectileBlock=explicit.found==true,
@@ -403,43 +452,95 @@ end
 local function categoryLabel(category)
 return C.CATEGORY_LABELS[category] or tostring(category or "-")
 end
+local function chainScopeInfo(ref)
+local info={
+firstLaser=nil,
+firstBase=nil,
+firstMap=nil,
+firstOther=nil,
+baseRootPath=nil,
+baseRootName=nil
+}
+local chain=ref and ref.multiHitChain or {}
+local characterIndex=ref and ref.firstCharacterIndex or nil
+local maxIndex=characterIndex and math.max(0,characterIndex-1) or #chain
+for i,item in ipairs(chain) do
+if i>maxIndex then break end
+if not item.hasHumanoid then
+local scope=item.structureScope
+if scope=="LASERGATE_PROTEGIDO" and not info.firstLaser then
+info.firstLaser=i
+elseif scope=="BASE_PLAYER" and not info.firstBase then
+info.firstBase=i
+info.baseRootPath=item.baseRootPath
+info.baseRootName=item.baseRootName
+elseif scope=="MAPA" and not info.firstMap then
+info.firstMap=i
+elseif scope=="OUTRA_ESTRUTURA" and not info.firstOther then
+info.firstOther=i
+end
+end
+end
+return info
+end
 local function classifyShot(ref)
 if not ref or not ref.ok then
-return "LEITURA_INDISPONIVEL","raycast de referência indisponível"
+return "LEITURA_INDISPONIVEL","raycast de referência indisponível",{policy="REVISAR"}
 end
 if not ref.hit or not ref.firstHit then
-return "TIRO_LIVRE","nenhum impacto dentro do alcance"
+return "TIRO_LIVRE","nenhum impacto dentro do alcance",{policy="SEM_GEOMETRIA"}
 end
 local characterIndex=ref.firstCharacterIndex
-local explicitIndex=ref.firstExplicitBlockIndex
 if characterIndex==1 then
-return "ALVO_LIVRE","personagem é o primeiro impacto"
+return "ALVO_LIVRE","personagem é o primeiro impacto",{policy="ALVO_DIRETO"}
 end
-if explicitIndex and characterIndex and explicitIndex<characterIndex then
-return "ALVO_ATRAS_BLOQUEIO_EXPLICITO",string.format(
-"BulletsCannotPierce=true na camada %d antes do personagem na camada %d",
-explicitIndex,characterIndex
-)
-end
+local info=chainScopeInfo(ref)
 if characterIndex and characterIndex>1 then
-return "ALVO_ATRAS_PAREDE",string.format(
-"personagem na camada %d após %d impacto(s) de geometria",
-characterIndex,characterIndex-1
-)
+if info.firstLaser then
+return "ALVO_ATRAS_LASERGATE_PROTEGIDO",string.format(
+"LaserGate/BulletsCannotPierce na camada %d antes do personagem na camada %d",
+info.firstLaser,characterIndex
+),{policy="PROTEGIDO_NAO_ATRAVESSAR",scope="LASERGATE_PROTEGIDO",scopeIndex=info.firstLaser}
 end
-if explicitIndex then
-return "BLOQUEIO_EXPLICITO",string.format(
-"BulletsCannotPierce=true detectado na camada %d; nenhum personagem confirmado depois",
-explicitIndex
-)
+if info.firstBase then
+return "ALVO_ATRAS_ESTRUTURA_BASE",string.format(
+"estrutura de Workspace.Tycoons na camada %d antes do personagem na camada %d",
+info.firstBase,characterIndex
+),{policy="PROTEGIDO_NAO_ATRAVESSAR",scope="BASE_PLAYER",scopeIndex=info.firstBase,baseRootPath=info.baseRootPath,baseRootName=info.baseRootName}
+end
+if info.firstMap then
+return "ALVO_ATRAS_ESTRUTURA_MAPA",string.format(
+"estrutura de Workspace.Map na camada %d antes do personagem na camada %d",
+info.firstMap,characterIndex
+),{policy="CANDIDATO_MAPA_REQUER_VALIDACAO",scope="MAPA",scopeIndex=info.firstMap}
+end
+return "ALVO_ATRAS_OUTRA_ESTRUTURA",string.format(
+"personagem na camada %d após geometria fora de Workspace.Map/Tycoons",
+characterIndex
+),{policy="REVISAR_NAO_ATRAVESSAR_POR_PADRAO",scope="OUTRA_ESTRUTURA",scopeIndex=info.firstOther}
 end
 if ref.firstHit.classification=="POSSIVEL_LIMITE_MAPA" then
-return "POSSIVEL_LIMITE_MAPA","primeiro impacto possui indícios heurísticos de limite do mapa"
+return "POSSIVEL_LIMITE_MAPA","primeiro impacto possui indícios heurísticos de limite do mapa",{policy="PROTEGIDO_NAO_ATRAVESSAR_POR_PADRAO"}
 end
-return "PAREDE_OU_ESTRUTURA",string.format(
-"geometria detectada; cadeia com %d impacto(s); fim: %s",
+if info.firstLaser then
+return "LASERGATE_PROTEGIDO",string.format(
+"LaserGate/BulletsCannotPierce detectado na camada %d",info.firstLaser
+),{policy="PROTEGIDO_NAO_ATRAVESSAR",scope="LASERGATE_PROTEGIDO",scopeIndex=info.firstLaser}
+end
+if info.firstBase then
+return "ESTRUTURA_BASE",string.format(
+"estrutura descendente de Workspace.Tycoons detectada na camada %d",info.firstBase
+),{policy="PROTEGIDO_NAO_ATRAVESSAR",scope="BASE_PLAYER",scopeIndex=info.firstBase,baseRootPath=info.baseRootPath,baseRootName=info.baseRootName}
+end
+if info.firstMap then
+return "ESTRUTURA_MAPA",string.format(
+"estrutura descendente de Workspace.Map detectada na camada %d",info.firstMap
+),{policy="CANDIDATO_MAPA_REQUER_VALIDACAO",scope="MAPA",scopeIndex=info.firstMap}
+end
+return "OUTRA_ESTRUTURA",string.format(
+"geometria fora de Workspace.Map/Tycoons; cadeia com %d impacto(s); fim: %s",
 #(ref.multiHitChain or {}),tostring(ref.chainStopReason or "DESCONHECIDO")
-)
+),{policy="REVISAR_NAO_ATRAVESSAR_POR_PADRAO",scope="OUTRA_ESTRUTURA",scopeIndex=info.firstOther}
 end
 local function gridNumber(v)
 local g=C.LOCATION_GRID
@@ -448,8 +549,17 @@ end
 local function locationHit(ref,category)
 if not ref then return nil end
 local chain=ref.multiHitChain or {}
-if (category=="BLOQUEIO_EXPLICITO" or category=="ALVO_ATRAS_BLOQUEIO_EXPLICITO") and ref.firstExplicitBlockIndex then
-return chain[ref.firstExplicitBlockIndex]
+local wanted=nil
+if category=="LASERGATE_PROTEGIDO" or category=="ALVO_ATRAS_LASERGATE_PROTEGIDO" then wanted="LASERGATE_PROTEGIDO" end
+if category=="ESTRUTURA_BASE" or category=="ALVO_ATRAS_ESTRUTURA_BASE" then wanted="BASE_PLAYER" end
+if category=="ESTRUTURA_MAPA" or category=="ALVO_ATRAS_ESTRUTURA_MAPA" then wanted="MAPA" end
+if category=="OUTRA_ESTRUTURA" or category=="ALVO_ATRAS_OUTRA_ESTRUTURA" then wanted="OUTRA_ESTRUTURA" end
+if wanted then
+local maxIndex=ref.firstCharacterIndex and math.max(0,ref.firstCharacterIndex-1) or #chain
+for i,item in ipairs(chain) do
+if i>maxIndex then break end
+if item.structureScope==wanted and not item.hasHumanoid then return item end
+end
 end
 if category=="ALVO_LIVRE" and ref.firstCharacterIndex then
 return chain[ref.firstCharacterIndex]
@@ -463,11 +573,19 @@ local primaryName="SEM_OBJETO"
 local modelPath=nil
 local pos=nil
 local explicitPath=nil
+local structureScope=nil
+local penetrationPolicy=nil
+local baseRootPath=nil
+local baseRootName=nil
 if item then
 primaryPath=item.instance or "SEM_CAMINHO"
 primaryName=item.instanceName or item.modelName or "OBJETO"
 modelPath=item.model
 pos=item.position
+structureScope=item.structureScope
+penetrationPolicy=item.penetrationPolicy
+baseRootPath=item.baseRootPath
+baseRootName=item.baseRootName
 if item.explicitProjectileBlock then
 explicitPath=item.explicitBlockPath or item.instance
 primaryPath=explicitPath or primaryPath
@@ -493,6 +611,10 @@ primaryPath=primaryPath,
 primaryName=primaryName,
 modelPath=modelPath,
 explicitBlockPath=explicitPath,
+structureScope=structureScope,
+penetrationPolicy=penetrationPolicy,
+baseRootPath=baseRootPath,
+baseRootName=baseRootName,
 positionCell=cell,
 firstPosition=pos,
 firstSeenUnix=unix(),
@@ -527,6 +649,10 @@ primaryPath=d.primaryPath,
 primaryName=d.primaryName,
 modelPath=d.modelPath,
 explicitBlockPath=d.explicitBlockPath,
+structureScope=d.structureScope,
+penetrationPolicy=d.penetrationPolicy,
+baseRootPath=d.baseRootPath,
+baseRootName=d.baseRootName,
 positionCell=d.positionCell,
 firstPosition=d.firstPosition,
 firstSeenUnix=d.firstSeenUnix,
@@ -939,7 +1065,7 @@ else
 trigger=nil
 ref=referenceRay(tool)
 end
-local category,categoryReason=classifyShot(ref)
+local category,categoryReason,categoryMeta=classifyShot(ref)
 local loc=resolveLocation(ref,category,categoryReason)
 local shotIndex=#S.Shots+1
 local shot={
@@ -960,6 +1086,11 @@ assessment=ref and ref.assessment or "LEITURA_INDISPONIVEL",
 autoCategory=category,
 autoCategoryLabel=categoryLabel(category),
 autoCategoryReason=categoryReason,
+classificationMeta=categoryMeta,
+wallPenetrationPolicy=categoryMeta and categoryMeta.policy or nil,
+structureScope=categoryMeta and categoryMeta.scope or nil,
+baseRootPath=categoryMeta and categoryMeta.baseRootPath or nil,
+baseRootName=categoryMeta and categoryMeta.baseRootName or nil,
 locationId=loc and loc.id or nil,
 locationPrimaryPath=loc and loc.primaryPath or nil,
 locationPositionCell=loc and loc.positionCell or nil
@@ -1092,7 +1223,7 @@ end
 resetSession()
 S.Started=true
 S.Recording=true
-log("DIAGNOSTIC_STARTED",{mode="OPEN_ENDED_AUTO_CLASSIFICATION"},"Pesquisa V2.3.1 iniciada • sem limite de tiros")
+log("DIAGNOSTIC_STARTED",{mode="OPEN_ENDED_AUTO_CLASSIFICATION"},"Pesquisa V2.3.2 iniciada • sem limite de tiros")
 inspectArchitecture("DIAGNOSTIC_START")
 scanExplicitBlockers()
 boundarySurvey()
@@ -1165,6 +1296,21 @@ maxHitChain=C.MAX_HIT_CHAIN,
 damageSampleDelays=C.DAMAGE_SAMPLE_DELAYS,
 autoBaselineMaxAge=C.AUTO_BASELINE_MAX_AGE
 },
+wallPenetrationPolicy={
+mode="MAP_ONLY_PROTECT_BASES",
+mapScope="Workspace.Map",
+baseScope="Workspace.Tycoons",
+mapAction="CANDIDATO_REQUER_VALIDACAO_DE_PAREDE",
+baseAction="PROTEGIDO_NAO_ATRAVESSAR",
+laserGateAction="PROTEGIDO_NAO_ATRAVESSAR",
+otherStructureAction="REVISAR_NAO_ATRAVESSAR_POR_PADRAO",
+notes={
+"A leitura distingue escopo pela hierarquia real do objeto no Workspace.",
+"Qualquer geometria sob Workspace.Tycoons é tratada como estrutura de base protegida.",
+"LaserGate/BulletsCannotPierce=true permanece protegido e separado.",
+"Somente geometria sob Workspace.Map é candidata futura ao Wall Penetration; esta pesquisa não altera projéteis."
+}
+},
 summary={
 events=#S.Events,
 confirmedShotRecords=#S.Shots,
@@ -1191,10 +1337,14 @@ interpretationRules={
 "Não existe limite programado de tiros; a sessão continua até ser pausada, fechada ou reiniciada.",
 "Cada redução confirmada de _ammo gera um registro e é classificada automaticamente pela trajetória observada.",
 "TIRO_LIVRE = nenhum impacto no alcance do raycast de referência.",
-"PAREDE_OU_ESTRUTURA = geometria sem personagem confirmado depois e sem BulletsCannotPierce=true na cadeia.",
-"BLOQUEIO_EXPLICITO = BulletsCannotPierce=true detectado na peça, ancestral ou no mesmo modelo imediato da peça atingida.",
-"ALVO_ATRAS_PAREDE = personagem encontrado depois de geometria comum, sem bloqueio explícito antes dele.",
-"ALVO_ATRAS_BLOQUEIO_EXPLICITO = BulletsCannotPierce=true aparece antes do personagem na cadeia.",
+"ESTRUTURA_BASE = geometria sob Workspace.Tycoons; protegida e marcada para NÃO atravessar.",
+"ESTRUTURA_MAPA = geometria sob Workspace.Map; candidata futura, ainda exigindo validação de parede.",
+"OUTRA_ESTRUTURA = geometria fora de Workspace.Tycoons/Map; não atravessar por padrão até revisão.",
+"LASERGATE_PROTEGIDO = LaserGate/BulletsCannotPierce=true; sempre protegido e separado.",
+"ALVO_ATRAS_ESTRUTURA_BASE = personagem atrás de geometria de Workspace.Tycoons; manter proteção da base.",
+"ALVO_ATRAS_ESTRUTURA_MAPA = personagem atrás de geometria de Workspace.Map; candidato à pesquisa de Wall Penetration.",
+"ALVO_ATRAS_OUTRA_ESTRUTURA = personagem atrás de geometria fora de Map/Tycoons; revisar.",
+"ALVO_ATRAS_LASERGATE_PROTEGIDO = personagem atrás de LaserGate; manter proteção.",
 "ALVO_LIVRE = personagem é o primeiro impacto.",
 "locations agrupa tiros por categoria, objeto principal e célula espacial de 20 studs; o caminho e a posição completos continuam no tiro individual.",
 "multiHitChain percorre cumulativamente até 12 peças/impactos alinhados e não simula canPierce.",
@@ -1278,7 +1428,7 @@ BorderSizePixel=0
 })
 round(Header,15)
 label(Header,"PSICOSENATICO • PESQUISA DE ARMAS",UDim2.new(1,-140,0,24),UDim2.fromOffset(14,5),14)
-local Ver=label(Header,"V2.3.1",UDim2.fromOffset(48,16),UDim2.fromOffset(14,32),9)
+local Ver=label(Header,"V2.3.2",UDim2.fromOffset(48,16),UDim2.fromOffset(14,32),9)
 Ver.TextColor3=COL.blue2
 local Sub=label(Header,"PESQUISA LIVRE • CLASSIFICAÇÃO AUTOMÁTICA",UDim2.new(1,-190,0,16),UDim2.fromOffset(66,32),8)
 Sub.TextColor3=COL.sub
@@ -1439,7 +1589,7 @@ if not S.Started then
 MTitle.Text="PESQUISA LIVRE • AGUARDANDO"
 MHelp.Text="Equipe uma arma e inicie. Não há limite de tiros."
 HTitle.Text="PESQUISA LIVRE • AGUARDANDO"
-HHelp.Text="O scanner classificará cada disparo automaticamente."
+HHelp.Text="O scanner separará MAPA, BASE, LASERGATE e outras estruturas."
 Start.Text="INICIAR"
 elseif S.ExportBusy then
 MTitle.Text="EXPORTANDO • AGUARDE"
@@ -1453,12 +1603,12 @@ MTitle.Text=string.format("%s • SEM LIMITE • %d TIROS",pre,S.RoundCount)
 MHelp.Text="Último: "..lastCategoryLabel().." • "..lastLocationText()
 HTitle.Text=string.format("%s • %d TIROS • %s",pre,S.RoundCount,lastCategoryLabel())
 HHelp.Text=lastLocationText().."\n"..(
-S.LastAssessment and ("Leitura: "..S.LastAssessment) or "Faça disparos em paredes, bloqueios e alvos."
+S.LastAssessment and ("Leitura: "..S.LastAssessment) or "Faça disparos em paredes de mapa/base e alvos."
 )
 Start.Text=S.Recording and "PAUSAR" or "RETOMAR"
 end
 local lines={
-"PESQUISA DE ARMAS V2.3.1",
+"PESQUISA DE ARMAS V2.3.2",
 "────────────────────────────────────────",
 "MODO LIVRE • SEM LIMITE DE TIROS",
 "CLASSIFICAÇÃO AUTOMÁTICA POR DISPARO",
@@ -1469,14 +1619,20 @@ local lines={
 "BLOQUEIOS EXPLÍCITOS NO MAPA: "..tostring(S.ExplicitBlockerScanTotal),
 "",
 "TIRO LIVRE: "..tostring(S.CategoryCounts.TIRO_LIVRE or 0),
-"PAREDE / ESTRUTURA: "..tostring(S.CategoryCounts.PAREDE_OU_ESTRUTURA or 0),
-"BLOQUEIO EXPLÍCITO: "..tostring(S.CategoryCounts.BLOQUEIO_EXPLICITO or 0),
-"ALVO ATRÁS DE PAREDE: "..tostring(S.CategoryCounts.ALVO_ATRAS_PAREDE or 0),
-"ALVO ATRÁS DE BLOQUEIO: "..tostring(S.CategoryCounts.ALVO_ATRAS_BLOQUEIO_EXPLICITO or 0),
+"ESTRUTURA MAPA: "..tostring(S.CategoryCounts.ESTRUTURA_MAPA or 0),
+"ESTRUTURA BASE • PROTEGIDA: "..tostring(S.CategoryCounts.ESTRUTURA_BASE or 0),
+"OUTRA ESTRUTURA: "..tostring(S.CategoryCounts.OUTRA_ESTRUTURA or 0),
+"LASERGATE • PROTEGIDO: "..tostring(S.CategoryCounts.LASERGATE_PROTEGIDO or 0),
+"ALVO + MAPA: "..tostring(S.CategoryCounts.ALVO_ATRAS_ESTRUTURA_MAPA or 0),
+"ALVO + BASE • PROTEGIDO: "..tostring(S.CategoryCounts.ALVO_ATRAS_ESTRUTURA_BASE or 0),
+"ALVO + OUTRA: "..tostring(S.CategoryCounts.ALVO_ATRAS_OUTRA_ESTRUTURA or 0),
+"ALVO + LASERGATE • PROTEGIDO: "..tostring(S.CategoryCounts.ALVO_ATRAS_LASERGATE_PROTEGIDO or 0),
 "ALVO LIVRE: "..tostring(S.CategoryCounts.ALVO_LIVRE or 0),
 "POSSÍVEL LIMITE: "..tostring(S.CategoryCounts.POSSIVEL_LIMITE_MAPA or 0),
 "",
-"BLOQUEIO_EXPLICITO = BulletsCannotPierce=true",
+"BASE = Workspace.Tycoons • NÃO ATRAVESSAR",
+"MAPA = Workspace.Map • CANDIDATO PARA PESQUISA",
+"LASERGATE = PROTEGIDO • NÃO ATRAVESSAR",
 "O JSON agrupa trajetórias por local automaticamente.",
 "PAUSAR NÃO APAGA NADA • RETOMAR CONTINUA O MESMO ARQUIVO",
 "EXPORTAR pausa a coleta e espera o dano pendente terminar.",
@@ -1504,7 +1660,7 @@ return
 end
 if not S.Started then
 if beginSession() then
-Status.Text="Gravando sem limite • teste qualquer parede, bloqueio ou alvo."
+Status.Text="Gravando sem limite • o leitor separa mapa, base protegida e LaserGate."
 Status.TextColor3=COL.green
 else
 Status.Text="Equipe uma arma antes de iniciar."
@@ -1555,7 +1711,7 @@ Status.TextColor3=COL.red
 updateUI()
 return
 end
-local name="Psicosenatico_WeaponResearch_V2_3_1_"
+local name="Psicosenatico_WeaponResearch_V2_3_2_"
 ..tostring(game.PlaceId)
 .."_"
 ..tostring(os.time())
@@ -1625,7 +1781,9 @@ S.Connections[#S.Connections+1]=sig:Connect(resize)
 end
 end
 scanWeapons("INITIAL_SCAN")
-live("SISTEMA","Pesquisa V2.3.1 pronta.")
+live("SISTEMA","Pesquisa V2.3.2 pronta.")
+live("SISTEMA","Escopo ativo • Workspace.Map = candidato; Workspace.Tycoons = protegido.")
+live("SISTEMA","LaserGate/BulletsCannotPierce permanece protegido e separado.")
 live("SISTEMA","Modo livre • sem limite de tiros • pausa preserva os dados.")
 live("SISTEMA","Cada disparo é classificado automaticamente por trajetória e local.")
 live("SISTEMA","Multi-hit ativo • até 12 camadas por disparo.")
