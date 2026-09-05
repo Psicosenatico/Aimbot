@@ -1,0 +1,250 @@
+local Players=game:GetService("Players")
+local ReplicatedStorage=game:GetService("ReplicatedStorage")
+local HttpService=game:GetService("HttpService")
+local UserInputService=game:GetService("UserInputService")
+local CoreGui=game:GetService("CoreGui")
+local Workspace=game:GetService("Workspace")
+local CollectionService=game:GetService("CollectionService")
+local LP=Players.LocalPlayer or Players.PlayerAdded:Wait()
+local C={
+VERSION="V2.3.3",
+GUI="PsicosenaticoWeaponResearch_V2_3_3",
+MAX_LIVE=110,
+BOUNDARY_DISTANCE=10000,
+MAX_HIT_CHAIN=12,
+RAY_EPSILON=0.05,
+LOCATION_GRID=20,
+DAMAGE_TRIGGER_MAX_AGE=1.25,
+AUTO_BASELINE_MAX_AGE=0.45,
+AUTO_BASELINE_DELAY_MAX=0.06,
+DAMAGE_SAMPLE_DELAYS={0.10,0.25,0.50,0.90},
+CATEGORY_LABELS={
+TIRO_LIVRE="TIRO LIVRE",
+ESTRUTURA_MAPA_PAREDE="PAREDE DO MAPA • CANDIDATA",
+ESTRUTURA_MAPA_OBSTACULO="OBSTÁCULO DE COMBATE • REVISAR",
+ESTRUTURA_MAPA_TERRENO_PROTEGIDO="TERRENO DO MAPA • PROTEGIDO",
+ESTRUTURA_MAPA_LOGICA_PROTEGIDA="LÓGICA DO MAPA • PROTEGIDA",
+ESTRUTURA_MAPA_GENERICA_REVISAR="ESTRUTURA DO MAPA • REVISAR",
+ESTRUTURA_BASE="ESTRUTURA DA BASE • PROTEGIDA",
+OUTRA_ESTRUTURA="OUTRA ESTRUTURA • REVISAR",
+LASERGATE_PROTEGIDO="LASERGATE • PROTEGIDO",
+ALVO_ATRAS_MAPA_PAREDE="ALVO ATRÁS DE PAREDE DO MAPA",
+ALVO_ATRAS_MAPA_OBSTACULO="ALVO ATRÁS DE OBSTÁCULO DO MAPA",
+ALVO_ATRAS_MAPA_TERRENO_PROTEGIDO="ALVO ATRÁS DE TERRENO PROTEGIDO",
+ALVO_ATRAS_MAPA_LOGICA_PROTEGIDA="ALVO ATRÁS DE LÓGICA PROTEGIDA",
+ALVO_ATRAS_MAPA_GENERICA_REVISAR="ALVO ATRÁS DE ESTRUTURA DO MAPA • REVISAR",
+ALVO_ATRAS_ESTRUTURA_BASE="ALVO ATRÁS DE ESTRUTURA DA BASE",
+ALVO_ATRAS_OUTRA_ESTRUTURA="ALVO ATRÁS DE OUTRA ESTRUTURA",
+ALVO_ATRAS_LASERGATE_PROTEGIDO="ALVO ATRÁS DE LASERGATE PROTEGIDO",
+ALVO_LIVRE="ALVO LIVRE",
+POSSIVEL_LIMITE_MAPA="POSSÍVEL LIMITE DO MAPA",
+LEITURA_INDISPONIVEL="LEITURA INDISPONÍVEL"
+},
+ATTRS={"_ammo","projectileType","raysPerShot","rayRadius","range","fireMode","rateOfFire","damage","spread"},
+LIMIT_WORDS={"boundary","bounds","border","limit","limite","barrier","barreira","invisible","invis","ceiling","maplimit","map_limit","killwall","kill_wall"}
+}
+local ENV=_G
+if typeof(getgenv)=="function" then
+local ok,e=pcall(getgenv)
+if ok and type(e)=="table" then ENV=e end
+end
+local RUNTIME_KEY="__PSICOSENATICO_WEAPON_RESEARCH_RUNTIME"
+local old=ENV[RUNTIME_KEY]
+if type(old)=="table" and type(old.cleanup)=="function" then pcall(old.cleanup) end
+local function guiParent()
+if typeof(gethui)=="function" then
+local ok,p=pcall(gethui)
+if ok and p then return p end
+end
+return CoreGui
+end
+local GP=guiParent()
+local OLD={
+PsicosenaticoWeaponResearch_V2_1=true,
+PsicosenaticoWeaponResearch_V2_2=true,
+PsicosenaticoWeaponResearch_V2_2_1=true,
+PsicosenaticoWeaponResearch_V2_2_2=true,
+PsicosenaticoWeaponResearch_V2_2_3=true,
+PsicosenaticoWeaponResearch_V2_2_4=true,
+PsicosenaticoWeaponResearch_V2_2_5=true,
+PsicosenaticoWeaponResearch_V2_3_0=true,
+PsicosenaticoWeaponResearch_V2_3_1=true,
+PsicosenaticoWeaponResearch_V2_3_2=true,
+[C.GUI]=true
+}
+for _,x in ipairs(GP:GetChildren()) do
+if OLD[x.Name] then pcall(function() x:Destroy() end) end
+end
+local S={
+Recording=false,Started=false,Exported=false,ExportBusy=false,
+StartUnix=nil,LastPauseUnix=nil,Errors=0,
+Events={},Live={},Markers={},Shots={},RoundCount=0,
+CategoryCounts={},LastCategory=nil,LastCategoryLabel=nil,LastLocationId=nil,LastLocationText=nil,LastAssessment=nil,
+LocationMap={},LocationDefs={},LocationOrder={},
+ActiveTool=nil,Tools={},ToolConnections={},Connections={},
+Architecture=nil,SourceInspection={},BoundarySurvey={},
+ExplicitBlockers={},ExplicitBlockerScanTotal=0,
+PendingTriggers={},PendingDamageProbes=0,SessionId=0
+}
+local function clock() return os.clock() end
+local function unix() return os.time() end
+local function full(obj)
+local ok,v=pcall(function() return obj:GetFullName() end)
+return ok and tostring(v) or tostring(obj and obj.Name or "DESCONHECIDO")
+end
+local function attr(obj,name)
+local ok,v=pcall(function() return obj:GetAttribute(name) end)
+return ok and v or nil
+end
+local function prop(obj,name)
+local ok,v=pcall(function() return obj[name] end)
+return ok and v or nil
+end
+local function live(kind,msg)
+S.Live[#S.Live+1]={time=clock(),type=kind,message=tostring(msg or "")}
+while #S.Live>C.MAX_LIVE do table.remove(S.Live,1) end
+end
+local function log(kind,data,msg)
+live(kind,msg)
+if kind=="ERROR" then S.Errors+=1 end
+if not S.Started then return end
+S.Events[#S.Events+1]={
+unix=unix(),time=clock(),type=kind,
+data=data or {}
+}
+end
+local function isWeapon(tool)
+return tool and tool:IsA("Tool") and (
+attr(tool,"projectileType")~=nil or attr(tool,"rateOfFire")~=nil or attr(tool,"_ammo")~=nil
+)
+end
+local function weapon(tool)
+if not tool then return nil end
+local a={}
+for _,n in ipairs(C.ATTRS) do a[n]=attr(tool,n) end
+return {name=tool.Name,path=full(tool),attributes=a}
+end
+local function inspectSource(m)
+local r={name=m.Name,path=full(m),sourceReadable=false,sourceLength=nil,source=nil,error=nil}
+local ok,v=pcall(function() return m.Source end)
+if ok and type(v)=="string" then
+r.sourceReadable=true
+r.sourceLength=#v
+r.source=v
+if #v==0 then r.note="PROPRIEDADE_ACESSIVEL_MAS_CONTEUDO_VAZIO" end
+else
+r.error=tostring(v)
+end
+return r
+end
+local function inspectArchitecture(reason)
+local root=ReplicatedStorage:FindFirstChild("BlasterSystem")
+local out={
+reason=reason,time=clock(),found=root~=nil,
+rootPath=root and full(root) or nil,
+targets={},remotes={},sourceInspection={}
+}
+if not root then
+S.Architecture=out
+log("ARCHITECTURE_SCAN",{found=false},"BlasterSystem não encontrado")
+return
+end
+local wanted={
+canpierce=true,castrays=true,shoot=true,
+shootprojectile=true,replicateprojectile=true,projectilehit=true
+}
+for _,o in ipairs(root:GetDescendants()) do
+if wanted[string.lower(o.Name)] then
+local item={name=o.Name,class=o.ClassName,path=full(o)}
+out.targets[#out.targets+1]=item
+if o:IsA("RemoteEvent") or o:IsA("RemoteFunction") or o:IsA("UnreliableRemoteEvent") then
+out.remotes[#out.remotes+1]=item
+end
+if o:IsA("ModuleScript") then
+local si=inspectSource(o)
+out.sourceInspection[#out.sourceInspection+1]=si
+S.SourceInspection[si.path]=si
+end
+end
+end
+table.sort(out.targets,function(a,b) return a.path<b.path end)
+S.Architecture=out
+log("ARCHITECTURE_SCAN",{
+reason=reason,targetCount=#out.targets,
+remoteCount=#out.remotes,moduleCount=#out.sourceInspection
+},string.format("Arquitetura: %d alvos",#out.targets))
+end
+local function hasLimitWord(text)
+text=string.lower(tostring(text or ""))
+for _,w in ipairs(C.LIMIT_WORDS) do
+if string.find(text,w,1,true) then return true,w end
+end
+return false,nil
+end
+local function explicitBlockInfo(inst)
+local cur=inst
+local depth=0
+while cur and cur~=Workspace and depth<=10 do
+if attr(cur,"BulletsCannotPierce")==true then
+return {
+found=true,
+path=full(cur),
+name=cur.Name,
+class=cur.ClassName,
+ancestorDepth=depth,
+relation=depth==0 and "SELF" or "ANCESTOR"
+}
+end
+cur=cur.Parent
+depth+=1
+end
+local model=inst and inst:FindFirstAncestorOfClass("Model") or nil
+if model then
+local seen=0
+for _,d in ipairs(model:GetDescendants()) do
+seen+=1
+if seen>160 then break end
+if attr(d,"BulletsCannotPierce")==true then
+return {
+found=true,
+path=full(d),
+name=d.Name,
+class=d.ClassName,
+ancestorDepth=nil,
+relation="MESMO_MODELO"
+}
+end
+end
+end
+return {found=false}
+end
+local function startsWith(text,prefix)
+text=tostring(text or "")
+prefix=tostring(prefix or "")
+return string.sub(text,1,#prefix)==prefix
+end
+local function tycoonRootInfo(inst)
+local cur=inst
+while cur and cur~=Workspace do
+local parent=cur.Parent
+if parent and parent.Parent==Workspace and parent.Name=="Tycoons" then
+return {path=full(cur),name=cur.Name}
+end
+cur=parent
+end
+return nil
+end
+local function hierarchyScope(inst,explicit)
+if explicit and explicit.found then
+return "LASERGATE_PROTEGIDO","BulletsCannotPierce=true associado ao objeto"
+end
+local path=inst and full(inst) or ""
+if path=="Workspace.Tycoons" or startsWith(path,"Workspace.Tycoons.") then
+return "BASE_PLAYER","objeto descendente de Workspace.Tycoons"
+end
+if path=="Workspace.Map" or startsWith(path,"Workspace.Map.") then
+return "MAPA","objeto descendente de Workspace.Map"
+end
+return "OUTRA_ESTRUTURA","objeto fora de Workspace.Tycoons e Workspace.Map"
+end
+local function penetrationPolicyForScope(scope)
