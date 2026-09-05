@@ -1,0 +1,43 @@
+-- V2.3.10 RECONCILED SYNC SUMMARY
+-- Replaces legacy absolute-index counters in the exported summary with the final per-shot
+-- state after relative-offset reconciliation. Keeps the old values only as legacy metadata.
+
+local _exportTableV2310Summary=exportTable
+exportTable=function()
+ local t=_exportTableV2310Summary()
+ local matched,missed=0,0
+ local maxDt=0
+ local offsets={}
+ for _,shot in ipairs(S.Shots) do
+  local s=shot.noClipSync
+  if s and s.matched and s.relativeIndexGuardVerified==true then
+   matched+=1
+   local dt=tonumber(s.deltaTime) or 0
+   if dt>maxDt then maxDt=dt end
+   local off=tostring(s.indexOffset)
+   offsets[off]=(offsets[off] or 0)+1
+  else
+   missed+=1
+  end
+ end
+ t.openEndedResearch=t.openEndedResearch or {}
+ t.openEndedResearch.noClipRuntimeSync=t.openEndedResearch.noClipRuntimeSync or {}
+ local ns=t.openEndedResearch.noClipRuntimeSync
+ ns.legacyAbsoluteIndexCounters={matches=ns.matches,misses=ns.misses,fallbacks=ns.fallbacks}
+ ns.matches=matched
+ ns.misses=missed
+ ns.fallbacks=nil
+ ns.reconciledAtExport=true
+ ns.reconciledMaxDelta=maxDt
+ ns.reconciledOffsets=offsets
+ ns.relativeMatches=matched
+ ns.relativeMisses=missed
+ t.openEndedResearch.preAmmoHealthBaseline=t.openEndedResearch.preAmmoHealthBaseline or {}
+ local hp=t.openEndedResearch.preAmmoHealthBaseline
+ hp.legacyFixedMaxAge=hp.maxAge
+ hp.maxAge=nil
+ hp.maxAgePolicy="RATE_AWARE_PER_WEAPON"
+ return t
+end
+
+live("SISTEMA","V2.3.10 • resumo de sync reconciliado no export; contadores absolutos antigos ficam apenas como legado.")
