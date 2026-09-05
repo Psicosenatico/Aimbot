@@ -1,0 +1,8 @@
+-- V0.4 final UI patch
+local _updateUIV03=updateUI
+updateUI=function()
+ _updateUIV03()
+ Reader.Text=string.gsub(Reader.Text,"Leitor V0%.3","Leitor V0.4")
+ Reader.Text=Reader.Text..string.format("\nFiltro explícito → alvo: %d • parou protegido: %d\nErros filtro: %d",S.filteredCandidateBypassToCharacter,S.filteredStoppedByProtected,S.filteredRayErrors)
+end
+pcall(updateUI)
