@@ -1,0 +1,500 @@
+local target=targetSnapshot(targetHumanoid,targetModel,ref)
+return {
+time=clock(),
+unix=unix(),
+sessionId=S.SessionId,
+source=source,
+referenceRay=ref,
+targetHumanoid=targetHumanoid,
+targetModel=targetModel,
+target=target,
+healthBefore=target and target.health or nil,
+maxHealth=target and target.maxHealth or nil
+}
+end
+local function popAutoBaseline(tool)
+local d=S.Tools[tool]
+if type(d)~="table" then return nil,nil end
+local b=d.autoBaseline
+if type(b)~="table" or b.sessionId~=S.SessionId then return nil,nil end
+local now=clock()
+local age=now-(tonumber(b.time) or now)
+local rof=tonumber(attr(tool,"rateOfFire")) or 600
+local interval=rof>0 and (60/rof) or 0.1
+local maxAge=math.max(C.AUTO_BASELINE_MAX_AGE,interval*2.5)
+local lastUsed=tonumber(d.lastUsedAutoBaselineTime) or -math.huge
+if age>=0 and age<=maxAge and (tonumber(b.time) or 0)>lastUsed then
+d.lastUsedAutoBaselineTime=b.time
+return b,age
+end
+return nil,nil
+end
+local function scheduleAutoBaseline(tool)
+local d=S.Tools[tool]
+if type(d)~="table" then return end
+if tostring(attr(tool,"fireMode"))~="Auto" then return end
+local rof=tonumber(attr(tool,"rateOfFire")) or 600
+local interval=rof>0 and (60/rof) or 0.1
+local delay=math.min(C.AUTO_BASELINE_DELAY_MAX,math.max(0.02,interval*0.35))
+d.autoBaselineToken=(tonumber(d.autoBaselineToken) or 0)+1
+local token=d.autoBaselineToken
+local sessionId=S.SessionId
+task.delay(delay,function()
+if S.SessionId~=sessionId or not S.Recording or S.ExportBusy then return end
+local current=S.Tools[tool]
+if type(current)~="table" or current.autoBaselineToken~=token then return end
+if not tool.Parent then return end
+current.autoBaseline=makeTriggerSnapshot(tool,"AUTO_POST_SHOT_BASELINE")
+end)
+end
+local function damageSummary()
+local out={
+probes=0,damageObserved=0,noDropObserved=0,noTarget=0,pending=0,unmatchedTrigger=0,
+toolActivatedMatches=0,autoBaselineMatches=0,
+totalObservedDamage=0,byCategory={}
+}
+for _,shot in ipairs(S.Shots) do
+local category=shot.autoCategory or "SEM_CLASSIFICACAO"
+local p=shot.damageProbe
+local b=out.byCategory[category]
+if not b then
+b={label=categoryLabel(category),probes=0,damageObserved=0,noDropObserved=0,noTarget=0,pending=0,unmatchedTrigger=0,toolActivatedMatches=0,autoBaselineMatches=0,totalObservedDamage=0}
+out.byCategory[category]=b
+end
+if not shot.triggerMatched then
+out.unmatchedTrigger+=1;b.unmatchedTrigger+=1
+elseif shot.triggerMatchSource=="AUTO_POST_SHOT_BASELINE" then
+out.autoBaselineMatches+=1;b.autoBaselineMatches+=1
+else
+out.toolActivatedMatches+=1;b.toolActivatedMatches+=1
+end
+if p then
+out.probes+=1;b.probes+=1
+if p.status=="QUEDA_DE_HP_OBSERVADA" then
+out.damageObserved+=1;b.damageObserved+=1
+local d=tonumber(p.observedDamage) or 0
+out.totalObservedDamage+=d;b.totalObservedDamage+=d
+elseif p.status=="SEM_QUEDA_DE_HP_OBSERVADA" then
+out.noDropObserved+=1;b.noDropObserved+=1
+elseif p.status=="PENDENTE" then
+out.pending+=1;b.pending+=1
+elseif p.status=="SEM_ALVO_NO_GATILHO" or p.status=="SEM_HP_ANTES" or p.status=="ALVO_INDISPONIVEL" then
+out.noTarget+=1;b.noTarget+=1
+end
+end
+end
+return out
+end
+local function startDamageProbe(shot,trigger)
+if not trigger or not trigger.targetHumanoid or trigger.healthBefore==nil then
+local status="SEM_ALVO_NO_GATILHO"
+if trigger and trigger.targetHumanoid and trigger.healthBefore==nil then status="SEM_HP_ANTES" end
+shot.damageProbe={
+status=status,
+target=trigger and trigger.target or nil,
+samples={}
+}
+return false
+end
+local hum=trigger.targetHumanoid
+local before=tonumber(trigger.healthBefore)
+local sessionId=S.SessionId
+shot.damageProbe={
+status="PENDENTE",
+target=trigger.target,
+healthBefore=before,
+maxHealth=trigger.maxHealth,
+baselineSource=trigger.source,
+healthAtAmmoDecrease=tonumber(prop(hum,"Health")),
+observedDamage=0,
+healthMinimum=before,
+died=false,
+samples={}
+}
+S.PendingDamageProbes+=1
+task.spawn(function()
+local lastDelay=0
+local minHealth=before
+local validSamples=0
+local h0=shot.damageProbe.healthAtAmmoDecrease
+if type(h0)=="number" then
+minHealth=math.min(minHealth,h0)
+end
+for _,delay in ipairs(C.DAMAGE_SAMPLE_DELAYS) do
+task.wait(math.max(0,delay-lastDelay))
+lastDelay=delay
+if S.SessionId~=sessionId then return end
+local exists=hum and hum.Parent~=nil
+local h=exists and tonumber(prop(hum,"Health")) or nil
+shot.damageProbe.samples[#shot.damageProbe.samples+1]={
+delay=delay,
+health=h,
+targetExists=exists
+}
+if type(h)=="number" then
+validSamples+=1
+minHealth=math.min(minHealth,h)
+end
+end
+if S.SessionId~=sessionId then return end
+local drop=math.max(0,before-minHealth)
+shot.damageProbe.healthMinimum=minHealth
+shot.damageProbe.observedDamage=drop
+shot.damageProbe.died=minHealth<=0
+if validSamples==0 and shot.damageProbe.healthAtAmmoDecrease==nil then
+shot.damageProbe.status="ALVO_INDISPONIVEL"
+elseif drop>0.001 then
+shot.damageProbe.status="QUEDA_DE_HP_OBSERVADA"
+else
+shot.damageProbe.status="SEM_QUEDA_DE_HP_OBSERVADA"
+end
+log("DAMAGE_PROBE_RESULT",{
+category=shot.autoCategory,
+locationId=shot.locationId,
+target=shot.damageProbe.target,
+healthBefore=before,
+healthMinimum=minHealth,
+observedDamage=drop,
+status=shot.damageProbe.status,
+layersBeforeTarget=shot.damageProbe.target and shot.damageProbe.target.layersBeforeTarget or nil
+},string.format(
+"%s • dano:%s • %.2f → %.2f",
+tostring(shot.autoCategory),
+tostring(shot.damageProbe.status),
+before,
+minHealth
+))
+S.PendingDamageProbes=math.max(0,S.PendingDamageProbes-1)
+end)
+return true
+end
+local function addToolConn(tool,c)
+S.ToolConnections[tool]=S.ToolConnections[tool] or {}
+table.insert(S.ToolConnections[tool],c)
+end
+local function registerWeapon(tool,reason)
+if not isWeapon(tool) or S.Tools[tool] then return end
+S.Tools[tool]={
+name=tool.Name,
+reason=reason,
+firstPath=full(tool),
+initial=weapon(tool),
+lastAmmo=tonumber(attr(tool,"_ammo")),
+autoBaseline=nil,
+autoBaselineToken=0,
+lastUsedAutoBaselineTime=nil
+}
+log("WEAPON_FOUND",{reason=reason,snapshot=weapon(tool)},"Arma: "..tool.Name)
+addToolConn(tool,tool.Equipped:Connect(function()
+S.ActiveTool=tool
+local d=S.Tools[tool]
+if d then
+d.lastAmmo=tonumber(attr(tool,"_ammo"))
+d.autoBaseline=nil
+d.autoBaselineToken=(tonumber(d.autoBaselineToken) or 0)+1
+d.lastUsedAutoBaselineTime=nil
+end
+log("WEAPON_EQUIPPED",{name=tool.Name},tool.Name.." equipada")
+end))
+addToolConn(tool,tool.Unequipped:Connect(function()
+if S.ActiveTool==tool then S.ActiveTool=nil end
+local d=S.Tools[tool]
+if d then
+d.autoBaseline=nil
+d.autoBaselineToken=(tonumber(d.autoBaselineToken) or 0)+1
+end
+log("WEAPON_UNEQUIPPED",{name=tool.Name},tool.Name.." desequipada")
+end))
+addToolConn(tool,tool.Activated:Connect(function()
+if not S.Recording or S.ExportBusy then return end
+local trigger=makeTriggerSnapshot(tool,"TOOL_ACTIVATED")
+pushPendingTrigger(tool,trigger)
+local previewCategory=classifyShot(trigger.referenceRay)
+log("SHOT_TRIGGER",{
+weapon=tool.Name,
+previewCategory=previewCategory,
+hasTarget=trigger.target~=nil,
+source="TOOL_ACTIVATED"
+},tool.Name.." • gatilho • "..categoryLabel(previewCategory))
+end))
+for _,name in ipairs(C.ATTRS) do
+local ok,sig=pcall(function()
+return tool:GetAttributeChangedSignal(name)
+end)
+if ok and sig then
+addToolConn(tool,sig:Connect(function()
+local value=attr(tool,name)
+local d=S.Tools[tool]
+if name=="_ammo" and d then
+local before,after=tonumber(d.lastAmmo),tonumber(value)
+if before and after and after<before and S.Recording and not S.ExportBusy then
+local raw=before-after
+local trigger,triggerAge=popPendingTrigger(tool)
+if not trigger then
+trigger,triggerAge=popAutoBaseline(tool)
+end
+local ref=nil
+if trigger and trigger.sessionId==S.SessionId then
+ref=trigger.referenceRay
+else
+trigger=nil
+ref=referenceRay(tool)
+end
+local category,categoryReason,categoryMeta=classifyShot(ref)
+local loc=resolveLocation(ref,category,categoryReason)
+local shotIndex=#S.Shots+1
+local shot={
+shotIndex=shotIndex,
+time=clock(),
+unix=unix(),
+source="AMMO_DECREASE",
+ammoBefore=before,
+ammoAfter=after,
+ammoDelta=raw,
+triggerMatched=trigger~=nil,
+triggerAge=triggerAge,
+triggerMatchSource=trigger and trigger.source or nil,
+referenceRaySource=trigger and trigger.source or "AMMO_DECREASE_FALLBACK",
+weapon=weapon(tool),
+referenceRay=ref,
+assessment=ref and ref.assessment or "LEITURA_INDISPONIVEL",
+autoCategory=category,
+autoCategoryLabel=categoryLabel(category),
+autoCategoryReason=categoryReason,
+classificationMeta=categoryMeta,
+wallPenetrationPolicy=categoryMeta and categoryMeta.policy or nil,
+structureScope=categoryMeta and categoryMeta.scope or nil,
+baseRootPath=categoryMeta and categoryMeta.baseRootPath or nil,
+baseRootName=categoryMeta and categoryMeta.baseRootName or nil,
+mapDecision=categoryMeta and categoryMeta.mapDecision or nil,
+mapLayers=categoryMeta and categoryMeta.mapLayers or nil,
+locationId=loc and loc.id or nil,
+locationPrimaryPath=loc and loc.primaryPath or nil,
+locationPositionCell=loc and loc.positionCell or nil
+}
+S.Shots[#S.Shots+1]=shot
+S.RoundCount+=raw
+S.CategoryCounts[category]=(S.CategoryCounts[category] or 0)+1
+S.LastCategory=category
+S.LastCategoryLabel=categoryLabel(category)
+S.LastLocationId=loc and loc.id or nil
+S.LastLocationText=(loc and (loc.id.." • "..tostring(loc.primaryName))) or "SEM LOCAL"
+S.LastAssessment=shot.assessment
+if loc then
+loc.records+=1
+loc.rounds+=raw
+end
+startDamageProbe(shot,trigger)
+scheduleAutoBaseline(tool)
+log("SHOT_AMMO_CONFIRMED",{
+shotIndex=shotIndex,
+weapon=tool.Name,
+ammoDelta=raw,
+category=category,
+locationId=shot.locationId,
+assessment=shot.assessment,
+triggerMatched=shot.triggerMatched,
+triggerMatchSource=shot.triggerMatchSource
+},string.format(
+"#%d • %s • %s • %s",
+shotIndex,tool.Name,categoryLabel(category),tostring(shot.locationId or "SEM_LOCAL")
+))
+live("CLASSIFICACAO",string.format(
+"#%d • %s • %s",
+shotIndex,categoryLabel(category),tostring(shot.locationId or "SEM_LOCAL")
+))
+end
+d.lastAmmo=after or value
+elseif S.Recording then
+log("ATTRIBUTE_CHANGED",{
+weapon=tool.Name,
+attribute=name,
+value=value
+},tool.Name.." • "..name.."="..tostring(value))
+end
+end))
+end
+end
+end
+local function scanWeapons(reason)
+local bp=LP:FindFirstChildOfClass("Backpack")
+local ch=LP.Character
+if bp then
+for _,o in ipairs(bp:GetChildren()) do
+if o:IsA("Tool") then registerWeapon(o,reason or "BACKPACK_SCAN") end
+end
+end
+if ch then
+for _,o in ipairs(ch:GetChildren()) do
+if o:IsA("Tool") then
+registerWeapon(o,reason or "CHARACTER_SCAN")
+if isWeapon(o) then S.ActiveTool=o end
+end
+end
+end
+end
+local function connectCharacter(ch)
+S.Connections[#S.Connections+1]=ch.ChildAdded:Connect(function(o)
+if o:IsA("Tool") then
+task.defer(function()
+registerWeapon(o,"CHARACTER_ADDED")
+if isWeapon(o) then S.ActiveTool=o end
+end)
+end
+end)
+end
+local function connectBackpack()
+local bp=LP:FindFirstChildOfClass("Backpack")
+if not bp then return end
+S.Connections[#S.Connections+1]=bp.ChildAdded:Connect(function(o)
+if o:IsA("Tool") then task.defer(registerWeapon,o,"BACKPACK_ADDED") end
+end)
+end
+if LP.Character then connectCharacter(LP.Character) end
+connectBackpack()
+S.Connections[#S.Connections+1]=LP.CharacterAdded:Connect(function(ch)
+S.ActiveTool=nil
+task.wait(0.35)
+connectCharacter(ch)
+scanWeapons("RESPAWN_SCAN")
+end)
+local function resetSession()
+S.Events={}
+S.Markers={}
+S.Shots={}
+S.RoundCount=0
+S.Errors=0
+S.CategoryCounts={}
+S.LastCategory=nil
+S.LastCategoryLabel=nil
+S.LastLocationId=nil
+S.LastLocationText=nil
+S.LastAssessment=nil
+S.LocationMap={}
+S.LocationDefs={}
+S.LocationOrder={}
+S.BoundarySurvey={}
+S.ExplicitBlockers={}
+S.ExplicitBlockerScanTotal=0
+S.Exported=false
+S.ExportBusy=false
+S.PendingTriggers={}
+S.PendingDamageProbes=0
+S.SessionId+=1
+S.SourceInspection={}
+for _,d in pairs(S.Tools) do
+if type(d)=="table" then
+d.autoBaseline=nil
+d.autoBaselineToken=(tonumber(d.autoBaselineToken) or 0)+1
+d.lastUsedAutoBaselineTime=nil
+end
+end
+S.StartUnix=unix()
+S.LastPauseUnix=nil
+end
+local function beginSession()
+if not S.ActiveTool or not isWeapon(S.ActiveTool) then
+live("AVISO","Equipe uma arma antes de iniciar.")
+return false
+end
+resetSession()
+S.Started=true
+S.Recording=true
+log("DIAGNOSTIC_STARTED",{mode="OPEN_ENDED_AUTO_CLASSIFICATION"},"Pesquisa V2.3.3 iniciada • sem limite de tiros")
+inspectArchitecture("DIAGNOSTIC_START")
+scanExplicitBlockers()
+boundarySurvey()
+return true
+end
+local function pauseSession(reason)
+if not S.Recording then return end
+log("SESSION_PAUSED",{
+reason=reason or "USER",
+shotRecords=#S.Shots,
+rounds=S.RoundCount,
+pendingDamageProbes=S.PendingDamageProbes
+},"Pausado sem apagar os dados")
+S.Recording=false
+S.LastPauseUnix=unix()
+end
+local function resumeSession()
+if not S.Started or S.ExportBusy then return false end
+if not S.ActiveTool or not isWeapon(S.ActiveTool) then
+live("AVISO","Equipe uma arma antes de retomar.")
+return false
+end
+S.Recording=true
+S.LastPauseUnix=nil
+log("SESSION_RESUMED",{
+shotRecords=#S.Shots,
+rounds=S.RoundCount
+},"Coleta livre retomada")
+return true
+end
+local function serializeTools()
+local out={}
+for tool,d in pairs(S.Tools) do
+out[#out+1]={
+name=d.name,
+reason=d.reason,
+firstPath=d.firstPath,
+initial=d.initial,
+final=tool and tool.Parent and weapon(tool) or nil
+}
+end
+table.sort(out,function(a,b)
+return tostring(a.name)<tostring(b.name)
+end)
+return out
+end
+local function exportTable()
+return {
+format="Psicosenatico Weapon Research",
+version=C.VERSION,
+focus="BULLET_NOCLIP_WALL_PENETRATION",
+mode="OPEN_ENDED_AUTO_CLASSIFICATION",
+generatedAtUnix=unix(),
+diagnostic={
+status=S.Recording and "RECORDING" or "PAUSED",
+startedAtUnix=S.StartUnix,
+lastPauseAtUnix=S.LastPauseUnix,
+snapshotAtUnix=unix()
+},
+openEndedResearch={
+shotLimit="UNLIMITED",
+automaticClassification=true,
+locationGrouping=true,
+locationGridStuds=C.LOCATION_GRID,
+shotRecords=#S.Shots,
+roundsConsumed=S.RoundCount,
+uniqueLocations=#S.LocationOrder,
+pendingDamageProbes=S.PendingDamageProbes,
+maxHitChain=C.MAX_HIT_CHAIN,
+damageSampleDelays=C.DAMAGE_SAMPLE_DELAYS,
+autoBaselineMaxAge=C.AUTO_BASELINE_MAX_AGE
+},
+wallPenetrationPolicy={
+mode="MAP_WALL_ONLY_PROTECT_BASES_AND_TERRAIN",
+mapScope="Workspace.Map",
+baseScope="Workspace.Tycoons",
+mapWallNamedAction="CANDIDATO_PAREDE_MAPA_REQUER_TESTE",
+mapWallShapeAction="CANDIDATO_PAREDE_POR_FORMA_REQUER_TESTE",
+mapCombatObstacleAction="CANDIDATO_OBSTACULO_REQUER_TESTE",
+mapTerrainAction="PROTEGIDO_NAO_ATRAVESSAR",
+mapGameplayLogicAction="PROTEGIDO_NAO_ATRAVESSAR",
+mapGenericAction="REVISAR_NAO_ATRAVESSAR_POR_PADRAO",
+baseAction="PROTEGIDO_NAO_ATRAVESSAR",
+laserGateAction="PROTEGIDO_NAO_ATRAVESSAR",
+otherStructureAction="REVISAR_NAO_ATRAVESSAR_POR_PADRAO",
+notes={
+"A leitura distingue base, LaserGate, mapa e outras estruturas pela hierarquia real do Workspace.",
+"Dentro de Workspace.Map, Wall explícito e painel vertical fino são apenas candidatos; ainda precisam de validação por teste.",
+"Ground, Mountain, TerrainPart, team colors e spawn são protegidos e nunca candidatos automáticos.",
+"Workspace.Map.CombatObstacles fica separado para teste próprio, sem liberação automática.",
+"Geometria genérica de Workspace.Map fica em REVISAR e não deve ser atravessada por padrão.",
+"Qualquer geometria sob Workspace.Tycoons e qualquer LaserGate permanecem protegidos.",
+"Esta pesquisa é somente leitura e não altera projéteis."
+}
+},
+summary={
+events=#S.Events,
