@@ -1,0 +1,214 @@
+-- V2.3.10 RELATIVE NOCLIP SYNC + RATE-AWARE PRE-HP WINDOW
+-- Fixes V2.3.9 absolute-index sync when NoClip recorded shots before Research started.
+-- Learns one stable index offset from a very tight time+weapon anchor, then requires
+-- expected relative index + weapon + time for every authoritative match.
+-- Also makes the pre-trigger HP baseline window respect slow weapon cooldowns.
+
+C.VERSION="V2.3.10"
+C.NOCLIP_ANCHOR_MAX_DT=0.015
+C.NOCLIP_SYNC_MAX_DT=0.080
+S.NoClipRelativeOffset=nil
+S.NoClipRelativeOffsetRunId=nil
+S.NoClipRelativeOffsetAnchors=0
+S.NoClipRelativeSyncMatches=0
+S.NoClipRelativeSyncMisses=0
+S.NoClipRelativeSyncAmbiguousAnchors=0
+S.DynamicPreHpWindows=0
+
+local function currentBusV2310()
+ local bus=ENV[BUS_KEY_V239]
+ if type(bus)~="table" or type(bus.records)~="table" then return nil end
+ return bus
+end
+
+local function sameWeaponV2310(shot,r)
+ local sw=shotWeaponNameV239(shot)
+ return (not sw) or (not r.weaponName) or r.weaponName==sw
+end
+
+local function learnOffsetV2310(shot,bus)
+ local st=tonumber(shot and shot.time)
+ local si=tonumber(shot and shot.shotIndex)
+ if not st or not si then return nil,nil,"SHOT_SEM_TEMPO_OU_INDICE" end
+ local candidates={}
+ for i=#bus.records,1,-1 do
+  local r=bus.records[i]
+  local rt=tonumber(r and r.time)
+  if rt then
+   local dt=math.abs(rt-st)
+   if dt<=C.NOCLIP_ANCHOR_MAX_DT and sameWeaponV2310(shot,r) then
+    candidates[#candidates+1]={record=r,dt=dt,offset=(tonumber(r.noClipShotIndex or r.shotIndex) or 0)-si}
+   elseif rt<st-C.NOCLIP_ANCHOR_MAX_DT then
+    break
+   end
+  end
+ end
+ table.sort(candidates,function(a,b) return a.dt<b.dt end)
+ if #candidates==0 then return nil,nil,"SEM_ANCORA_TEMPORAL" end
+ if #candidates>1 then
+  local gap=(candidates[2].dt or math.huge)-(candidates[1].dt or 0)
+  if gap<0.006 then
+   S.NoClipRelativeSyncAmbiguousAnchors+=1
+   return nil,nil,"ANCORA_AMBIGUA"
+  end
+ end
+ return candidates[1].record,candidates[1].offset,nil
+end
+
+local function exactRelativeRecordV2310(shot,bus,offset)
+ local st=tonumber(shot and shot.time)
+ local si=tonumber(shot and shot.shotIndex)
+ if not st or not si or offset==nil then return nil,nil end
+ local expected=si+offset
+ local best=nil
+ local bestDt=math.huge
+ for i=#bus.records,1,-1 do
+  local r=bus.records[i]
+  local ri=tonumber(r and (r.noClipShotIndex or r.shotIndex))
+  local rt=tonumber(r and r.time)
+  if ri and rt then
+   if ri==expected and sameWeaponV2310(shot,r) then
+    local dt=math.abs(rt-st)
+    if dt<=C.NOCLIP_SYNC_MAX_DT and dt<bestDt then best=r;bestDt=dt end
+   end
+   if ri<expected and rt<st-C.NOCLIP_SYNC_MAX_DT then break end
+  end
+ end
+ return best,best and bestDt or nil
+end
+
+local function applyRelativeSyncV2310(shot,r,dt,offset)
+ shot.noClipSync={
+  matched=true,indexGuardVerified=true,relativeIndexGuardVerified=true,
+  source="BULLET_NOCLIP_V011_SHARED_BUS_RELATIVE_INDEX",
+  runId=r.runId,seq=r.seq,deltaTime=dt,shotIndex=r.shotIndex,noClipShotIndex=r.noClipShotIndex or r.shotIndex,
+  researchShotIndex=shot.shotIndex,indexOffset=offset,weaponName=r.weaponName,enabled=r.enabled,
+  wallDiagnosticCategory=r.wallDiagnosticCategory,teamBarrierClientState=r.teamBarrierClientState,
+  clientReachedCharacter=r.clientReachedCharacter==true,crossedCandidate=r.crossedCandidate==true,
+  normalWallClientReached=r.normalWallClientReached==true,
+  diagnosticBaselineHit=r.diagnosticBaselineHit,
+ }
+ shot.targetProtectionContext=r.targetProtectionContext
+ return shot.noClipSync
+end
+
+attachNoClipSyncV239=function(shot,countStats)
+ if not shot then return nil end
+ if shot.noClipSync and shot.noClipSync.matched and shot.noClipSync.relativeIndexGuardVerified==true then return shot.noClipSync end
+ local bus=currentBusV2310()
+ if not bus then
+  shot.noClipSync={matched=false,source="NOCLIP_BUS_INDISPONIVEL"}
+  if countStats then S.NoClipRelativeSyncMisses+=1 end
+  return shot.noClipSync
+ end
+ local runId=bus.ownerRunId
+ if S.NoClipRelativeOffsetRunId~=runId then
+  S.NoClipRelativeOffset=nil
+  S.NoClipRelativeOffsetRunId=runId
+  S.NoClipRelativeOffsetAnchors=0
+ end
+ if S.NoClipRelativeOffset==nil then
+  local anchor,offset,why=learnOffsetV2310(shot,bus)
+  if anchor then
+   S.NoClipRelativeOffset=offset
+   S.NoClipRelativeOffsetAnchors+=1
+   log("NOCLIP_RELATIVE_OFFSET_LEARNED",{researchShotIndex=shot.shotIndex,noClipShotIndex=anchor.noClipShotIndex or anchor.shotIndex,indexOffset=offset,deltaTime=math.abs((anchor.time or 0)-(shot.time or 0)),runId=runId},"Offset NoClip/Research aprendido: "..tostring(offset))
+  else
+   shot.noClipSync={matched=false,relativeIndexGuardVerified=false,source=why or "OFFSET_AINDA_NAO_APRENDIDO",runId=runId,anchorMaxDelta=C.NOCLIP_ANCHOR_MAX_DT}
+   if countStats then S.NoClipRelativeSyncMisses+=1 end
+   return shot.noClipSync
+  end
+ end
+ local r,dt=exactRelativeRecordV2310(shot,bus,S.NoClipRelativeOffset)
+ if r then
+  local sync=applyRelativeSyncV2310(shot,r,dt,S.NoClipRelativeOffset)
+  if countStats then S.NoClipRelativeSyncMatches+=1 end
+  return sync
+ end
+ shot.noClipSync={matched=false,relativeIndexGuardVerified=false,source="RELATIVE_INDEX_RECORD_NOT_AVAILABLE_YET",runId=runId,indexOffset=S.NoClipRelativeOffset,expectedNoClipShotIndex=(tonumber(shot.shotIndex) or 0)+(tonumber(S.NoClipRelativeOffset) or 0),maxDelta=C.NOCLIP_SYNC_MAX_DT}
+ if countStats then S.NoClipRelativeSyncMisses+=1 end
+ return shot.noClipSync
+end
+
+-- Rate-aware HP timing: preserve the proven 0.55s floor for normal/fast weapons, but
+-- allow a slow semi-auto weapon to cover one fire-cycle plus a small callback margin.
+local _startDamageProbeV239RateAware=startDamageProbe
+startDamageProbe=function(shot,locked,tool,shotToken)
+ local oldLimit=C.PRE_HEALTH_MAX_AGE
+ local rof=tool and tonumber(tool:GetAttribute("rateOfFire")) or nil
+ local cycle=(rof and rof>0) and (60/rof) or 0
+ local dynamicLimit=math.max(0.55,math.min(1.50,cycle+0.15))
+ C.PRE_HEALTH_MAX_AGE=dynamicLimit
+ shot.preHealthMaxAgeDynamic=dynamicLimit
+ shot.weaponFireCycleSeconds=cycle
+ S.DynamicPreHpWindows+=1
+ local ok,res=pcall(_startDamageProbeV239RateAware,shot,locked,tool,shotToken)
+ C.PRE_HEALTH_MAX_AGE=oldLimit
+ if shot.damageProbe then
+  shot.damageProbe.preHealthMaxAgeDynamic=dynamicLimit
+  shot.damageProbe.weaponFireCycleSeconds=cycle
+ end
+ if not ok then
+  log("ERROR",{where="V2.3.10.startDamageProbe",message=tostring(res)},"Falha no wrapper de HP dinâmico")
+  return false
+ end
+ return res
+end
+
+local _exportTableV239Relative=exportTable
+exportTable=function()
+ -- Reconcile all shots after NoClip has had time to publish its callbacks.
+ for _,shot in ipairs(S.Shots) do
+  if not (shot.noClipSync and shot.noClipSync.matched and shot.noClipSync.relativeIndexGuardVerified==true) then
+   attachNoClipSyncV239(shot,false)
+  end
+ end
+ local t=_exportTableV239Relative()
+ t.version=C.VERSION
+ t.mode="SHOT_LOCK_OBB_HP_TEAM_BARRIER_WITH_NOCLIP_RELATIVE_INDEX_SYNC"
+ t.openEndedResearch=t.openEndedResearch or {}
+ t.openEndedResearch.noClipRuntimeSync=t.openEndedResearch.noClipRuntimeSync or {}
+ local ns=t.openEndedResearch.noClipRuntimeSync
+ ns.authority="BULLET_NOCLIP_V011_SHARED_BUS_RELATIVE_INDEX_WHEN_MATCHED"
+ ns.relativeIndexOffset=S.NoClipRelativeOffset
+ ns.relativeIndexRunId=S.NoClipRelativeOffsetRunId
+ ns.anchorMaxDelta=C.NOCLIP_ANCHOR_MAX_DT
+ ns.matchMaxDelta=C.NOCLIP_SYNC_MAX_DT
+ ns.relativeMatches=S.NoClipRelativeSyncMatches
+ ns.relativeMisses=S.NoClipRelativeSyncMisses
+ ns.ambiguousAnchors=S.NoClipRelativeSyncAmbiguousAnchors
+ ns.matchRule="aprende offset uma vez por sessão com âncora única de arma+|dt|<=0.015s; depois exige NoClipIndex=ResearchIndex+offset, arma compatível e |dt|<=0.080s"
+ t.openEndedResearch.preAmmoHealthBaseline=t.openEndedResearch.preAmmoHealthBaseline or {}
+ t.openEndedResearch.preAmmoHealthBaseline.rateAware=true
+ t.openEndedResearch.preAmmoHealthBaseline.ruleV2310="maxAge=max(0.55s,min(1.50s,60/rateOfFire+0.15s)); categoria continua exclusivamente no AMMO_DECREASE_LOCK."
+ t.openEndedResearch.preAmmoHealthBaseline.dynamicWindowsApplied=S.DynamicPreHpWindows
+ t.interpretationRules=t.interpretationRules or {}
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.10: índices NoClip/Research não precisam começar iguais; uma âncora temporal estreita aprende o offset relativo da sessão e o mantém fixo."
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.10: armas lentas usam janela de HP pré-trigger proporcional ao próprio ciclo de tiro; armas rápidas mantêm o piso conservador de 0.55s."
+ return t
+end
+
+local _resetSessionV239Relative=resetSession
+resetSession=function()
+ _resetSessionV239Relative()
+ S.NoClipRelativeOffset=nil
+ S.NoClipRelativeOffsetRunId=nil
+ S.NoClipRelativeOffsetAnchors=0
+ S.NoClipRelativeSyncMatches=0
+ S.NoClipRelativeSyncMisses=0
+ S.NoClipRelativeSyncAmbiguousAnchors=0
+ S.DynamicPreHpWindows=0
+end
+
+local _updateUIV239Relative=updateUI
+updateUI=function()
+ _updateUIV239Relative()
+ Ver.Text=C.VERSION
+ Sub.Text="SHOT-LOCK + SYNC RELATIVO NOCLIP + HP POR CADÊNCIA"
+ Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.9","PESQUISA DE ARMAS V2.3.10")
+end
+S.UIRefresh=updateUI
+local rt2310=ENV[RUNTIME_KEY]
+if type(rt2310)=="table" then rt2310.version=C.VERSION end
+live("SISTEMA","V2.3.10 • sync relativo NoClip + janela de HP dependente da cadência ativos.")
+pcall(updateUI)
