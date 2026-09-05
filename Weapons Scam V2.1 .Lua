@@ -7,33 +7,26 @@ local Workspace=game:GetService("Workspace")
 local CollectionService=game:GetService("CollectionService")
 local LP=Players.LocalPlayer or Players.PlayerAdded:Wait()
 local C={
-VERSION="V2.2.5",
-GUI="PsicosenaticoWeaponResearch_V2_2_5",
-SHOTS=3,
-MAX_EVENTS=2800,
+VERSION="V2.3.0",
+GUI="PsicosenaticoWeaponResearch_V2_3_0",
 MAX_LIVE=110,
 BOUNDARY_DISTANCE=10000,
 MAX_HIT_CHAIN=12,
-MAX_EXPLICIT_BLOCKERS=100,
 RAY_EPSILON=0.05,
+LOCATION_GRID=20,
 DAMAGE_TRIGGER_MAX_AGE=1.25,
 AUTO_BASELINE_MAX_AGE=0.45,
 AUTO_BASELINE_DELAY_MAX=0.06,
 DAMAGE_SAMPLE_DELAYS={0.10,0.25,0.50,0.90},
-PHASES={"CLEAR","WALL","TARGET_BEHIND_WALL","TARGET_BEHIND_EXPLICIT_BLOCK","TARGET_CLEAR"},
-LABELS={
-CLEAR="TIRO LIVRE",
-WALL="PAREDE",
-TARGET_BEHIND_WALL="ALVO + PAREDE",
-TARGET_BEHIND_EXPLICIT_BLOCK="ALVO + BLOQUEIO",
-TARGET_CLEAR="ALVO LIVRE"
-},
-HELP={
-CLEAR="Atire para o céu/espaço sem alvo.",
-WALL="Atire diretamente em uma parede comum.",
-TARGET_BEHIND_WALL="Atire em um alvo com uma parede comum no meio.",
-TARGET_BEHIND_EXPLICIT_BLOCK="Atire em um alvo atrás de uma peça com BulletsCannotPierce=true.",
-TARGET_CLEAR="Atire diretamente em um alvo sem parede."
+CATEGORY_LABELS={
+TIRO_LIVRE="TIRO LIVRE",
+PAREDE_OU_ESTRUTURA="PAREDE / ESTRUTURA",
+BLOQUEIO_EXPLICITO="BLOQUEIO EXPLÍCITO",
+ALVO_ATRAS_PAREDE="ALVO ATRÁS DE PAREDE",
+ALVO_ATRAS_BLOQUEIO_EXPLICITO="ALVO ATRÁS DE BLOQUEIO",
+ALVO_LIVRE="ALVO LIVRE",
+POSSIVEL_LIMITE_MAPA="POSSÍVEL LIMITE DO MAPA",
+LEITURA_INDISPONIVEL="LEITURA INDISPONÍVEL"
 },
 ATTRS={"_ammo","projectileType","raysPerShot","rayRadius","range","fireMode","rateOfFire","damage","spread"},
 LIMIT_WORDS={"boundary","bounds","border","limit","limite","barrier","barreira","invisible","invis","ceiling","maplimit","map_limit","killwall","kill_wall"}
@@ -61,20 +54,21 @@ PsicosenaticoWeaponResearch_V2_2_1=true,
 PsicosenaticoWeaponResearch_V2_2_2=true,
 PsicosenaticoWeaponResearch_V2_2_3=true,
 PsicosenaticoWeaponResearch_V2_2_4=true,
+PsicosenaticoWeaponResearch_V2_2_5=true,
 [C.GUI]=true
 }
 for _,x in ipairs(GP:GetChildren()) do
 if OLD[x.Name] then pcall(function() x:Destroy() end) end
 end
 local S={
-Recording=false,Started=false,Completed=false,Exported=false,
-StartUnix=nil,EndUnix=nil,Errors=0,
-Events={},Live={},Markers={},Shots={},
-PhaseIndex=0,CurrentPhase=nil,PhaseShots=0,PhaseStats={},
+Recording=false,Started=false,Exported=false,ExportBusy=false,
+StartUnix=nil,LastPauseUnix=nil,Errors=0,
+Events={},Live={},Markers={},Shots={},RoundCount=0,
+CategoryCounts={},LastCategory=nil,LastCategoryLabel=nil,LastLocationId=nil,LastLocationText=nil,LastAssessment=nil,
+LocationMap={},LocationDefs={},LocationOrder={},
 ActiveTool=nil,Tools={},ToolConnections={},Connections={},
-Architecture=nil,SourceInspection={},BoundarySurvey={},LastAssessment=nil,
+Architecture=nil,SourceInspection={},BoundarySurvey={},
 ExplicitBlockers={},ExplicitBlockerScanTotal=0,
-ConfirmOpen=false,AwaitingDamage=false,
 PendingTriggers={},PendingDamageProbes=0,SessionId=0
 }
 local function clock() return os.clock() end
@@ -98,10 +92,9 @@ end
 local function log(kind,data,msg)
 live(kind,msg)
 if kind=="ERROR" then S.Errors+=1 end
-if not S.Recording or #S.Events>=C.MAX_EVENTS then return end
+if not S.Started then return end
 S.Events[#S.Events+1]={
 unix=unix(),time=clock(),type=kind,
-phase=S.CurrentPhase,phaseIndex=S.PhaseIndex,phaseShots=S.PhaseShots,
 data=data or {}
 }
 end
@@ -183,11 +176,30 @@ found=true,
 path=full(cur),
 name=cur.Name,
 class=cur.ClassName,
-ancestorDepth=depth
+ancestorDepth=depth,
+relation=depth==0 and "SELF" or "ANCESTOR"
 }
 end
 cur=cur.Parent
 depth+=1
+end
+local model=inst and inst:FindFirstAncestorOfClass("Model") or nil
+if model then
+local seen=0
+for _,d in ipairs(model:GetDescendants()) do
+seen+=1
+if seen>160 then break end
+if attr(d,"BulletsCannotPierce")==true then
+return {
+found=true,
+path=full(d),
+name=d.Name,
+class=d.ClassName,
+ancestorDepth=nil,
+relation="MESMO_MODELO"
+}
+end
+end
 end
 return {found=false}
 end
@@ -276,6 +288,7 @@ explicitBlockPath=explicit.path,
 explicitBlockName=explicit.name,
 explicitBlockClass=explicit.class,
 explicitBlockAncestorDepth=explicit.ancestorDepth,
+explicitBlockRelation=explicit.relation,
 transparency=prop(inst,"Transparency"),
 canCollide=prop(inst,"CanCollide"),
 canQuery=prop(inst,"CanQuery"),
@@ -386,80 +399,176 @@ out.hitChainCount=#out.multiHitChain
 out.assessment=assessment(out)
 return out,targetHumanoid,targetModel
 end
-local function validatePhase(phase,ref)
-local first=ref and ref.firstHit or nil
-local a=ref and ref.assessment or "LEITURA_INDISPONIVEL"
-local chain=ref and ref.multiHitChain or {}
-local characterIndex=ref and ref.firstCharacterIndex or nil
-local explicitIndex=ref and ref.firstExplicitBlockIndex or nil
-local explicitBeforeTarget=explicitIndex and characterIndex and explicitIndex<characterIndex
-if phase=="CLEAR" then
-if a=="CAMINHO_LIVRE" then
-return "COMPATIVEL","nenhum obstáculo dentro do alcance"
+local function categoryLabel(category)
+return C.CATEGORY_LABELS[category] or tostring(category or "-")
 end
-if a=="POSSIVEL_LIMITE_MAPA" then
-return "COMPATIVEL_COM_LIMITE","possível limite/barreira do mapa"
+local function classifyShot(ref)
+if not ref or not ref.ok then
+return "LEITURA_INDISPONIVEL","raycast de referência indisponível"
 end
-if a=="BLOQUEIO_EXPLICITO" then
-return "REVISAR_BLOQUEIO_EXPLICITO","o tiro livre encontrou BulletsCannotPierce=true"
+if not ref.hit or not ref.firstHit then
+return "TIRO_LIVRE","nenhum impacto dentro do alcance"
 end
-return "REVISAR","o tiro livre encontrou geometria/personagem"
-elseif phase=="WALL" then
-if first and not first.hasHumanoid then
-if first.classification=="POSSIVEL_LIMITE_MAPA" then
-return "REVISAR_LIMITE","obstáculo pode ser limite do mapa"
+local characterIndex=ref.firstCharacterIndex
+local explicitIndex=ref.firstExplicitBlockIndex
+if characterIndex==1 then
+return "ALVO_LIVRE","personagem é o primeiro impacto"
 end
-if first.explicitProjectileBlock then
-return "REVISAR_BLOQUEIO_EXPLICITO","essa peça tem BulletsCannotPierce=true; reserve-a para ALVO + BLOQUEIO"
-end
-return "COMPATIVEL","primeiro impacto é geometria comum"
-end
-return "REVISAR","parede não foi o primeiro impacto"
-elseif phase=="TARGET_BEHIND_WALL" then
-if explicitBeforeTarget then
-return "REVISAR_BLOQUEIO_EXPLICITO",string.format(
-"há BulletsCannotPierce=true na camada %d antes do alvo; use a missão ALVO + BLOQUEIO",
-explicitIndex
-)
-end
-if first and not first.hasHumanoid and characterIndex and characterIndex>=2 then
-return "FORTE_COMPATIBILIDADE",string.format(
-"geometria comum primeiro e personagem encontrado na camada %d após %d impacto(s)",
-characterIndex,characterIndex-1
-)
-end
-if first and not first.hasHumanoid then
-local suffix=(ref and ref.chainStopReason) and (" • fim: "..tostring(ref.chainStopReason)) or ""
-return "INCONCLUSIVO",string.format(
-"há geometria primeiro; cadeia de %d impacto(s) não encontrou personagem%s",
-#chain,suffix
-)
-end
-return "REVISAR","primeiro impacto não foi geometria"
-elseif phase=="TARGET_BEHIND_EXPLICIT_BLOCK" then
-if explicitBeforeTarget then
-return "BLOQUEIO_EXPLICITO_CONFIRMADO",string.format(
-"BulletsCannotPierce=true na camada %d e personagem na camada %d",
+if explicitIndex and characterIndex and explicitIndex<characterIndex then
+return "ALVO_ATRAS_BLOQUEIO_EXPLICITO",string.format(
+"BulletsCannotPierce=true na camada %d antes do personagem na camada %d",
 explicitIndex,characterIndex
 )
 end
-if explicitIndex and not characterIndex then
-return "INCONCLUSIVO_BLOQUEIO",string.format(
-"BulletsCannotPierce=true encontrado na camada %d, mas nenhum personagem apareceu na cadeia",
+if characterIndex and characterIndex>1 then
+return "ALVO_ATRAS_PAREDE",string.format(
+"personagem na camada %d após %d impacto(s) de geometria",
+characterIndex,characterIndex-1
+)
+end
+if explicitIndex then
+return "BLOQUEIO_EXPLICITO",string.format(
+"BulletsCannotPierce=true detectado na camada %d; nenhum personagem confirmado depois",
 explicitIndex
 )
 end
-if characterIndex and not explicitIndex then
-return "REVISAR_SEM_BLOQUEIO","personagem encontrado, mas nenhum BulletsCannotPierce=true apareceu antes dele"
+if ref.firstHit.classification=="POSSIVEL_LIMITE_MAPA" then
+return "POSSIVEL_LIMITE_MAPA","primeiro impacto possui indícios heurísticos de limite do mapa"
 end
-return "REVISAR","não foi possível confirmar bloqueio explícito + alvo"
-elseif phase=="TARGET_CLEAR" then
-if first and first.hasHumanoid then
-return "COMPATIVEL","personagem é o primeiro impacto"
+return "PAREDE_OU_ESTRUTURA",string.format(
+"geometria detectada; cadeia com %d impacto(s); fim: %s",
+#(ref.multiHitChain or {}),tostring(ref.chainStopReason or "DESCONHECIDO")
+)
 end
-return "REVISAR","personagem não foi o primeiro impacto"
+local function gridNumber(v)
+local g=C.LOCATION_GRID
+return math.floor((tonumber(v) or 0)/g+0.5)
 end
-return "SEM_FASE","fase desconhecida"
+local function locationHit(ref,category)
+if not ref then return nil end
+local chain=ref.multiHitChain or {}
+if (category=="BLOQUEIO_EXPLICITO" or category=="ALVO_ATRAS_BLOQUEIO_EXPLICITO") and ref.firstExplicitBlockIndex then
+return chain[ref.firstExplicitBlockIndex]
+end
+if category=="ALVO_LIVRE" and ref.firstCharacterIndex then
+return chain[ref.firstCharacterIndex]
+end
+return ref.firstHit
+end
+local function resolveLocation(ref,category,reason)
+local item=locationHit(ref,category)
+local primaryPath="SEM_OBJETO"
+local primaryName="SEM_OBJETO"
+local modelPath=nil
+local pos=nil
+local explicitPath=nil
+if item then
+primaryPath=item.instance or "SEM_CAMINHO"
+primaryName=item.instanceName or item.modelName or "OBJETO"
+modelPath=item.model
+pos=item.position
+if item.explicitProjectileBlock then
+explicitPath=item.explicitBlockPath or item.instance
+primaryPath=explicitPath or primaryPath
+primaryName=item.explicitBlockName or primaryName
+end
+end
+local cell="SEM_POSICAO"
+if type(pos)=="table" and #pos>=3 then
+cell=string.format("%d:%d:%d",gridNumber(pos[1]),gridNumber(pos[2]),gridNumber(pos[3]))
+end
+local key=table.concat({tostring(category),tostring(primaryPath),cell},"|")
+local id=S.LocationMap[key]
+local def=nil
+if id then
+def=S.LocationDefs[id]
+else
+id=string.format("L%04d",#S.LocationOrder+1)
+def={
+id=id,
+category=category,
+categoryLabel=categoryLabel(category),
+primaryPath=primaryPath,
+primaryName=primaryName,
+modelPath=modelPath,
+explicitBlockPath=explicitPath,
+positionCell=cell,
+firstPosition=pos,
+firstSeenUnix=unix(),
+firstSeenTime=clock(),
+firstReason=reason,
+records=0,
+rounds=0
+}
+S.LocationMap[key]=id
+S.LocationDefs[id]=def
+S.LocationOrder[#S.LocationOrder+1]=id
+end
+return def
+end
+local function categorySummary()
+local out={}
+for k,v in pairs(S.CategoryCounts) do
+out[k]={label=categoryLabel(k),records=v}
+end
+return out
+end
+local function buildLocationSummary()
+local out={}
+for _,id in ipairs(S.LocationOrder) do
+local d=S.LocationDefs[id]
+if d then
+out[#out+1]={
+id=d.id,
+category=d.category,
+categoryLabel=d.categoryLabel,
+primaryPath=d.primaryPath,
+primaryName=d.primaryName,
+modelPath=d.modelPath,
+explicitBlockPath=d.explicitBlockPath,
+positionCell=d.positionCell,
+firstPosition=d.firstPosition,
+firstSeenUnix=d.firstSeenUnix,
+records=0,
+rounds=0,
+damageObserved=0,
+noDamageObserved=0,
+noTargetForDamage=0,
+totalObservedDamage=0,
+targets={}
+}
+end
+end
+local byId={}
+for _,d in ipairs(out) do byId[d.id]=d end
+for _,shot in ipairs(S.Shots) do
+local d=byId[shot.locationId]
+if d then
+d.records+=1
+d.rounds+=(tonumber(shot.ammoDelta) or 1)
+local p=shot.damageProbe
+if p then
+if p.status=="QUEDA_DE_HP_OBSERVADA" then
+d.damageObserved+=1
+d.totalObservedDamage+=(tonumber(p.observedDamage) or 0)
+elseif p.status=="SEM_QUEDA_DE_HP_OBSERVADA" then
+d.noDamageObserved+=1
+elseif p.status=="SEM_ALVO_NO_GATILHO" or p.status=="SEM_HP_ANTES" or p.status=="ALVO_INDISPONIVEL" then
+d.noTargetForDamage+=1
+end
+if p.target and p.target.modelPath then
+d.targets[p.target.modelPath]=true
+end
+end
+end
+end
+for _,d in ipairs(out) do
+local arr={}
+for targetPath in pairs(d.targets) do arr[#arr+1]=targetPath end
+table.sort(arr)
+d.targets=arr
+end
+return out
 end
 local function boundarySurvey()
 local cam=Workspace.CurrentCamera
@@ -535,7 +644,6 @@ local db=tonumber(b.distanceFromPlayer) or math.huge
 if da==db then return tostring(a.path)<tostring(b.path) end
 return da<db
 end)
-while #found>C.MAX_EXPLICIT_BLOCKERS do table.remove(found) end
 S.ExplicitBlockers=found
 S.ExplicitBlockerScanTotal=total
 log("EXPLICIT_BLOCKER_SCAN",{
@@ -544,21 +652,11 @@ stored=#found,
 nearest=found[1]
 },string.format("BulletsCannotPierce=true • %d peça(s) detectada(s)",total))
 end
-local function phaseLabel()
-return C.LABELS[S.CurrentPhase] or "-"
+local function lastCategoryLabel()
+return S.LastCategoryLabel or "AGUARDANDO DISPARO"
 end
-local function phaseHelp()
-local base=C.HELP[S.CurrentPhase] or "Aguardando início."
-if S.CurrentPhase=="TARGET_BEHIND_EXPLICIT_BLOCK" then
-local b=S.ExplicitBlockers[1]
-if b then
-local d=tonumber(b.distanceFromPlayer)
-local suffix=d and string.format(" • %.0f studs",d) or ""
-return base.." Próximo: "..tostring(b.name or "?")..suffix
-end
-return base.." Nenhuma peça explícita foi localizada no início desta sessão."
-end
-return base
+local function lastLocationText()
+return S.LastLocationText or "O scanner classificará automaticamente cada trajetória."
 end
 local function targetSnapshot(hum,model,ref)
 if not hum then return nil end
@@ -640,7 +738,7 @@ d.autoBaselineToken=(tonumber(d.autoBaselineToken) or 0)+1
 local token=d.autoBaselineToken
 local sessionId=S.SessionId
 task.delay(delay,function()
-if S.SessionId~=sessionId or not S.Recording or S.AwaitingDamage or S.Completed then return end
+if S.SessionId~=sessionId or not S.Recording or S.ExportBusy then return end
 local current=S.Tools[tool]
 if type(current)~="table" or current.autoBaselineToken~=token then return end
 if not tool.Parent then return end
@@ -651,15 +749,15 @@ local function damageSummary()
 local out={
 probes=0,damageObserved=0,noDropObserved=0,noTarget=0,pending=0,unmatchedTrigger=0,
 toolActivatedMatches=0,autoBaselineMatches=0,
-totalObservedDamage=0,byPhase={}
+totalObservedDamage=0,byCategory={}
 }
 for _,shot in ipairs(S.Shots) do
-local phase=shot.phase or "SEM_FASE"
+local category=shot.autoCategory or "SEM_CLASSIFICACAO"
 local p=shot.damageProbe
-local b=out.byPhase[phase]
+local b=out.byCategory[category]
 if not b then
-b={probes=0,damageObserved=0,noDropObserved=0,noTarget=0,pending=0,unmatchedTrigger=0,toolActivatedMatches=0,autoBaselineMatches=0,totalObservedDamage=0}
-out.byPhase[phase]=b
+b={label=categoryLabel(category),probes=0,damageObserved=0,noDropObserved=0,noTarget=0,pending=0,unmatchedTrigger=0,toolActivatedMatches=0,autoBaselineMatches=0,totalObservedDamage=0}
+out.byCategory[category]=b
 end
 if not shot.triggerMatched then
 out.unmatchedTrigger+=1;b.unmatchedTrigger+=1
@@ -678,14 +776,13 @@ elseif p.status=="SEM_QUEDA_DE_HP_OBSERVADA" then
 out.noDropObserved+=1;b.noDropObserved+=1
 elseif p.status=="PENDENTE" then
 out.pending+=1;b.pending+=1
-elseif p.status=="SEM_ALVO_NO_GATILHO" or p.status=="SEM_HP_ANTES" then
+elseif p.status=="SEM_ALVO_NO_GATILHO" or p.status=="SEM_HP_ANTES" or p.status=="ALVO_INDISPONIVEL" then
 out.noTarget+=1;b.noTarget+=1
 end
 end
 end
 return out
 end
-local tryFinalizeCompletion
 local function startDamageProbe(shot,trigger)
 if not trigger or not trigger.targetHumanoid or trigger.healthBefore==nil then
 local status="SEM_ALVO_NO_GATILHO"
@@ -750,7 +847,8 @@ else
 shot.damageProbe.status="SEM_QUEDA_DE_HP_OBSERVADA"
 end
 log("DAMAGE_PROBE_RESULT",{
-phase=shot.phase,
+category=shot.autoCategory,
+locationId=shot.locationId,
 target=shot.damageProbe.target,
 healthBefore=before,
 healthMinimum=minHealth,
@@ -759,71 +857,14 @@ status=shot.damageProbe.status,
 layersBeforeTarget=shot.damageProbe.target and shot.damageProbe.target.layersBeforeTarget or nil
 },string.format(
 "%s • dano:%s • %.2f → %.2f",
-tostring(shot.phase),
+tostring(shot.autoCategory),
 tostring(shot.damageProbe.status),
 before,
 minHealth
 ))
 S.PendingDamageProbes=math.max(0,S.PendingDamageProbes-1)
-if tryFinalizeCompletion then tryFinalizeCompletion() end
 end)
 return true
-end
-local function phaseMarker(reason)
-if not S.CurrentPhase then return end
-local m={
-time=clock(),
-unix=unix(),
-kind=S.CurrentPhase,
-label=phaseLabel(),
-phaseIndex=S.PhaseIndex,
-reason=reason,
-weapon=weapon(S.ActiveTool),
-referenceRay=S.ActiveTool and referenceRay(S.ActiveTool) or nil
-}
-S.Markers[#S.Markers+1]=m
-log("PHASE_MARKER",m,string.format("MISSÃO %d/%d • %s",S.PhaseIndex,#C.PHASES,m.label))
-end
-local function setPhase(index,reason)
-S.PhaseIndex=index
-S.CurrentPhase=C.PHASES[index]
-S.PhaseShots=0
-if not S.CurrentPhase then return end
-S.PhaseStats[S.CurrentPhase]=S.PhaseStats[S.CurrentPhase] or {
-required=C.SHOTS,
-confirmed=0,
-completed=false
-}
-phaseMarker(reason or "AUTO")
-end
-local function advancePhase()
-if S.PhaseShots<C.SHOTS then return end
-local st=S.PhaseStats[S.CurrentPhase]
-if st then st.completed=true end
-local nxt=S.PhaseIndex+1
-if nxt>#C.PHASES then
-log("ALL_PHASES_CAPTURED",{
-totalShots=#S.Shots,
-pendingDamageProbes=S.PendingDamageProbes
-},"5 missões capturadas • aguardando confirmação de dano")
-S.AwaitingDamage=true
-if tryFinalizeCompletion then tryFinalizeCompletion() end
-else
-setPhase(nxt,"AUTO_ADVANCE")
-end
-end
-tryFinalizeCompletion=function()
-if not S.AwaitingDamage then return end
-if S.PendingDamageProbes>0 then return end
-log("DAMAGE_VALIDATION_COMPLETED",{
-totalShots=#S.Shots,
-damage=damageSummary()
-},"Confirmação de dano concluída")
-S.AwaitingDamage=false
-S.Completed=true
-S.Recording=false
-S.EndUnix=unix()
-live("SISTEMA","Teste concluído • confirmação de dano finalizada.")
 end
 local function addToolConn(tool,c)
 S.ToolConnections[tool]=S.ToolConnections[tool] or {}
@@ -851,7 +892,7 @@ d.autoBaseline=nil
 d.autoBaselineToken=(tonumber(d.autoBaselineToken) or 0)+1
 d.lastUsedAutoBaselineTime=nil
 end
-log("WEAPON_EQUIPPED",{snapshot=weapon(tool)},tool.Name.." equipada")
+log("WEAPON_EQUIPPED",{name=tool.Name},tool.Name.." equipada")
 end))
 addToolConn(tool,tool.Unequipped:Connect(function()
 if S.ActiveTool==tool then S.ActiveTool=nil end
@@ -863,17 +904,16 @@ end
 log("WEAPON_UNEQUIPPED",{name=tool.Name},tool.Name.." desequipada")
 end))
 addToolConn(tool,tool.Activated:Connect(function()
-if not S.Recording or S.AwaitingDamage then return end
+if not S.Recording or S.ExportBusy then return end
 local trigger=makeTriggerSnapshot(tool,"TOOL_ACTIVATED")
 pushPendingTrigger(tool,trigger)
+local previewCategory=classifyShot(trigger.referenceRay)
 log("SHOT_TRIGGER",{
-phase=S.CurrentPhase,
-phaseIndex=S.PhaseIndex,
-phaseShots=S.PhaseShots,
-weapon=weapon(tool),
-referenceRay=trigger.referenceRay,
-damageTarget=trigger.target
-},tool.Name.." • "..phaseLabel().." • gatilho")
+weapon=tool.Name,
+previewCategory=previewCategory,
+hasTarget=trigger.target~=nil,
+source="TOOL_ACTIVATED"
+},tool.Name.." • gatilho • "..categoryLabel(previewCategory))
 end))
 for _,name in ipairs(C.ATTRS) do
 local ok,sig=pcall(function()
@@ -885,10 +925,8 @@ local value=attr(tool,name)
 local d=S.Tools[tool]
 if name=="_ammo" and d then
 local before,after=tonumber(d.lastAmmo),tonumber(value)
-if before and after and after<before and S.Recording and not S.Completed and not S.AwaitingDamage and S.CurrentPhase then
+if before and after and after<before and S.Recording and not S.ExportBusy then
 local raw=before-after
-local remain=math.max(0,C.SHOTS-S.PhaseShots)
-local counted=math.min(raw,remain)
 local trigger,triggerAge=popPendingTrigger(tool)
 if not trigger then
 trigger,triggerAge=popAutoBaseline(tool)
@@ -900,42 +938,62 @@ else
 trigger=nil
 ref=referenceRay(tool)
 end
+local category,categoryReason=classifyShot(ref)
+local loc=resolveLocation(ref,category,categoryReason)
+local shotIndex=#S.Shots+1
 local shot={
+shotIndex=shotIndex,
 time=clock(),
 unix=unix(),
 source="AMMO_DECREASE",
-phase=S.CurrentPhase,
-phaseIndex=S.PhaseIndex,
-phaseShotBefore=S.PhaseShots,
 ammoBefore=before,
 ammoAfter=after,
 ammoDelta=raw,
-countedForPhase=counted,
-overflowNotCounted=math.max(0,raw-counted),
 triggerMatched=trigger~=nil,
 triggerAge=triggerAge,
 triggerMatchSource=trigger and trigger.source or nil,
 referenceRaySource=trigger and trigger.source or "AMMO_DECREASE_FALLBACK",
 weapon=weapon(tool),
 referenceRay=ref,
-assessment=ref.assessment
+assessment=ref and ref.assessment or "LEITURA_INDISPONIVEL",
+autoCategory=category,
+autoCategoryLabel=categoryLabel(category),
+autoCategoryReason=categoryReason,
+locationId=loc and loc.id or nil,
+locationPrimaryPath=loc and loc.primaryPath or nil,
+locationPositionCell=loc and loc.positionCell or nil
 }
-shot.phaseValidation,shot.phaseValidationReason=validatePhase(S.CurrentPhase,ref)
 S.Shots[#S.Shots+1]=shot
-S.LastAssessment=ref.assessment
-if counted>0 then
-S.PhaseShots+=counted
-local st=S.PhaseStats[S.CurrentPhase]
-if st then st.confirmed=S.PhaseShots end
+S.RoundCount+=raw
+S.CategoryCounts[category]=(S.CategoryCounts[category] or 0)+1
+S.LastCategory=category
+S.LastCategoryLabel=categoryLabel(category)
+S.LastLocationId=loc and loc.id or nil
+S.LastLocationText=(loc and (loc.id.." • "..tostring(loc.primaryName))) or "SEM LOCAL"
+S.LastAssessment=shot.assessment
+if loc then
+loc.records+=1
+loc.rounds+=raw
 end
 startDamageProbe(shot,trigger)
-if S.PhaseShots<C.SHOTS then scheduleAutoBaseline(tool) end
-log("SHOT_AMMO_CONFIRMED",shot,string.format(
-"%s • %s • %d/%d • %s",
-tool.Name,phaseLabel(),S.PhaseShots,C.SHOTS,tostring(ref.assessment)
+scheduleAutoBaseline(tool)
+log("SHOT_AMMO_CONFIRMED",{
+shotIndex=shotIndex,
+weapon=tool.Name,
+ammoDelta=raw,
+category=category,
+locationId=shot.locationId,
+assessment=shot.assessment,
+triggerMatched=shot.triggerMatched,
+triggerMatchSource=shot.triggerMatchSource
+},string.format(
+"#%d • %s • %s • %s",
+shotIndex,tool.Name,categoryLabel(category),tostring(shot.locationId or "SEM_LOCAL")
 ))
-live("VALIDACAO",tostring(shot.phaseValidation).." • "..tostring(shot.phaseValidationReason))
-advancePhase()
+live("CLASSIFICACAO",string.format(
+"#%d • %s • %s",
+shotIndex,categoryLabel(category),tostring(shot.locationId or "SEM_LOCAL")
+))
 end
 d.lastAmmo=after or value
 elseif S.Recording then
@@ -995,18 +1053,22 @@ local function resetSession()
 S.Events={}
 S.Markers={}
 S.Shots={}
+S.RoundCount=0
 S.Errors=0
-S.PhaseStats={}
+S.CategoryCounts={}
+S.LastCategory=nil
+S.LastCategoryLabel=nil
+S.LastLocationId=nil
+S.LastLocationText=nil
+S.LastAssessment=nil
+S.LocationMap={}
+S.LocationDefs={}
+S.LocationOrder={}
 S.BoundarySurvey={}
 S.ExplicitBlockers={}
 S.ExplicitBlockerScanTotal=0
-S.LastAssessment=nil
-S.PhaseIndex=0
-S.CurrentPhase=nil
-S.PhaseShots=0
-S.Completed=false
 S.Exported=false
-S.AwaitingDamage=false
+S.ExportBusy=false
 S.PendingTriggers={}
 S.PendingDamageProbes=0
 S.SessionId+=1
@@ -1019,7 +1081,7 @@ d.lastUsedAutoBaselineTime=nil
 end
 end
 S.StartUnix=unix()
-S.EndUnix=nil
+S.LastPauseUnix=nil
 end
 local function beginSession()
 if not S.ActiveTool or not isWeapon(S.ActiveTool) then
@@ -1029,34 +1091,35 @@ end
 resetSession()
 S.Started=true
 S.Recording=true
-log("DIAGNOSTIC_STARTED",{},"Pesquisa V2.2.5 iniciada")
+log("DIAGNOSTIC_STARTED",{mode="OPEN_ENDED_AUTO_CLASSIFICATION"},"Pesquisa V2.3.0 iniciada • sem limite de tiros")
 inspectArchitecture("DIAGNOSTIC_START")
 scanExplicitBlockers()
 boundarySurvey()
-setPhase(1,"SESSION_START")
 return true
 end
-local function pauseSession()
+local function pauseSession(reason)
 if not S.Recording then return end
 log("SESSION_PAUSED",{
-phase=S.CurrentPhase,
-phaseIndex=S.PhaseIndex,
-phaseShots=S.PhaseShots
-},"Pausado sem apagar progresso")
+reason=reason or "USER",
+shotRecords=#S.Shots,
+rounds=S.RoundCount,
+pendingDamageProbes=S.PendingDamageProbes
+},"Pausado sem apagar os dados")
 S.Recording=false
+S.LastPauseUnix=unix()
 end
 local function resumeSession()
-if not S.Started or S.Completed or S.AwaitingDamage then return false end
+if not S.Started or S.ExportBusy then return false end
 if not S.ActiveTool or not isWeapon(S.ActiveTool) then
 live("AVISO","Equipe uma arma antes de retomar.")
 return false
 end
 S.Recording=true
+S.LastPauseUnix=nil
 log("SESSION_RESUMED",{
-phase=S.CurrentPhase,
-phaseIndex=S.PhaseIndex,
-phaseShots=S.PhaseShots
-},"Retomado na mesma missão")
+shotRecords=#S.Shots,
+rounds=S.RoundCount
+},"Coleta livre retomada")
 return true
 end
 local function serializeTools()
@@ -1080,32 +1143,34 @@ return {
 format="Psicosenatico Weapon Research",
 version=C.VERSION,
 focus="BULLET_NOCLIP_WALL_PENETRATION",
+mode="OPEN_ENDED_AUTO_CLASSIFICATION",
 generatedAtUnix=unix(),
 diagnostic={
-status=S.Completed and "COMPLETED" or (S.AwaitingDamage and "FINALIZING_DAMAGE" or (S.Recording and "RECORDING" or "PAUSED_OR_STOPPED")),
+status=S.Recording and "RECORDING" or "PAUSED",
 startedAtUnix=S.StartUnix,
-finishedAtUnix=S.EndUnix
+lastPauseAtUnix=S.LastPauseUnix,
+snapshotAtUnix=unix()
 },
-automaticFlow={
-shotsPerPhase=C.SHOTS,
-currentPhase=S.CurrentPhase,
-currentPhaseIndex=S.PhaseIndex,
-currentPhaseShots=S.PhaseShots,
-completed=S.Completed,
-awaitingDamage=S.AwaitingDamage,
+openEndedResearch={
+shotLimit="UNLIMITED",
+automaticClassification=true,
+locationGrouping=true,
+locationGridStuds=C.LOCATION_GRID,
+shotRecords=#S.Shots,
+roundsConsumed=S.RoundCount,
+uniqueLocations=#S.LocationOrder,
 pendingDamageProbes=S.PendingDamageProbes,
-phaseStats=S.PhaseStats,
-phaseCount=#C.PHASES,
-totalRequiredShots=#C.PHASES*C.SHOTS,
 maxHitChain=C.MAX_HIT_CHAIN,
 damageSampleDelays=C.DAMAGE_SAMPLE_DELAYS,
 autoBaselineMaxAge=C.AUTO_BASELINE_MAX_AGE
 },
 summary={
 events=#S.Events,
-markers=#S.Markers,
 confirmedShotRecords=#S.Shots,
+roundsConsumed=S.RoundCount,
+uniqueLocations=#S.LocationOrder,
 errors=S.Errors,
+byCategory=categorySummary(),
 damage=damageSummary()
 },
 architecture=S.Architecture,
@@ -1117,24 +1182,25 @@ value=true,
 totalDetected=S.ExplicitBlockerScanTotal,
 stored=S.ExplicitBlockers
 },
+locations=buildLocationSummary(),
 tools=serializeTools(),
-markers=S.Markers,
 shots=S.Shots,
 events=S.Events,
 interpretationRules={
-"referenceRay é uma leitura geométrica local do cenário.",
-"multiHitChain percorre cumulativamente até 12 peças/impactos alinhados.",
-"firstHit e nextHit são mantidos por compatibilidade e correspondem às duas primeiras camadas.",
-"multiHitChain é somente leitura geométrica e não simula canPierce.",
-"BLOQUEIO_EXPLICITO significa que a peça ou um ancestral possui exatamente BulletsCannotPierce=true.",
-"A missão ALVO + BLOQUEIO exige BulletsCannotPierce=true antes do personagem na cadeia geométrica.",
-"damageProbe observa Humanoid.Health usando Tool.Activated e, em armas Auto, uma baseline pós-tiro reaproveitada para o próximo disparo da rajada.",
-"QUEDA_DE_HP_OBSERVADA indica correlação temporal com o disparo, não prova causal exclusiva; outros agentes também podem causar dano no mesmo intervalo.",
-"SEM_QUEDA_DE_HP_OBSERVADA significa apenas que nenhuma redução foi vista na janela de amostragem configurada.",
-"AUTO_POST_SHOT_BASELINE é uma aproximação temporal para rajadas automáticas e não garante a ordem interna exata entre munição, dano e replicação.",
-"Se não houver gatilho/baseline correspondente ou HP anterior disponível, o scanner não afirma dano.",
-"POSSIVEL_LIMITE_MAPA é heurístico: nome/tags/atributos/transparência/dimensões.",
-"Barreiras sem geometria consultável por raycast ou regras exclusivamente do servidor podem não ser detectadas.",
+"Não existe limite programado de tiros; a sessão continua até ser pausada, fechada ou reiniciada.",
+"Cada redução confirmada de _ammo gera um registro e é classificada automaticamente pela trajetória observada.",
+"TIRO_LIVRE = nenhum impacto no alcance do raycast de referência.",
+"PAREDE_OU_ESTRUTURA = geometria sem personagem confirmado depois e sem BulletsCannotPierce=true na cadeia.",
+"BLOQUEIO_EXPLICITO = BulletsCannotPierce=true detectado na peça, ancestral ou no mesmo modelo imediato da peça atingida.",
+"ALVO_ATRAS_PAREDE = personagem encontrado depois de geometria comum, sem bloqueio explícito antes dele.",
+"ALVO_ATRAS_BLOQUEIO_EXPLICITO = BulletsCannotPierce=true aparece antes do personagem na cadeia.",
+"ALVO_LIVRE = personagem é o primeiro impacto.",
+"locations agrupa tiros por categoria, objeto principal e célula espacial de 20 studs; o caminho e a posição completos continuam no tiro individual.",
+"multiHitChain percorre cumulativamente até 12 peças/impactos alinhados e não simula canPierce.",
+"damageProbe observa Humanoid.Health usando Tool.Activated e, em armas Auto, uma baseline temporal pós-tiro para o próximo disparo da rajada.",
+"QUEDA_DE_HP_OBSERVADA indica correlação temporal com o disparo, não prova causal exclusiva.",
+"SEM_QUEDA_DE_HP_OBSERVADA significa somente que nenhuma redução foi observada na janela configurada.",
+"POSSIVEL_LIMITE_MAPA é heurístico e não substitui uma regra exclusivamente do servidor.",
 "Nenhum RemoteEvent é disparado e nenhum ModuleScript é executado via require()."
 }
 }
@@ -1211,9 +1277,9 @@ BorderSizePixel=0
 })
 round(Header,15)
 label(Header,"PSICOSENATICO • PESQUISA DE ARMAS",UDim2.new(1,-140,0,24),UDim2.fromOffset(14,5),14)
-local Ver=label(Header,"V2.2.5",UDim2.fromOffset(48,16),UDim2.fromOffset(14,32),9)
+local Ver=label(Header,"V2.3.0",UDim2.fromOffset(48,16),UDim2.fromOffset(14,32),9)
 Ver.TextColor3=COL.blue2
-local Sub=label(Header,"PENETRAÇÃO DE PAREDE • AUTOMÁTICO",UDim2.new(1,-190,0,16),UDim2.fromOffset(66,32),8)
+local Sub=label(Header,"PESQUISA LIVRE • CLASSIFICAÇÃO AUTOMÁTICA",UDim2.new(1,-190,0,16),UDim2.fromOffset(66,32),8)
 Sub.TextColor3=COL.sub
 local Min=new("TextButton",{
 Parent=Header,
@@ -1332,73 +1398,6 @@ TextSize=9,
 BorderSizePixel=0
 })
 round(Open,8)
-local ConfirmShade=new("Frame",{
-Parent=Gui,
-Visible=false,
-Active=true,
-Size=UDim2.fromScale(1,1),
-Position=UDim2.fromScale(0,0),
-BackgroundColor3=Color3.fromRGB(0,0,0),
-BackgroundTransparency=0.28,
-BorderSizePixel=0,
-ZIndex=100
-})
-local ConfirmBox=new("Frame",{
-Parent=ConfirmShade,
-AnchorPoint=Vector2.new(0.5,0.5),
-Position=UDim2.fromScale(0.5,0.5),
-Size=UDim2.fromOffset(390,174),
-BackgroundColor3=COL.bg,
-BorderSizePixel=0,
-ZIndex=101
-})
-round(ConfirmBox,12)
-local ConfirmTitle=label(
-ConfirmBox,
-"CONFIRMAR NOVO TESTE",
-UDim2.new(1,-24,0,25),
-UDim2.fromOffset(12,9),
-12
-)
-ConfirmTitle.Font=Enum.Font.GothamBold
-ConfirmTitle.ZIndex=102
-local ConfirmText=label(
-ConfirmBox,
-"",
-UDim2.new(1,-24,0,78),
-UDim2.fromOffset(12,38),
-9
-)
-ConfirmText.TextWrapped=true
-ConfirmText.TextYAlignment=Enum.TextYAlignment.Top
-ConfirmText.TextColor3=COL.sub
-ConfirmText.ZIndex=102
-local CancelConfirm=new("TextButton",{
-Parent=ConfirmBox,
-Size=UDim2.new(0.5,-17,0,36),
-Position=UDim2.new(0,12,1,-48),
-Text="CANCELAR",
-BackgroundColor3=COL.panel2,
-TextColor3=COL.text,
-Font=Enum.Font.GothamBold,
-TextSize=9,
-BorderSizePixel=0,
-ZIndex=102
-})
-round(CancelConfirm,8)
-local OkConfirm=new("TextButton",{
-Parent=ConfirmBox,
-Size=UDim2.new(0.5,-17,0,36),
-Position=UDim2.new(0.5,5,1,-48),
-Text="OK",
-BackgroundColor3=COL.red,
-TextColor3=COL.text,
-Font=Enum.Font.GothamBold,
-TextSize=9,
-BorderSizePixel=0,
-ZIndex=102
-})
-round(OkConfirm,8)
 local function draggable(target,handle)
 local dragging,input,start,pos=false,nil,nil,nil
 S.Connections[#S.Connections+1]=handle.InputBegan:Connect(function(i)
@@ -1430,68 +1429,56 @@ draggable(Main,Header)
 draggable(HUD,HUD)
 local function updateUI()
 local active=S.ActiveTool and S.ActiveTool.Name or "NENHUMA"
-local state=S.Completed and "CONCLUÍDO" or (S.AwaitingDamage and "VALIDANDO DANO" or (S.Recording and "GRAVANDO" or (S.Started and "PAUSADO" or "PRONTO")))
+local state=S.ExportBusy and "EXPORTANDO" or (S.Recording and "GRAVANDO" or (S.Started and "PAUSADO" or "PRONTO"))
 Summary.Text=string.format(
-"%s • ARMA:%s • FASE:%s • TIROS:%d • ERROS:%d",
-state,active,phaseLabel(),#S.Shots,S.Errors
+"%s • ARMA:%s • TIROS:%d • LOCAIS:%d • ERROS:%d",
+state,active,S.RoundCount,#S.LocationOrder,S.Errors
 )
-if S.AwaitingDamage then
-MTitle.Text=string.format("✓ %d/%d MISSÕES • VALIDANDO DANO",#C.PHASES,#C.PHASES)
-MHelp.Text=string.format("Aguarde • %d confirmação(ões) de HP pendente(s).",S.PendingDamageProbes)
-HTitle.Text="VALIDANDO DANO"
-HHelp.Text=string.format("%d/%d missões concluídas • aguardando %d leitura(s) de HP.",#C.PHASES,#C.PHASES,S.PendingDamageProbes)
+if not S.Started then
+MTitle.Text="PESQUISA LIVRE • AGUARDANDO"
+MHelp.Text="Equipe uma arma e inicie. Não há limite de tiros."
+HTitle.Text="PESQUISA LIVRE • AGUARDANDO"
+HHelp.Text="O scanner classificará cada disparo automaticamente."
+Start.Text="INICIAR"
+elseif S.ExportBusy then
+MTitle.Text="EXPORTANDO • AGUARDE"
+MHelp.Text=string.format("Finalizando %d leitura(s) de HP pendente(s).",S.PendingDamageProbes)
+HTitle.Text="EXPORTANDO"
+HHelp.Text="Aguardando as últimas leituras de dano."
 Start.Text="AGUARDE"
-elseif S.Completed then
-MTitle.Text=string.format("✓ TESTE CONCLUÍDO • %d/%d",#C.PHASES,#C.PHASES)
-MHelp.Text=string.format("As %d leituras foram concluídas. Exporte o JSON.",#C.PHASES*C.SHOTS)
-HTitle.Text="✓ TESTE CONCLUÍDO"
-HHelp.Text=string.format("%d/%d missões concluídas • exporte o JSON.",#C.PHASES,#C.PHASES)
-Start.Text="INICIAR"
-elseif not S.Started or not S.CurrentPhase then
-MTitle.Text="MISSÃO: AGUARDANDO"
-MHelp.Text="Inicie com uma arma equipada."
-HTitle.Text="AGUARDANDO"
-HHelp.Text="Equipe uma arma e inicie a coleta."
-Start.Text="INICIAR"
 else
-local pre=S.Recording and "" or "PAUSADO • "
-MTitle.Text=string.format(
-"%sMISSÃO %d/%d • %s • %d/%d",
-pre,S.PhaseIndex,#C.PHASES,phaseLabel(),S.PhaseShots,C.SHOTS
-)
-MHelp.Text=phaseHelp()
-HTitle.Text=string.format(
-"%s%d/%d • %s • %d/%d",
-pre,S.PhaseIndex,#C.PHASES,phaseLabel(),S.PhaseShots,C.SHOTS
-)
-HHelp.Text=phaseHelp().."\n"..(
-S.LastAssessment and ("Última leitura: "..S.LastAssessment) or "Sem leitura ainda."
+local pre=S.Recording and "GRAVANDO" or "PAUSADO"
+MTitle.Text=string.format("%s • SEM LIMITE • %d TIROS",pre,S.RoundCount)
+MHelp.Text="Último: "..lastCategoryLabel().." • "..lastLocationText()
+HTitle.Text=string.format("%s • %d TIROS • %s",pre,S.RoundCount,lastCategoryLabel())
+HHelp.Text=lastLocationText().."\n"..(
+S.LastAssessment and ("Leitura: "..S.LastAssessment) or "Faça disparos em paredes, bloqueios e alvos."
 )
 Start.Text=S.Recording and "PAUSAR" or "RETOMAR"
 end
 local lines={
-"PESQUISA DE ARMAS V2.2.5",
+"PESQUISA DE ARMAS V2.3.0",
 "────────────────────────────────────────",
-"FLUXO AUTOMÁTICO • 3 tiros por missão",
-"MULTI-HIT • até 12 camadas por disparo",
+"MODO LIVRE • SEM LIMITE DE TIROS",
+"CLASSIFICAÇÃO AUTOMÁTICA POR DISPARO",
+"MULTI-HIT • até 12 camadas",
 "DANO • HP + baseline para armas Auto",
 "",
-"1 TIRO LIVRE → céu/espaço sem alvo",
-"2 PAREDE → parede comum",
-"3 ALVO + PAREDE → alvo atrás de parede comum",
-"4 ALVO + BLOQUEIO → alvo atrás de BulletsCannotPierce=true",
-"5 ALVO LIVRE → alvo sem parede",
+"LOCAIS IDENTIFICADOS: "..tostring(#S.LocationOrder),
+"BLOQUEIOS EXPLÍCITOS NO MAPA: "..tostring(S.ExplicitBlockerScanTotal),
 "",
-"BLOQUEIOS EXPLÍCITOS DETECTADOS: "..tostring(S.ExplicitBlockerScanTotal),
+"TIRO LIVRE: "..tostring(S.CategoryCounts.TIRO_LIVRE or 0),
+"PAREDE / ESTRUTURA: "..tostring(S.CategoryCounts.PAREDE_OU_ESTRUTURA or 0),
+"BLOQUEIO EXPLÍCITO: "..tostring(S.CategoryCounts.BLOQUEIO_EXPLICITO or 0),
+"ALVO ATRÁS DE PAREDE: "..tostring(S.CategoryCounts.ALVO_ATRAS_PAREDE or 0),
+"ALVO ATRÁS DE BLOQUEIO: "..tostring(S.CategoryCounts.ALVO_ATRAS_BLOQUEIO_EXPLICITO or 0),
+"ALVO LIVRE: "..tostring(S.CategoryCounts.ALVO_LIVRE or 0),
+"POSSÍVEL LIMITE: "..tostring(S.CategoryCounts.POSSIVEL_LIMITE_MAPA or 0),
+"",
 "BLOQUEIO_EXPLICITO = BulletsCannotPierce=true",
-"CAMINHO_LIVRE = nenhum impacto no alcance",
-"POSSIVEL_LIMITE_MAPA = indícios de barreira/limite",
-"GEOMETRIA_MAPA = peça normal do mapa",
-"PERSONAGEM = modelo com Humanoid",
-"",
-"PAUSAR NÃO APAGA O PROGRESSO",
-"NOVO TESTE APÓS CONCLUSÃO EXIGE CONFIRMAÇÃO",
-"EXPORTAÇÃO ESPERA AS AMOSTRAS DE DANO TERMINAREM",
+"O JSON agrupa trajetórias por local automaticamente.",
+"PAUSAR NÃO APAGA NADA • RETOMAR CONTINUA O MESMO ARQUIVO",
+"EXPORTAR pausa a coleta e espera o dano pendente terminar.",
 "",
 "ÚLTIMOS EVENTOS",
 "────────────────────────────────────────"
@@ -1507,52 +1494,28 @@ tostring(e.message)
 end
 Text.Text=table.concat(lines,"\n")
 end
-local function openNewTestConfirmation()
-if not S.Completed then return end
-S.ConfirmOpen=true
-if S.Exported then
-ConfirmText.Text=
-"A análise anterior já foi concluída e houve uma exportação nesta sessão.\n\n"
-.."Iniciar um novo teste apagará os dados atuais. Tem certeza que deseja continuar?"
-else
-ConfirmText.Text=
-"A análise anterior já foi concluída.\n\n"
-.."Você já exportou o arquivo? Iniciar um novo teste apagará os dados atuais. "
-.."Confirme somente se tiver certeza."
-end
-ConfirmShade.Visible=true
-end
-local function closeNewTestConfirmation()
-S.ConfirmOpen=false
-ConfirmShade.Visible=false
-end
 Start.Activated:Connect(function()
-if S.ConfirmOpen then return end
-if S.AwaitingDamage then
-Status.Text="Aguarde • finalizando a confirmação de dano."
+if S.ExportBusy then
+Status.Text="Aguarde • exportação em andamento."
 Status.TextColor3=COL.yellow
 updateUI()
 return
 end
-if S.Completed then
-openNewTestConfirmation()
-return
-end
 if not S.Started then
 if beginSession() then
-Status.Text="Gravando • siga a missão mostrada."
+Status.Text="Gravando sem limite • teste qualquer parede, bloqueio ou alvo."
 Status.TextColor3=COL.green
 else
 Status.Text="Equipe uma arma antes de iniciar."
 Status.TextColor3=COL.red
 end
 elseif S.Recording then
-pauseSession()
-Status.Text="Pausado • progresso preservado."
+pauseSession("USER")
+Status.Text="Pausado • todos os dados foram preservados."
 Status.TextColor3=COL.yellow
 else
 if resumeSession() then
-Status.Text="Retomado • continue a mesma missão."
+Status.Text="Retomado • a mesma sessão continua."
 Status.TextColor3=COL.green
 else
 Status.Text="Equipe uma arma antes de retomar."
@@ -1561,41 +1524,37 @@ end
 end
 updateUI()
 end)
-CancelConfirm.Activated:Connect(function()
-closeNewTestConfirmation()
-Status.Text="Novo teste cancelado • resultado anterior preservado."
-Status.TextColor3=COL.green
-end)
-OkConfirm.Activated:Connect(function()
-closeNewTestConfirmation()
-if beginSession() then
-Status.Text="Novo teste iniciado • dados anteriores substituídos."
-Status.TextColor3=COL.green
-else
-Status.Text="Equipe uma arma antes de iniciar o novo teste."
-Status.TextColor3=COL.red
-end
-updateUI()
-end)
 Export.Activated:Connect(function()
-if S.AwaitingDamage then
-Status.Text="Aguarde • as amostras de dano ainda estão sendo finalizadas."
-Status.TextColor3=COL.yellow
-updateUI()
-return
-end
 if not S.Started then
 Status.Text="Inicie a coleta antes de exportar."
 Status.TextColor3=COL.yellow
 return
 end
-local data,err=encode()
-if not data then
-Status.Text="Falha JSON: "..tostring(err)
-Status.TextColor3=COL.red
+if S.ExportBusy then
+Status.Text="Exportação já está em andamento."
+Status.TextColor3=COL.yellow
 return
 end
-local name="Psicosenatico_WeaponResearch_V2_2_5_"
+if S.Recording then pauseSession("EXPORT") end
+S.ExportBusy=true
+Status.Text="Preparando JSON • aguardando leituras de dano pendentes."
+Status.TextColor3=COL.yellow
+updateUI()
+local sessionId=S.SessionId
+task.spawn(function()
+while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do
+task.wait(0.05)
+end
+if not Gui.Parent or S.SessionId~=sessionId then return end
+local data,err=encode()
+if not data then
+S.ExportBusy=false
+Status.Text="Falha JSON: "..tostring(err)
+Status.TextColor3=COL.red
+updateUI()
+return
+end
+local name="Psicosenatico_WeaponResearch_V2_3_0_"
 ..tostring(game.PlaceId)
 .."_"
 ..tostring(os.time())
@@ -1620,10 +1579,11 @@ else
 Status.Text="Não foi possível salvar ou copiar o JSON."
 Status.TextColor3=COL.red
 end
+S.ExportBusy=false
 updateUI()
 end)
+end)
 Min.Activated:Connect(function()
-if S.ConfirmOpen then return end
 Main.Visible=false
 HUD.Visible=true
 updateUI()
@@ -1634,8 +1594,7 @@ Main.Visible=true
 end)
 local function cleanup()
 S.Recording=false
-S.ConfirmOpen=false
-S.AwaitingDamage=false
+S.ExportBusy=false
 S.SessionId+=1
 for _,list in pairs(S.ToolConnections) do
 for _,c in ipairs(list) do
@@ -1665,9 +1624,9 @@ S.Connections[#S.Connections+1]=sig:Connect(resize)
 end
 end
 scanWeapons("INITIAL_SCAN")
-live("SISTEMA","Pesquisa V2.2.5 pronta.")
-live("SISTEMA","Fluxo automático • 5 missões • pausa preserva o progresso.")
-live("SISTEMA","Novo teste após conclusão exige confirmação.")
+live("SISTEMA","Pesquisa V2.3.0 pronta.")
+live("SISTEMA","Modo livre • sem limite de tiros • pausa preserva os dados.")
+live("SISTEMA","Cada disparo é classificado automaticamente por trajetória e local.")
 live("SISTEMA","Multi-hit ativo • até 12 camadas por disparo.")
 live("SISTEMA","BulletsCannotPierce=true reconhecido como BLOQUEIO_EXPLICITO.")
 live("SISTEMA","Confirmação de dano ativa • baseline adicional para armas Auto.")
