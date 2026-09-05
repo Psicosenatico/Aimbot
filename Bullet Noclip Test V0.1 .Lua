@@ -1,6 +1,6 @@
--- PSICOSENATICO • BULLET NOCLIP TEST V0.8
--- V0.7 travessia + V0.8 seleção segura de CollisionGroup já existente; não registra grupos no cliente.
-local SOURCE_COMMIT="8ce5fc6aa827095a76788854f3a12aa1ec717b56"
+-- PSICOSENATICO • BULLET NOCLIP TEST V0.9
+-- V0.8 mecanismo por CollisionGroup existente + V0.9 diagnóstico separado da barreira de proteção de time.
+local SOURCE_COMMIT="2e19eeb7076da03518ca3ead938ed384f6519420"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/bullet_noclip_test_parts/"
 local PARTS={
     "V0_3.part1",
@@ -15,22 +15,23 @@ local PARTS={
     "V0_5.respect_can_collide.patch",
     "V0_6.collision_group_split.patch",
     "V0_7.wall_traversal.patch",
-    "V0_8.existing_group_strategy.patch"
+    "V0_8.existing_group_strategy.patch",
+    "V0_9.team_barrier.patch"
 }
 local chunks={}
 for i,name in ipairs(PARTS) do
     local ok,body=pcall(function() return game:HttpGet(BASE..name) end)
     if not ok or type(body)~="string" or #body==0 then
-        error("PSICOSENATICO V0.8: falha ao carregar parte "..tostring(i).." ("..name.."): "..tostring(body))
+        error("PSICOSENATICO V0.9: falha ao carregar parte "..tostring(i).." ("..name.."): "..tostring(body))
     end
     chunks[i]=body
 end
 local source=table.concat(chunks)
-if not string.find(source,'C.VERSION="V0.8"',1,true) then
-    error("PSICOSENATICO V0.8: patch de grupo existente não encontrado na fonte remontada")
+if not string.find(source,'C.VERSION="V0.9"',1,true) then
+    error("PSICOSENATICO V0.9: patch de barreira de time não encontrado na fonte remontada")
 end
 local compiler=loadstring
-if type(compiler)~="function" then error("PSICOSENATICO V0.8: loadstring indisponível") end
+if type(compiler)~="function" then error("PSICOSENATICO V0.9: loadstring indisponível") end
 local fn,err=compiler(source)
-if not fn then error("PSICOSENATICO V0.8: erro de compilação: "..tostring(err)) end
+if not fn then error("PSICOSENATICO V0.9: erro de compilação: "..tostring(err)) end
 return fn()
