@@ -1,0 +1,318 @@
+-- V2.3.9 NOCLIP SHARED-BUS SYNC + TARGET PROTECTION CONTEXT
+-- Uses Bullet NoClip V0.10 as authority for the exact local client ray result when both
+-- scripts are running. Keeps SHOT-LOCK/OBB/HP unchanged and adds target protection context
+-- plus same-target barrier->free transition diagnostics. Observational only.
+
+C.VERSION="V2.3.9"
+local BUS_KEY_V239="__PSICO_BULLET_RESEARCH_SHARED_BUS_V1"
+C.NOCLIP_SYNC_MAX_DT=0.080
+C.TRANSITION_MAX_AGE=5.0
+S.NoClipSyncMatches=0
+S.NoClipSyncMisses=0
+S.NoClipSyncFallbacks=0
+
+local function shotWeaponNameV239(shot)
+ return shot and shot.weapon and shot.weapon.name or nil
+end
+
+local function nearestNoClipRecordV239(shot)
+ local bus=ENV[BUS_KEY_V239]
+ if type(bus)~="table" or type(bus.records)~="table" or not shot then return nil,nil end
+ local st=tonumber(shot.time)
+ local sw=shotWeaponNameV239(shot)
+ if not st then return nil,nil end
+ local best=nil
+ local bestDt=math.huge
+ for i=#bus.records,1,-1 do
+  local r=bus.records[i]
+  local rt=tonumber(r and r.time)
+  if rt then
+   local dt=math.abs(rt-st)
+   if dt<=C.NOCLIP_SYNC_MAX_DT and (not sw or not r.weaponName or r.weaponName==sw) and dt<bestDt then
+    best=r;bestDt=dt
+   elseif rt<st-C.NOCLIP_SYNC_MAX_DT then
+    break
+   end
+  end
+ end
+ return best,best and bestDt or nil
+end
+
+local function attachNoClipSyncV239(shot,countStats)
+ if not shot then return nil end
+ if shot.noClipSync and shot.noClipSync.matched then return shot.noClipSync end
+ local r,dt=nearestNoClipRecordV239(shot)
+ if r then
+  shot.noClipSync={
+   matched=true,source="BULLET_NOCLIP_V010_SHARED_RUNTIME_BUS",seq=r.seq,deltaTime=dt,
+   shotIndex=r.shotIndex,weaponName=r.weaponName,enabled=r.enabled,
+   wallDiagnosticCategory=r.wallDiagnosticCategory,teamBarrierClientState=r.teamBarrierClientState,
+   clientReachedCharacter=r.clientReachedCharacter==true,crossedCandidate=r.crossedCandidate==true,
+   normalWallClientReached=r.normalWallClientReached==true,
+   diagnosticBaselineHit=r.diagnosticBaselineHit,teamBarrier=r.teamBarrier,
+  }
+  shot.targetProtectionContext=r.targetProtectionContext
+  if countStats then S.NoClipSyncMatches+=1 end
+  return shot.noClipSync
+ end
+ shot.noClipSync={matched=false,source="NO_MATCH_WITHIN_TOLERANCE",maxDelta=C.NOCLIP_SYNC_MAX_DT}
+ if countStats then S.NoClipSyncMisses+=1 end
+ return shot.noClipSync
+end
+
+local function targetPathV239(shot)
+ local ctx=shot and shot.targetProtectionContext
+ if ctx and ctx.modelPath then return ctx.modelPath end
+ local p=shot and shot.damageProbe
+ if p and p.target and p.target.modelPath then return p.target.modelPath end
+ local ref=shot and shot.referenceRay
+ local idx=ref and ref.firstCharacterIndex
+ local item=idx and ref.multiHitChain and ref.multiHitChain[idx] or nil
+ return item and item.model or nil
+end
+
+local function hpEvidenceV239(shot)
+ local p=shot and shot.damageProbe
+ if p then
+  local dmg=tonumber(p.observedDamage) or 0
+  if p.reliable==true and p.status=="QUEDA_DE_HP_OBSERVADA" and dmg>0.001 then
+   return "DANO_CONFIRMADO",dmg,"DAMAGE_PROBE_RELIABLE"
+  end
+ end
+ local d=shot and shot.interShotHealthDelta
+ local inter=tonumber(d and d.observedDamage) or 0
+ if inter>0.001 then return "DANO_OBSERVADO_CORRELACIONADO",inter,"INTERSHOT_CORRELATION" end
+ if p and p.reliable==true and p.status=="SEM_QUEDA_DE_HP_OBSERVADA" then
+  return "SEM_QUEDA_HP_CONFIAVEL",0,"DAMAGE_PROBE_RELIABLE"
+ end
+ return "DANO_AMBIGUO",0,"NO_RELIABLE_HP_RESULT"
+end
+
+local function syncClientStateV239(shot,barrier)
+ local sync=attachNoClipSyncV239(shot,false)
+ if sync and sync.matched then
+  if barrier then
+   local s=sync.teamBarrierClientState
+   if s then return s,"NOCLIP_SHARED_BUS" end
+  elseif sync.normalWallClientReached then
+   return "CLIENTE_ATINGIU_ALVO","NOCLIP_SHARED_BUS"
+  elseif sync.crossedCandidate and not sync.clientReachedCharacter then
+   return "CLIENTE_NAO_ATINGIU_ALVO","NOCLIP_SHARED_BUS"
+  end
+ end
+ S.NoClipSyncFallbacks+=1
+ if barrier then
+  local b,bundle=v238FindBarrier(shot)
+  if b and bundle then return v238ClientState(shot,b,bundle),"RESEARCH_REFERENCE_RAY_FALLBACK" end
+ end
+ local ref=shot and shot.referenceRay
+ if ref and ref.firstCharacterIndex==1 then return "CLIENTE_ATINGIU_ALVO","RESEARCH_REFERENCE_RAY_FALLBACK" end
+ return "CLIENTE_NAO_ATINGIU_ALVO","RESEARCH_REFERENCE_RAY_FALLBACK"
+end
+
+local function outcomeV239(shot)
+ local barrier=v238FindBarrier(shot)
+ local isBarrier=barrier~=nil or (shot and shot.wallDiagnosticCategory=="BARREIRA_PROTECAO_TIME")
+ local client,clientSource=syncClientStateV239(shot,isBarrier)
+ local hp,damage,hpSource=hpEvidenceV239(shot)
+ local outcome=nil
+ if isBarrier then
+  if client=="CLIENTE_ATINGIU_ALVO" then
+   if hp=="DANO_CONFIRMADO" then outcome="DANO_CONFIRMADO"
+   elseif hp=="DANO_OBSERVADO_CORRELACIONADO" then outcome="DANO_OBSERVADO_CORRELACIONADO"
+   elseif hp=="SEM_QUEDA_HP_CONFIAVEL" then outcome="CLIENTE_ATINGE_SERVIDOR_NEGA"
+   else outcome="CLIENTE_ATINGE_RESULTADO_AMBIGUO" end
+  elseif client=="CLIENTE_PAROU_NA_BARREIRA" or client=="CLIENTE_BLOQUEADO_ANTES_DO_ALVO" then
+   outcome="CLIENTE_BLOQUEADO"
+  elseif string.find(tostring(client),"PASSOU",1,true) then
+   outcome="CLIENTE_PASSOU_SEM_ALVO"
+  else
+   outcome="SEM_ALVO_PARA_VALIDAR"
+  end
+ else
+  if client=="CLIENTE_ATINGIU_ALVO" then
+   if hp=="DANO_CONFIRMADO" then outcome="DANO_CONFIRMADO"
+   elseif hp=="DANO_OBSERVADO_CORRELACIONADO" then outcome="DANO_OBSERVADO_CORRELACIONADO"
+   elseif hp=="SEM_QUEDA_HP_CONFIAVEL" then outcome="CLIENTE_ATINGE_SEM_DANO"
+   else outcome="CLIENTE_ATINGE_RESULTADO_AMBIGUO" end
+  else outcome="CLIENTE_NAO_ATINGIU_ALVO" end
+ end
+ shot.clientPathStateV239=client
+ shot.clientPathAuthorityV239=clientSource
+ shot.hpStateV239=hp
+ shot.outcomeV239=outcome
+ shot.observedDamageV239=damage
+ shot.hpEvidenceSourceV239=hpSource
+ return outcome,isBarrier
+end
+
+local function protectionAggregateV239(ctx,out)
+ if type(ctx)~="table" then return end
+ out.contextCaptured+=1
+ if (tonumber(ctx.forceFieldCount) or 0)>0 then out.withForceField+=1 else out.withoutForceField+=1 end
+ local kind=tostring(ctx.kind or "UNKNOWN")
+ out.byTargetKind[kind]=(out.byTargetKind[kind] or 0)+1
+ local lt=ctx.localTeam and ctx.localTeam.name or "?"
+ local tt=ctx.team and ctx.team.name or "?"
+ local pair=tostring(lt).."->"..tostring(tt)
+ out.byTeamPair[pair]=(out.byTeamPair[pair] or 0)+1
+end
+
+local function transitionSummaryV239()
+ local out={pairs=0,barrierDeniedThenFreeDamage=0,barrierDeniedThenFreeNoDamage=0,barrierAmbiguousThenFreeDamage=0,records={}}
+ for i,shot in ipairs(S.Shots) do
+  local _,isBarrier=outcomeV239(shot)
+  if isBarrier then
+   local target=targetPathV239(shot)
+   local t0=tonumber(shot.time)
+   if target and t0 then
+    for j=i+1,#S.Shots do
+     local nxt=S.Shots[j]
+     local dt=(tonumber(nxt.time) or math.huge)-t0
+     if dt>C.TRANSITION_MAX_AGE then break end
+     if targetPathV239(nxt)==target and nxt.autoCategory=="ALVO_LIVRE" then
+      local nextOutcome=outcomeV239(nxt)
+      local rec={barrierShot=shot.shotIndex,freeShot=nxt.shotIndex,targetPath=target,age=dt,barrierOutcome=shot.outcomeV239,freeOutcome=nextOutcome,freeHpState=nxt.hpStateV239,barrierHpState=shot.hpStateV239}
+      out.records[#out.records+1]=rec
+      out.pairs+=1
+      if shot.outcomeV239=="CLIENTE_ATINGE_SERVIDOR_NEGA" and (nextOutcome=="DANO_CONFIRMADO" or nextOutcome=="DANO_OBSERVADO_CORRELACIONADO") then out.barrierDeniedThenFreeDamage+=1
+      elseif shot.outcomeV239=="CLIENTE_ATINGE_SERVIDOR_NEGA" then out.barrierDeniedThenFreeNoDamage+=1
+      elseif (nextOutcome=="DANO_CONFIRMADO" or nextOutcome=="DANO_OBSERVADO_CORRELACIONADO") then out.barrierAmbiguousThenFreeDamage+=1 end
+      break
+     end
+    end
+   end
+  end
+ end
+ return out
+end
+
+local function summaryV239()
+ local barrier={shots=0,clientReached=0,clientBlocked=0,clientPassedNoTarget=0,damageConfirmed=0,damageCorrelated=0,clientReachedServerDenied=0,ambiguous=0,noTarget=0,totalConfirmedDamage=0,totalCorrelatedDamage=0}
+ local normal={shots=0,clientReached=0,damageConfirmed=0,damageCorrelated=0,clientReachedNoDamage=0,ambiguous=0}
+ local protection={contextCaptured=0,withForceField=0,withoutForceField=0,byTargetKind={},byTeamPair={}}
+ for _,shot in ipairs(S.Shots) do
+  attachNoClipSyncV239(shot,false)
+  local result,isBarrier=outcomeV239(shot)
+  if isBarrier then
+   barrier.shots+=1
+   protectionAggregateV239(shot.targetProtectionContext,protection)
+   if shot.clientPathStateV239=="CLIENTE_ATINGIU_ALVO" then barrier.clientReached+=1 end
+   if result=="CLIENTE_BLOQUEADO" then barrier.clientBlocked+=1
+   elseif result=="CLIENTE_PASSOU_SEM_ALVO" then barrier.clientPassedNoTarget+=1
+   elseif result=="DANO_CONFIRMADO" then barrier.damageConfirmed+=1;barrier.totalConfirmedDamage+=(tonumber(shot.observedDamageV239) or 0)
+   elseif result=="DANO_OBSERVADO_CORRELACIONADO" then barrier.damageCorrelated+=1;barrier.totalCorrelatedDamage+=(tonumber(shot.observedDamageV239) or 0)
+   elseif result=="CLIENTE_ATINGE_SERVIDOR_NEGA" then barrier.clientReachedServerDenied+=1
+   elseif result=="CLIENTE_ATINGE_RESULTADO_AMBIGUO" then barrier.ambiguous+=1
+   else barrier.noTarget+=1 end
+  elseif shot.autoCategory=="ALVO_ATRAS_MAPA_PAREDE" then
+   normal.shots+=1
+   if shot.clientPathStateV239=="CLIENTE_ATINGIU_ALVO" then normal.clientReached+=1 end
+   if result=="DANO_CONFIRMADO" then normal.damageConfirmed+=1
+   elseif result=="DANO_OBSERVADO_CORRELACIONADO" then normal.damageCorrelated+=1
+   elseif result=="CLIENTE_ATINGE_SEM_DANO" then normal.clientReachedNoDamage+=1
+   elseif result=="CLIENTE_ATINGE_RESULTADO_AMBIGUO" then normal.ambiguous+=1 end
+  end
+ end
+ return barrier,normal,protection,transitionSummaryV239()
+end
+
+local _startDamageProbeV238=startDamageProbe
+startDamageProbe=function(shot,locked,tool,shotToken)
+ local result=_startDamageProbeV238(shot,locked,tool,shotToken)
+ attachNoClipSyncV239(shot,true)
+ if shot.noClipSync and shot.noClipSync.matched then
+  log("NOCLIP_SYNC_MATCH",{shotIndex=shot.shotIndex,seq=shot.noClipSync.seq,deltaTime=shot.noClipSync.deltaTime,clientState=shot.noClipSync.teamBarrierClientState,wallDiagnosticCategory=shot.noClipSync.wallDiagnosticCategory},"#"..tostring(shot.shotIndex).." • NoClip sync "..string.format("%.4fs",shot.noClipSync.deltaTime or -1))
+ end
+ return result
+end
+
+local _exportTableV238=exportTable
+exportTable=function()
+ local t=_exportTableV238()
+ local barrier,normal,protection,transitions=summaryV239()
+ t.version=C.VERSION
+ t.mode="SHOT_LOCK_OBB_HP_TEAM_BARRIER_WITH_NOCLIP_SHARED_BUS"
+ t.openEndedResearch=t.openEndedResearch or {}
+ t.openEndedResearch.noClipRuntimeSync={
+  authority="BULLET_NOCLIP_V010_SHARED_RUNTIME_BUS_WHEN_MATCHED",
+  maxDelta=C.NOCLIP_SYNC_MAX_DT,matches=S.NoClipSyncMatches,misses=S.NoClipSyncMisses,fallbacks=S.NoClipSyncFallbacks,
+  note="Quando há match, o estado do caminho CLIENTE vem do mesmo raycast medido pelo Bullet NoClip, não do referenceRay independente do Research."
+ }
+ local old=t.openEndedResearch.teamProtectionBarrier or {}
+ old.legacyV238Summary=old.summary
+ old.summary=barrier
+ old.normalMapWallComparison=normal
+ old.targetProtectionContext=protection
+ old.sameTargetBarrierToFreeTransitions=transitions
+ old.clientPathAuthority="NOCLIP_SHARED_BUS_WHEN_AVAILABLE"
+ t.openEndedResearch.teamProtectionBarrier=old
+ t.interpretationRules=t.interpretationRules or {}
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.9: clientPathStateV239 usa o shared bus do Bullet NoClip V0.10 como autoridade quando o tiro casa por tempo/arma; referenceRay vira fallback."
+ t.interpretationRules[#t.interpretationRules+1]="targetProtectionContext registra ForceField, Team, atributos/tags e lado geométrico da barreira sem alterar o alvo."
+ t.interpretationRules[#t.interpretationRules+1]="sameTargetBarrierToFreeTransitions procura o mesmo alvo atrás da barreira e depois em ALVO_LIVRE em até 5s para testar hipótese de proteção por zona."
+ return t
+end
+
+local _resetSessionV238=resetSession
+resetSession=function()
+ _resetSessionV238()
+ S.NoClipSyncMatches=0
+ S.NoClipSyncMisses=0
+ S.NoClipSyncFallbacks=0
+end
+
+local _updateUIV238=updateUI
+updateUI=function()
+ _updateUIV238()
+ Ver.Text=C.VERSION
+ Sub.Text="SHOT-LOCK + SYNC EXATO DO NOCLIP + PROTEÇÃO DO ALVO"
+ Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.8","PESQUISA DE ARMAS V2.3.9")
+ local last=S.Shots[#S.Shots]
+ if last then
+  attachNoClipSyncV239(last,false)
+  if last.noClipSync and last.noClipSync.matched then
+   outcomeV239(last)
+   if last.wallDiagnosticCategory=="BARREIRA_PROTECAO_TIME" then
+    MHelp.Text="BARREIRA TIME • "..tostring(last.outcomeV239 or last.clientPathStateV239 or "ANALISANDO").." • SYNC NOCLIP"
+   end
+  end
+ end
+end
+S.UIRefresh=updateUI
+local rt239=ENV[RUNTIME_KEY]
+if type(rt239)=="table" then rt239.version=C.VERSION end
+
+local oldExport239=Export
+local NewExport239=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+round(NewExport239,8)
+pcall(function() oldExport239:Destroy() end)
+Export=NewExport239
+Export.Activated:Connect(function()
+ if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+ if S.ExportBusy then Status.Text="Exportação já está em andamento.";Status.TextColor3=COL.yellow;return end
+ if S.Recording then pauseSession("EXPORT") end
+ S.ExportBusy=true
+ Status.Text="Preparando JSON V2.3.9 • sincronizando NoClip, HP e proteção do alvo."
+ Status.TextColor3=COL.yellow
+ updateUI()
+ local sessionId=S.SessionId
+ task.spawn(function()
+  while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+  if not Gui.Parent or S.SessionId~=sessionId then return end
+  for _,shot in ipairs(S.Shots) do attachNoClipSyncV239(shot,false);outcomeV239(shot) end
+  local data,encErr=encode()
+  if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+  local name="Psicosenatico_WeaponResearch_V2_3_9_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+  local saved=false
+  if typeof(writefile)=="function" then saved=pcall(function() writefile(name,data) end) end
+  if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..name;Status.TextColor3=COL.green
+  elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+  else Status.Text="Não foi possível salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+  S.ExportBusy=false;updateUI()
+ end)
+end)
+
+live("SISTEMA","V2.3.9 • sync runtime com Bullet NoClip V0.10 ativo quando ambos executam juntos.")
+live("SISTEMA","Contexto de proteção do alvo e transição barreira→livre serão exportados.")
+pcall(updateUI)
