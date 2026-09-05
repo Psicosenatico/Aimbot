@@ -1,6 +1,6 @@
 -- PSICOSENATICO • WEAPON RESEARCH V2.3.9
 -- Base íntegra V2.3.8 + sync runtime com Bullet NoClip V0.10, contexto de proteção e guard de índice.
-local SOURCE_COMMIT="2ac9c58d532146daa61e41540cbe354433c97de8"
+local SOURCE_COMMIT="f3099357c0904ed3ba54185c251c113c91ab18c3"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/weapon_research_parts/"
 local PARTS={
     "V2_3_3.part1a",
