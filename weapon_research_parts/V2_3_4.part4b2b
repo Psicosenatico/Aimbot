@@ -1,0 +1,52 @@
+Status.Text="Não foi possível salvar ou copiar o JSON."
+Status.TextColor3=COL.red
+end
+S.ExportBusy=false
+updateUI()
+end)
+end)
+Min.Activated:Connect(function()
+Main.Visible=false
+HUD.Visible=true
+updateUI()
+end)
+Open.Activated:Connect(function()
+HUD.Visible=false
+Main.Visible=true
+end)
+local function cleanup()
+S.Recording=false
+S.ExportBusy=false
+S.SessionId+=1
+for _,list in pairs(S.ToolConnections) do
+for _,c in ipairs(list) do
+pcall(function() c:Disconnect() end)
+end
+end
+for _,c in ipairs(S.Connections) do
+pcall(function() c:Disconnect() end)
+end
+pcall(function() Gui:Destroy() end)
+local rt=ENV[RUNTIME_KEY]
+if type(rt)=="table" and rt.cleanup==cleanup then ENV[RUNTIME_KEY]=nil end
+end
+ENV[RUNTIME_KEY]={version=C.VERSION,cleanup=cleanup}
+Close.Activated:Connect(cleanup)
+if Workspace.CurrentCamera then
+local ok,sig=pcall(function() return Workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize") end)
+if ok and sig then S.Connections[#S.Connections+1]=sig:Connect(resize) end
+end
+scanWeapons("INITIAL_SCAN")
+live("SISTEMA","Pesquisa V2.3.4 pronta.")
+live("SISTEMA","SHOT-LOCK ativo • categoria é congelada na redução de _ammo.")
+live("SISTEMA","Tool.Activated é somente comparação pré-tiro; a UI não decide a categoria.")
+live("SISTEMA","Rajada automática • probe atingido pelo próximo tiro vira SOBREPOSTO/AMBÍGUO.")
+live("SISTEMA","Workspace.Map = candidato; Workspace.Tycoons/LaserGate = protegidos.")
+live("SISTEMA","Multi-hit ativo • até 12 camadas por disparo.")
+updateUI()
+task.spawn(function()
+while Gui.Parent do
+pcall(updateUI)
+task.wait(0.20)
+end
+end)
