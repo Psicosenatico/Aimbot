@@ -1,0 +1,37 @@
+local Toggle=btn(Main,"ATIVAR NO CLIP",UDim2.new(1,-28,0,42),UDim2.fromOffset(14,84)); Toggle.BackgroundColor3=Color3.fromRGB(43,92,61)
+local Export=btn(Main,"EXPORTAR DIAGNÓSTICO",UDim2.new(1,-28,0,36),UDim2.fromOffset(14,134)); Export.BackgroundColor3=Color3.fromRGB(41,70,112)
+local Stats=label(Main,"Candidatas: 0",UDim2.new(1,-28,0,20),UDim2.fromOffset(14,179),12); Stats.TextColor3=Color3.fromRGB(181,194,214)
+local Last=label(Main,"Última leitura: nenhuma.",UDim2.new(1,-28,0,38),UDim2.fromOffset(14,202),12); Last.TextWrapped=true; Last.TextYAlignment=Enum.TextYAlignment.Top
+local Reader=Instance.new("TextLabel"); Reader.BackgroundColor3=Color3.fromRGB(12,16,23); Reader.BorderSizePixel=0; Reader.TextColor3=Color3.fromRGB(174,187,206); Reader.Font=Enum.Font.Code; Reader.TextSize=10; Reader.TextXAlignment=Enum.TextXAlignment.Left; Reader.TextYAlignment=Enum.TextYAlignment.Top; Reader.TextWrapped=true; Reader.Size=UDim2.new(1,-28,1,-254); Reader.Position=UDim2.fromOffset(14,242); Reader.Text="Leitor: pronto."; Reader.Parent=Main; corner(Reader,8)
+local Float=btn(Gui,"NC",UDim2.fromOffset(56,56),UDim2.new(1,-72,.5,-28)); Float.Visible=false; Float.BackgroundColor3=Color3.fromRGB(20,48,86); corner(Float,28)
+
+local function drag(frame,handle)
+ local dragging=false; local inputRef,start,pos
+ S.conns[#S.conns+1]=handle.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true; start=i.Position; pos=frame.Position; i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then dragging=false end end) end end)
+ S.conns[#S.conns+1]=handle.InputChanged:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch then inputRef=i end end)
+ S.conns[#S.conns+1]=UIS.InputChanged:Connect(function(i) if dragging and i==inputRef and start and pos then local d=i.Position-start; frame.Position=UDim2.new(pos.X.Scale,pos.X.Offset+d.X,pos.Y.Scale,pos.Y.Offset+d.Y) end end)
+end
+drag(Main,Head); drag(Float,Float)
+updateUI=function()
+ if S.closed or not Gui.Parent then return end
+ State.Text=S.enabled and "Estado: ATIVO • somente paredes candidatas" or "Estado: DESATIVADO • restaurado"; State.TextColor3=S.enabled and Color3.fromRGB(111,221,145) or Color3.fromRGB(223,190,111)
+ Toggle.Text=S.enabled and "DESATIVAR NO CLIP" or "ATIVAR NO CLIP"; Toggle.BackgroundColor3=S.enabled and Color3.fromRGB(108,50,55) or Color3.fromRGB(43,92,61)
+ Stats.Text=string.format("Candidatas: %d • Wall: %d • Forma: %d • Tiros: %d",#S.order,S.counts.NAMED_WALL,S.counts.SHAPE_WALL,#S.shots); Last.Text="Última leitura: "..S.last; Float.Text=S.enabled and "NC✓" or "NC"
+ Reader.Text=string.format("Leitor\nEstado: %s\nCandidatas: %d • verificadas: %d\nTiros: %d • parede não registrada: %d\nErros: %d",S.enabled and "ATIVO" or "OFF",#S.order,S.applyVerified,#S.shots,S.unregisteredWallHits,S.errors)
+end
+local function resize() local cam=Workspace.CurrentCamera; if not cam then return end; local v=cam.ViewportSize; local w=math.max(320,math.min(390,math.floor(v.X*.92))); local h=math.max(285,math.min(300,math.floor(v.Y*.70))); Main.Size=UDim2.fromOffset(w,h); Reader.Size=UDim2.new(1,-28,1,-254) end
+local function cleanup()
+ if S.closed then return end; S.closed=true; S.enabled=false
+ for p,m in pairs(S.candidates) do if p.Parent and m.applied then restore(p,m) end end
+ for tool,_ in pairs(S.toolConns) do unwatch(tool) end
+ for _,c in ipairs(S.conns) do pcall(function() c:Disconnect() end) end; S.conns={}; event("CLOSED",{shots=#S.shots,candidates=#S.order})
+ pcall(function() Gui:Destroy() end); if type(ENV[C.KEY])=="table" and ENV[C.KEY].cleanup==cleanup then ENV[C.KEY]=nil end
+end
+ENV[C.KEY]={version=C.VERSION,cleanup=cleanup}
+Toggle.Activated:Connect(function() setEnabled(not S.enabled,"UI"); updateUI() end)
+Export.Activated:Connect(function() local ok,msg=save(); Reader.Text=msg; Export.Text=ok and "EXPORTADO ✓" or "FALHA"; task.delay(1.2,function() if Export.Parent then Export.Text="EXPORTAR DIAGNÓSTICO"; updateUI() end end) end)
+Min.Activated:Connect(function() Main.Visible=false; Float.Visible=true end); Float.Activated:Connect(function() Float.Visible=false; Main.Visible=true end); Close.Activated:Connect(cleanup)
+
+local m=map(); if m then S.conns[#S.conns+1]=m.DescendantAdded:Connect(function(o) if o:IsA("BasePart") then task.defer(function() if not S.closed then local info=classify(o); if info and register(o,info) then updateUI() end end end) end end) end
+local b=LP:FindFirstChildOfClass("Backpack"); if b then S.conns[#S.conns+1]=b.ChildAdded:Connect(function(x) task.defer(function() watch(x) end) end) end
+if LP.Character then S.conns[#S.conns+1]=LP.Character.ChildAdded:Connect(function(x) task.defer(function() watch(x) end) end) end
