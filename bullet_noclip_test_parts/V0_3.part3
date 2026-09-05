@@ -1,0 +1,50 @@
+local function exportCandidates()
+ local out={}
+ for _,p in ipairs(S.order) do
+  local m=S.candidates[p]
+  if m then
+   out[#out+1]={
+    path=m.path,kind=m.kind,reason=m.reason,marker=m.marker,shape=m.shape,debugId=m.debugId,
+    originalCanQuery=m.originalCanQuery,baselineState=m.baselineState,currentState=(p and p.Parent) and readPartState(p) or {alive=false},
+    applied=m.applied,alive=p and p.Parent~=nil or false,persistence=m.persistence,revertedObserved=m.revertedObserved,
+    lastApplyBefore=m.lastApplyBefore,lastApplyAfter=m.lastApplyAfter,lastRestoreBefore=m.lastRestoreBefore,lastRestoreAfter=m.lastRestoreAfter,
+   }
+  end
+ end
+ return out
+end
+local function payload()
+ return {
+  format="Psicosenatico Bullet Noclip Test",version=C.VERSION,runId=S.runId,placeId=game.PlaceId,startedAtUnix=S.started,exportedAtUnix=os.time(),enabledAtExport=S.enabled,
+  policy={
+   mode="MAP_WALL_ONLY_V233_MATCH_DIAGNOSTIC_V03",
+   mechanism="CanQuery=false somente nas candidatas locais de Workspace.Map; restaura ao desligar/fechar",
+   classifier="Mesmos limites geométricos da Weapon Research V2.3.3: Y>=5, min(X,Z)<=5, max(X,Z)>=8",
+   candidates={"NAMED_WALL","SHAPE_WALL"},
+   protected={"Workspace.Tycoons","LaserGate/BulletsCannotPierce=true","Ground","Mountain","TerrainPart","TeamColors/Spawn","CombatObstacles","Map genérico"},
+   diagnosticNote="V0.3 preserva boolean false, registra CanQuery/CanCollide/CanTouch/CollisionGroup/material/tamanho/identidade e mede persistência imediatamente, no próximo frame, +0.05s e +0.25s.",
+  },
+  summary={
+   shots=#S.shots,events=#S.events,errors=S.errors,candidateTotal=#S.order,namedWalls=S.counts.NAMED_WALL,shapeWalls=S.counts.SHAPE_WALL,
+   applyVerified=S.applyVerified,applyVerifyFailed=S.applyVerifyFailed,unregisteredWallHits=S.unregisteredWallHits,
+   unexpectedQueryableCandidates=S.unexpectedQueryableCandidates,registeredHitQueryable=S.registeredHitQueryable,
+   queryReverts=S.queryReverts,persistenceSamples=S.persistenceSamples,
+  },
+  candidates=exportCandidates(),shots=S.shots,events=S.events,
+ }
+end
+local function save()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+ if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_3_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then
+  local a,b=pcall(writefile,name,json)
+  if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+ end
+ if typeof(setclipboard)=="function" then
+  local a,b=pcall(setclipboard,json)
+  if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+ end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
+
