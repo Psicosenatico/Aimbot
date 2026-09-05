@@ -1,0 +1,37 @@
+ if b then for _,x in ipairs(b:GetChildren()) do if x:IsA("Tool") then watch(x); n=n+1 end end end
+ if LP.Character then for _,x in ipairs(LP.Character:GetChildren()) do if x:IsA("Tool") then watch(x); n=n+1 end end end
+ event("WEAPON_SCAN",{reason=reason,seen=n})
+end
+
+local function exportCandidates()
+ local out={}; for _,p in ipairs(S.order) do local m=S.candidates[p]; if m then out[#out+1]={path=m.path,kind=m.kind,reason=m.reason,marker=m.marker,shape=m.shape,originalCanQuery=m.originalCanQuery,currentCanQuery=(p and p.Parent) and p.CanQuery or nil,applied=m.applied,alive=p and p.Parent~=nil or false} end end; return out
+end
+local function payload()
+ return {format="Psicosenatico Bullet Noclip Test",version=C.VERSION,runId=S.runId,placeId=game.PlaceId,startedAtUnix=S.started,exportedAtUnix=os.time(),enabledAtExport=S.enabled,
+  policy={mode="MAP_WALL_ONLY_V233_MATCH",mechanism="CanQuery=false somente nas candidatas locais de Workspace.Map; restaura ao desligar/fechar",classifier="Mesmos limites geométricos da Weapon Research V2.3.3: Y>=5, min(X,Z)<=5, max(X,Z)>=8",candidates={"NAMED_WALL","SHAPE_WALL"},protected={"Workspace.Tycoons","LaserGate/BulletsCannotPierce=true","Ground","Mountain","TerrainPart","TeamColors/Spawn","CombatObstacles","Map genérico"},diagnosticNote="SHOT registra se o primeiro hit ainda seria uma parede candidata, se ela estava registrada e o CanQuery atual."},
+  summary={shots=#S.shots,events=#S.events,errors=S.errors,candidateTotal=#S.order,namedWalls=S.counts.NAMED_WALL,shapeWalls=S.counts.SHAPE_WALL,applyVerified=S.applyVerified,applyVerifyFailed=S.applyVerifyFailed,unregisteredWallHits=S.unregisteredWallHits,unexpectedQueryableCandidates=S.unexpectedQueryableCandidates},candidates=exportCandidates(),shots=S.shots,events=S.events}
+end
+local function save()
+ local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end); if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+ local name=string.format("Psicosenatico_BulletNoclip_Test_V0_2_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+ if typeof(writefile)=="function" then local a,b=pcall(writefile,name,json); if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end end
+ if typeof(setclipboard)=="function" then local a,b=pcall(setclipboard,json); if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end end
+ return false,"Não foi possível salvar/copiar o JSON"
+end
+
+local GP=(function() if typeof(gethui)=="function" then local ok,p=pcall(gethui); if ok and p then return p end end; return CoreGui end)()
+for _,x in ipairs(GP:GetChildren()) do
+ if x.Name==C.GUI or x.Name=="PsicosenaticoBulletNoclipTest_V0_1" then pcall(function() x:Destroy() end) end
+end
+local Gui=Instance.new("ScreenGui"); Gui.Name=C.GUI; Gui.ResetOnSpawn=false; Gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; Gui.Parent=GP
+local function corner(o,r) local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,r); c.Parent=o end
+local function label(p,t,sz,pos,ts) local x=Instance.new("TextLabel"); x.BackgroundTransparency=1; x.Text=t; x.TextColor3=Color3.fromRGB(235,239,245); x.Font=Enum.Font.Gotham; x.TextSize=ts or 13; x.TextXAlignment=Enum.TextXAlignment.Left; x.Size=sz; x.Position=pos; x.Parent=p; return x end
+local function btn(p,t,sz,pos) local b=Instance.new("TextButton"); b.BackgroundColor3=Color3.fromRGB(37,46,62); b.TextColor3=Color3.fromRGB(245,247,250); b.Font=Enum.Font.GothamSemibold; b.TextSize=14; b.Text=t; b.Size=sz; b.Position=pos; b.Parent=p; corner(b,8); return b end
+local Main=Instance.new("Frame"); Main.BackgroundColor3=Color3.fromRGB(17,22,31); Main.BorderSizePixel=0; Main.Size=UDim2.fromOffset(390,300); Main.Position=UDim2.new(.5,-195,.5,-150); Main.Parent=Gui; corner(Main,12)
+local st=Instance.new("UIStroke"); st.Color=Color3.fromRGB(48,71,107); st.Parent=Main
+local Head=Instance.new("Frame"); Head.BackgroundColor3=Color3.fromRGB(23,31,44); Head.BorderSizePixel=0; Head.Size=UDim2.new(1,0,0,44); Head.Parent=Main; corner(Head,12)
+local mask=Instance.new("Frame"); mask.BackgroundColor3=Head.BackgroundColor3; mask.BorderSizePixel=0; mask.Size=UDim2.new(1,0,0,12); mask.Position=UDim2.new(0,0,1,-12); mask.Parent=Head
+local title=label(Head,"PSICOSENATICO • BULLET NOCLIP TEST",UDim2.new(1,-110,0,21),UDim2.fromOffset(14,5),13); title.Font=Enum.Font.GothamSemibold
+local ver=label(Head,C.VERSION,UDim2.new(1,-110,0,16),UDim2.fromOffset(14,24),11); ver.TextColor3=Color3.fromRGB(124,160,217)
+local Min=btn(Head,"—",UDim2.fromOffset(38,30),UDim2.new(1,-84,0,7)); local Close=btn(Head,"X",UDim2.fromOffset(38,30),UDim2.new(1,-42,0,7)); Close.BackgroundColor3=Color3.fromRGB(104,42,48)
+local State=label(Main,"Estado: DESATIVADO",UDim2.new(1,-28,0,22),UDim2.fromOffset(14,57),14); State.Font=Enum.Font.GothamSemibold
