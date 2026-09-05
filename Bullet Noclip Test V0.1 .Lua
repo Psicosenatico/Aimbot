@@ -1,6 +1,6 @@
 -- PSICOSENATICO • BULLET NOCLIP TEST V0.10
--- V0.8 mecanismo por CollisionGroup existente + V0.9 barreira de time + V0.10 shared bus/contexto do alvo.
-local SOURCE_COMMIT="2ac9c58d532146daa61e41540cbe354433c97de8"
+-- V0.8 mecanismo por CollisionGroup existente + V0.9 barreira de time + V0.10 shared bus/contexto compacto.
+local SOURCE_COMMIT="f3099357c0904ed3ba54185c251c113c91ab18c3"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/bullet_noclip_test_parts/"
 local PARTS={
     "V0_3.part1",
@@ -17,7 +17,8 @@ local PARTS={
     "V0_7.wall_traversal.patch",
     "V0_8.existing_group_strategy.patch",
     "V0_9.team_barrier.patch",
-    "V0_10.shared_bus_target_context.patch"
+    "V0_10.shared_bus_target_context.patch",
+    "V0_10.compact_bus.patch"
 }
 local chunks={}
 for i,name in ipairs(PARTS) do
@@ -30,6 +31,9 @@ end
 local source=table.concat(chunks)
 if not string.find(source,'C.VERSION="V0.10"',1,true) then
     error("PSICOSENATICO V0.10: patch shared bus/contexto não encontrado na fonte remontada")
+end
+if not string.find(source,'V010_COMPACT_BUS_READY',1,true) then
+    error("PSICOSENATICO V0.10: patch de bus compacto não encontrado")
 end
 local compiler=loadstring
 if type(compiler)~="function" then error("PSICOSENATICO V0.10: loadstring indisponível") end
