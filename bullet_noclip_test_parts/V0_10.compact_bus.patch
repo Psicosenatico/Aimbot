@@ -1,0 +1,57 @@
+-- V0.10 COMPACT BUS / PRIVACY PATCH
+-- Keeps all diagnostics in the NoClip shot record, but the shared runtime bus contains only
+-- fields Weapon Research actually needs. Avoids duplicating wallTraversal on mobile and
+-- removes numeric player UserId from target context because it is unnecessary for this study.
+
+local _targetContextV010Full=targetContextV010
+targetContextV010=function(rec)
+ local ctx=_targetContextV010Full(rec)
+ if type(ctx)=="table" then ctx.playerUserId=nil end
+ return ctx
+end
+
+writeBusV010=function(rec)
+ if not rec then return end
+ local ctx=nil
+ local ok,c=pcall(targetContextV010,rec)
+ if ok then ctx=c else S.targetContextErrors+=1 end
+ rec.targetProtectionContext=ctx
+ if ctx then
+  S.targetContextCaptured+=1
+  if (ctx.forceFieldCount or 0)>0 then S.targetContextWithForceField+=1 end
+  if ctx.kind=="PLAYER" then S.targetContextPlayers+=1
+  elseif ctx.kind=="BOT_SOLDIER" then S.targetContextBots+=1
+  else S.targetContextUnknown+=1 end
+ end
+ busV010.seq=(tonumber(busV010.seq) or 0)+1
+ local w=rec.weapon or {}
+ local tr=rec.wallTraversal
+ local entry={
+  seq=busV010.seq,unix=rec.unix,time=rec.time,shotIndex=rec.index,version=C.VERSION,
+  weaponName=w.name,ammoDelta=rec.ammoDelta,enabled=rec.enabled,
+  wallDiagnosticCategory=rec.wallDiagnosticCategory,
+  teamBarrierClientState=rec.teamBarrierClientState,
+  diagnosticBaselineHit=rec.diagnosticBaselineHit,
+  targetProtectionContext=ctx,
+  clientReachedCharacter=(rec.diagnosticBaselineHit and rec.diagnosticBaselineHit.humanoid==true) or false,
+  crossedCandidate=(tr and (tr.candidateIntersectionCount or 0)>0) or false,
+ }
+ entry.normalWallClientReached=entry.clientReachedCharacter and entry.crossedCandidate and rec.wallDiagnosticCategory~="BARREIRA_PROTECAO_TIME"
+ busV010.records[#busV010.records+1]=entry
+ while #busV010.records>(busV010.maxRecords or 420) do table.remove(busV010.records,1) end
+ busV010.last=entry
+ S.sharedBusWrites+=1
+ rec.sharedBusSeq=entry.seq
+ event("V010_SHARED_BUS_WRITE",{shotIndex=rec.index,seq=entry.seq,clientReachedCharacter=entry.clientReachedCharacter,wallDiagnosticCategory=entry.wallDiagnosticCategory,targetKind=ctx and ctx.kind or nil,forceFieldCount=ctx and ctx.forceFieldCount or nil,compact=true})
+end
+
+local _payloadV010Compact=payload
+payload=function()
+ local t=_payloadV010Compact()
+ t.policy=t.policy or {}
+ t.policy.sharedRuntimeBusStorage="COMPACT: não duplica wallTraversal/teamBarrier completos; usa somente estado do cliente, hit baseline, contexto do alvo e chaves de sincronismo."
+ t.policy.targetIdentity="Não armazena UserId numérico no contexto V0.10; modelPath/modelName bastam para correlação da sessão."
+ return t
+end
+
+event("V010_COMPACT_BUS_READY",{maxRecords=busV010.maxRecords,duplicatesWallTraversal=false,storesUserId=false})
