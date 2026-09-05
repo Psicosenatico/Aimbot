@@ -1,0 +1,237 @@
+-- V2.3.7 WALL TRAVERSAL DIAGNOSTIC PATCH
+-- Keeps SHOT-LOCK, OBB classification and HP diagnostics unchanged.
+-- Adds entry/exit intervals for every candidate wall crossed by the shot line,
+-- composite wall bundles, target relation, and first visible chain hit after each exit.
+
+C.VERSION="V2.3.7"
+S.TraversalShotsWithCandidates=0
+S.TraversalMultiLayerShots=0
+S.TraversalTargetBehindBundles=0
+S.TraversalMaxCompositeThickness=0
+
+local function slabIntervalV237(o,d,h,tmin,tmax)
+ if math.abs(d)<1e-7 then
+  if o < -h or o > h then return nil,nil,false end
+  return tmin,tmax,true
+ end
+ local t1=(-h-o)/d
+ local t2=( h-o)/d
+ if t1>t2 then t1,t2=t2,t1 end
+ if t1>tmin then tmin=t1 end
+ if t2<tmax then tmax=t2 end
+ if tmin>tmax then return nil,nil,false end
+ return tmin,tmax,true
+end
+
+local function rayObbIntervalV237(origin,unit,maxDistance,p)
+ if not p or not p.Parent then return nil end
+ local ok,cf,size=pcall(function() return p.CFrame,p.Size end)
+ if not ok or typeof(cf)~="CFrame" or typeof(size)~="Vector3" then return nil end
+ local ro=cf:PointToObjectSpace(origin)
+ local rd=cf:VectorToObjectSpace(unit)
+ local hx,hy,hz=math.abs(size.X)*0.5,math.abs(size.Y)*0.5,math.abs(size.Z)*0.5
+ local tmin,tmax=0,maxDistance
+ local good
+ tmin,tmax,good=slabIntervalV237(ro.X,rd.X,hx,tmin,tmax); if not good then return nil end
+ tmin,tmax,good=slabIntervalV237(ro.Y,rd.Y,hy,tmin,tmax); if not good then return nil end
+ tmin,tmax,good=slabIntervalV237(ro.Z,rd.Z,hz,tmin,tmax); if not good then return nil end
+ if tmax<0 or tmin>maxDistance then return nil end
+ local entry=math.max(0,tmin)
+ local exit=math.min(maxDistance,tmax)
+ if exit+1e-5<entry then return nil end
+ return entry,exit
+end
+
+local function firstChainHitAfterV237(ref,distance)
+ local best=nil
+ for _,item in ipairs((ref and ref.multiHitChain) or {}) do
+  local d=tonumber(item.totalDistance or item.distance)
+  if d and d>distance+0.05 and (not best or d<best.distance) then
+   best={
+    distance=d,path=item.instance,name=item.instanceName,class=item.instanceClass,model=item.model,
+    hasHumanoid=item.hasHumanoid==true,structureScope=item.structureScope,mapSubtype=item.mapSubtype,
+    penetrationPolicy=item.penetrationPolicy,explicitProjectileBlock=item.explicitProjectileBlock==true,
+    collisionGroup=item.collisionGroup,canCollide=item.canCollide,canQuery=item.canQuery
+   }
+  end
+ end
+ return best
+end
+
+local function traversalForShotV237(shot)
+ local ref=shot and shot.referenceRay
+ if not ref or not ref.ok or type(ref.origin)~="table" or type(ref.direction)~="table" then
+  return {ok=false,reason="SEM_REFERENCE_RAY_VALIDO"}
+ end
+ local origin=Vector3.new(ref.origin[1] or 0,ref.origin[2] or 0,ref.origin[3] or 0)
+ local direction=Vector3.new(ref.direction[1] or 0,ref.direction[2] or 0,ref.direction[3] or 0)
+ local range=direction.Magnitude
+ if range<=0 then return {ok=false,reason="DIRECAO_ZERO"} end
+ local unit=direction.Unit
+ local targetDistance=nil
+ local idx=ref.firstCharacterIndex
+ local chain=ref.multiHitChain or {}
+ if idx and chain[idx] then targetDistance=tonumber(chain[idx].totalDistance or chain[idx].distance) end
+ local intervals={}
+ for _,c in ipairs(S.GeometryCandidates or {}) do
+  local p=c.part
+  if p and p.Parent then
+   local entry,exit=rayObbIntervalV237(origin,unit,range,p)
+   if entry and exit then
+    local okId,id=pcall(function() return p:GetDebugId(0) end)
+    intervals[#intervals+1]={
+     entryDistance=entry,exitDistance=exit,effectiveThickness=math.max(0,exit-entry),
+     path=c.path or full(p),name=p.Name,class=p.ClassName,debugId=okId and tostring(id) or nil,
+     subtype=c.subtype,reason=c.reason,size=c.shape and c.shape.size or nil,
+     collisionGroup=prop(p,"CollisionGroup"),canCollide=prop(p,"CanCollide"),canQuery=prop(p,"CanQuery")
+    }
+   end
+  end
+ end
+ table.sort(intervals,function(a,b)
+  if a.entryDistance==b.entryDistance then return a.exitDistance<b.exitDistance end
+  return a.entryDistance<b.entryDistance
+ end)
+ local bundles={}
+ local mergeEps=0.08
+ for _,item in ipairs(intervals) do
+  local b=bundles[#bundles]
+  if not b or item.entryDistance>b.exitDistance+mergeEps then
+   b={entryDistance=item.entryDistance,exitDistance=item.exitDistance,members={}}
+   bundles[#bundles+1]=b
+  else
+   if item.exitDistance>b.exitDistance then b.exitDistance=item.exitDistance end
+  end
+  b.members[#b.members+1]=item
+ end
+ local targetBehindCount=0
+ for i,b in ipairs(bundles) do
+  b.compositeThickness=math.max(0,b.exitDistance-b.entryDistance)
+  b.memberCount=#b.members
+  b.targetDistance=targetDistance
+  b.targetBehindBundle=(targetDistance~=nil and targetDistance>b.exitDistance+0.05) or false
+  b.targetInsideBundle=(targetDistance~=nil and targetDistance>=b.entryDistance and targetDistance<=b.exitDistance) or false
+  b.firstVisibleHitAfterExit=firstChainHitAfterV237(ref,b.exitDistance)
+  if b.targetBehindBundle then targetBehindCount+=1 end
+  if i<#bundles then b.gapToNextBundle=math.max(0,bundles[i+1].entryDistance-b.exitDistance) end
+  S.TraversalMaxCompositeThickness=math.max(S.TraversalMaxCompositeThickness,b.compositeThickness)
+ end
+ return {
+  ok=true,method="OBB_ENTRY_EXIT_INTERVALS",candidateIntersectionCount=#intervals,bundleCount=#bundles,
+  candidateIntervals=intervals,compositeBundles=bundles,targetDistance=targetDistance,
+  targetBehindBundleCount=targetBehindCount,
+  firstCandidateEntry=intervals[1] and intervals[1].entryDistance or nil,
+  lastCandidateExit=intervals[#intervals] and intervals[#intervals].exitDistance or nil
+ }
+end
+
+local _startDamageProbeV236=startDamageProbe
+startDamageProbe=function(shot,locked,tool,shotToken)
+ local ok,diag=pcall(traversalForShotV237,shot)
+ if ok and type(diag)=="table" then
+  shot.wallTraversal=diag
+  if (diag.candidateIntersectionCount or 0)>0 then
+   S.TraversalShotsWithCandidates+=1
+   if (diag.candidateIntersectionCount or 0)>1 then S.TraversalMultiLayerShots+=1 end
+   S.TraversalTargetBehindBundles+=diag.targetBehindBundleCount or 0
+   local first=diag.compositeBundles and diag.compositeBundles[1] or nil
+   if first then
+    shot.wallEntryDistance=first.entryDistance
+    shot.wallExitDistance=first.exitDistance
+    shot.wallCompositeThickness=first.compositeThickness
+    shot.firstImpactAfterWallExit=first.firstVisibleHitAfterExit
+    if first.targetBehindBundle then
+     log("TARGET_BEHIND_WALL_BUNDLE",{
+      shotIndex=shot.shotIndex,category=shot.autoCategory,entry=first.entryDistance,exit=first.exitDistance,
+      thickness=first.compositeThickness,memberCount=first.memberCount,targetDistance=first.targetDistance,
+      firstVisibleHitAfterExit=first.firstVisibleHitAfterExit
+     },string.format("#%d • parede %.2f→%.2f • alvo %.2f",shot.shotIndex,first.entryDistance,first.exitDistance,first.targetDistance or -1))
+    end
+   end
+  end
+ else
+  shot.wallTraversal={ok=false,reason=tostring(diag)}
+  log("WALL_TRAVERSAL_ERROR",{shotIndex=shot.shotIndex,error=tostring(diag)},"Falha no diagnóstico de entrada/saída")
+ end
+ return _startDamageProbeV236(shot,locked,tool,shotToken)
+end
+
+local _exportTableV236=exportTable
+exportTable=function()
+ local t=_exportTableV236()
+ t.version=C.VERSION
+ t.mode="SHOT_LOCK_OBB_INTERSHOT_PLUS_WALL_TRAVERSAL"
+ t.openEndedResearch=t.openEndedResearch or {}
+ t.openEndedResearch.wallTraversal={
+  method="OBB_ENTRY_EXIT_INTERVALS",
+  shotsWithCandidates=S.TraversalShotsWithCandidates,
+  multiLayerShots=S.TraversalMultiLayerShots,
+  targetBehindBundles=S.TraversalTargetBehindBundles,
+  maxCompositeThickness=S.TraversalMaxCompositeThickness,
+  note="Cada tiro registra intervalos de entrada/saída por candidata, bundles de Parts contíguas/sobrepostas, distância do alvo e primeiro hit consultável após a saída."
+ }
+ t.interpretationRules=t.interpretationRules or {}
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.7: wallTraversal distingue uma Part espessa de múltiplas Parts alinhadas usando intervalos OBB e bundles compostos."
+ t.interpretationRules[#t.interpretationRules+1]="firstVisibleHitAfterExit vem da cadeia diagnóstica do Research; deve ser cruzado com o postExitRay do Bullet NoClip e com HP para inferir penetração funcional."
+ return t
+end
+
+local _resetSessionV236=resetSession
+resetSession=function()
+ _resetSessionV236()
+ S.TraversalShotsWithCandidates=0
+ S.TraversalMultiLayerShots=0
+ S.TraversalTargetBehindBundles=0
+ S.TraversalMaxCompositeThickness=0
+end
+
+local _updateUIV236=updateUI
+updateUI=function()
+ _updateUIV236()
+ Ver.Text=C.VERSION
+ Sub.Text="SHOT-LOCK + OBB + ENTRADA/SAÍDA DA PAREDE"
+ Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.6","PESQUISA DE ARMAS V2.3.7")
+ local last=S.Shots[#S.Shots]
+ if last and last.wallTraversal and (last.wallTraversal.candidateIntersectionCount or 0)>0 then
+  local first=last.wallTraversal.compositeBundles and last.wallTraversal.compositeBundles[1]
+  if first then
+   MHelp.Text=string.format("PAREDE: %.2f→%.2f • espessura %.2f • camadas %d",first.entryDistance,first.exitDistance,first.compositeThickness,first.memberCount or 0)
+  end
+ end
+end
+S.UIRefresh=updateUI
+local rt237=ENV[RUNTIME_KEY]
+if type(rt237)=="table" then rt237.version=C.VERSION end
+
+local oldExport237=Export
+local NewExport237=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+round(NewExport237,8)
+pcall(function() oldExport237:Destroy() end)
+Export=NewExport237
+Export.Activated:Connect(function()
+ if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+ if S.ExportBusy then Status.Text="Exportação já está em andamento.";Status.TextColor3=COL.yellow;return end
+ if S.Recording then pauseSession("EXPORT") end
+ S.ExportBusy=true
+ Status.Text="Preparando JSON V2.3.7 • aguardando probes válidos."
+ Status.TextColor3=COL.yellow
+ updateUI()
+ local sessionId=S.SessionId
+ task.spawn(function()
+  while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+  if not Gui.Parent or S.SessionId~=sessionId then return end
+  local data,encErr=encode()
+  if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+  local name="Psicosenatico_WeaponResearch_V2_3_7_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+  local saved=false
+  if typeof(writefile)=="function" then saved=pcall(function() writefile(name,data) end) end
+  if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..name;Status.TextColor3=COL.green
+  elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+  else Status.Text="Não foi possível salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+  S.ExportBusy=false;updateUI()
+ end)
+end)
+
+live("SISTEMA","V2.3.7 • entrada/saída OBB e multicamadas ativas por tiro.")
+live("SISTEMA","Cruzar wallTraversal com postExitRay do Bullet NoClip e HP.")
+pcall(updateUI)
