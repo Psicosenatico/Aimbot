@@ -1,0 +1,307 @@
+-- V2.3.8 TEAM-BARRIER OUTCOME PATCH
+-- Preserves SHOT-LOCK, OBB, inter-shot HP and V2.3.7 wall traversal.
+-- Separates the special large ForceField + SmoothPlastic team barrier from ordinary walls
+-- and correlates client path visibility with reliable HP observations without changing shot authority.
+
+C.VERSION="V2.3.8"
+S.TeamBarrierShots=0
+S.TeamBarrierClientReached=0
+S.TeamBarrierClientBlocked=0
+S.TeamBarrierDamageConfirmed=0
+S.TeamBarrierDamageCorrelated=0
+S.TeamBarrierServerDenied=0
+S.TeamBarrierAmbiguous=0
+
+local CollectionService238=game:GetService("CollectionService")
+
+local function v238Size3(v)
+ if typeof(v)=="Vector3" then return v.X,v.Y,v.Z end
+ if type(v)=="table" then return tonumber(v[1] or v.X),tonumber(v[2] or v.Y),tonumber(v[3] or v.Z) end
+ return nil,nil,nil
+end
+
+local function v238PartByDebugId(id)
+ if not id then return nil,nil end
+ for _,c in ipairs(S.GeometryCandidates or {}) do
+  local p=c.part
+  if p and p.Parent then
+   local ok,d=pcall(function() return p:GetDebugId(0) end)
+   if ok and tostring(d)==tostring(id) then return p,c end
+  end
+ end
+ return nil,nil
+end
+
+local function v238MemberInfo(member)
+ if not member then return nil end
+ local p,c=v238PartByDebugId(member.debugId)
+ local material=nil
+ local size=member.size
+ local attrs=nil
+ local tags=nil
+ local group=member.collisionGroup
+ local canCollide=member.canCollide
+ local canQuery=member.canQuery
+ if p then
+  local okM,m=pcall(function() return p.Material end); if okM then material=tostring(m) end
+  local okS,s=pcall(function() return p.Size end); if okS then size={s.X,s.Y,s.Z} end
+  local okG,g=pcall(function() return p.CollisionGroup end); if okG then group=g end
+  local okC,cc=pcall(function() return p.CanCollide end); if okC then canCollide=cc end
+  local okQ,cq=pcall(function() return p.CanQuery end); if okQ then canQuery=cq end
+  local okA,a=pcall(function() return p:GetAttributes() end); if okA and type(a)=="table" then attrs=a end
+  local okT,t=pcall(function() return CollectionService238:GetTags(p) end); if okT and type(t)=="table" then tags=t end
+ end
+ return {
+  path=member.path,name=member.name,class=member.class,debugId=member.debugId,
+  subtype=member.subtype or (c and c.subtype),material=material,size=size,
+  collisionGroup=group,canCollide=canCollide,canQuery=canQuery,attributes=attrs,tags=tags
+ }
+end
+
+local function v238MaterialKey(v)
+ local s=string.lower(tostring(v or ""))
+ if string.find(s,"forcefield",1,true) then return "ForceField" end
+ if string.find(s,"smoothplastic",1,true) then return "SmoothPlastic" end
+ return tostring(v or "UNKNOWN")
+end
+
+local function v238PanelShape(info)
+ local x,y,z=v238Size3(info and info.size)
+ if not x or not y or not z then return false,nil end
+ local long=math.max(x,z)
+ local thin=math.min(x,z)
+ return y>=20 and long>=80 and thin<=6.5,{x=x,y=y,z=z,long=long,thin=thin}
+end
+
+local function v238Similar(a,b)
+ local oka,sa=v238PanelShape(a)
+ local okb,sb=v238PanelShape(b)
+ if not oka or not okb then return false end
+ local function ratio(x,y)
+  local hi=math.max(math.abs(x),math.abs(y))
+  if hi<1e-6 then return 0 end
+  return math.abs(x-y)/hi
+ end
+ return ratio(sa.y,sb.y)<=0.18 and ratio(sa.long,sb.long)<=0.18 and ratio(sa.thin,sb.thin)<=0.45
+end
+
+local function v238BarrierFromBundle(bundle)
+ if not bundle or type(bundle.members)~="table" or #bundle.members<2 then return nil end
+ local members={}
+ local ff=nil
+ local sp=nil
+ for _,m in ipairs(bundle.members) do
+  local info=v238MemberInfo(m)
+  if info then
+   members[#members+1]=info
+   local mat=v238MaterialKey(info.material)
+   if mat=="ForceField" and not ff then ff=info end
+   if mat=="SmoothPlastic" and not sp then sp=info end
+  end
+ end
+ if not ff or not sp or not v238Similar(ff,sp) then return nil end
+ return {
+  category="BARREIRA_PROTECAO_TIME",signature="OVERLAPPING_LARGE_FORCEFIELD_PLUS_SMOOTHPLASTIC",
+  confidence="HIGH_SIGNATURE_PAIR",entryDistance=bundle.entryDistance,exitDistance=bundle.exitDistance,
+  compositeThickness=bundle.compositeThickness,memberCount=bundle.memberCount,members=members,
+  forceField=ff,smoothPlastic=sp,targetDistance=bundle.targetDistance,targetBehindBundle=bundle.targetBehindBundle,
+  firstVisibleHitAfterExit=bundle.firstVisibleHitAfterExit
+ }
+end
+
+local function v238FindBarrier(shot)
+ local tr=shot and shot.wallTraversal
+ if not tr or type(tr.compositeBundles)~="table" then return nil,nil end
+ for i,b in ipairs(tr.compositeBundles) do
+  local barrier=v238BarrierFromBundle(b)
+  if barrier then barrier.bundleIndex=i; return barrier,b end
+ end
+ return nil,nil
+end
+
+local function v238ClientState(shot,barrier,bundle)
+ if not barrier or not bundle then return "SEM_BARREIRA" end
+ local ref=shot and shot.referenceRay
+ local idx=ref and ref.firstCharacterIndex
+ local chain=ref and ref.multiHitChain or {}
+ local targetItem=idx and chain[idx] or nil
+ local targetDistance=tonumber(bundle.targetDistance or barrier.targetDistance)
+ local exitDistance=tonumber(bundle.exitDistance or barrier.exitDistance) or 0
+ if idx==1 and targetItem and targetDistance and targetDistance>exitDistance+0.03 then
+  return "CLIENTE_ATINGIU_ALVO"
+ end
+ if targetDistance and targetDistance>exitDistance+0.03 then return "CLIENTE_BLOQUEADO_ANTES_DO_ALVO" end
+ return "SEM_ALVO_ATRAS_DA_BARREIRA"
+end
+
+local function v238DamageEvidence(shot)
+ local p=shot and shot.damageProbe
+ if p then
+  local dmg=tonumber(p.observedDamage) or 0
+  if p.reliable==true and p.status=="QUEDA_DE_HP_OBSERVADA" and dmg>0.001 then
+   return "DANO_CONFIRMADO",dmg,"DAMAGE_PROBE_RELIABLE"
+  end
+ end
+ local d=shot and shot.interShotHealthDelta
+ local inter=tonumber(d and d.observedDamage) or 0
+ if inter>0.001 then return "DANO_OBSERVADO_CORRELACIONADO",inter,"INTERSHOT_CORRELATION" end
+ if p and p.reliable==true and p.status=="SEM_QUEDA_DE_HP_OBSERVADA" then
+  return "SEM_QUEDA_HP_CONFIAVEL",0,"DAMAGE_PROBE_RELIABLE"
+ end
+ return "DANO_AMBIGUO",0,"NO_RELIABLE_HP_RESULT"
+end
+
+local function refreshTeamBarrierOutcomeV238(shot)
+ if not shot then return nil end
+ local barrier,bundle=v238FindBarrier(shot)
+ if not barrier then
+  shot.wallDiagnosticCategory=shot.wallDiagnosticCategory or "PAREDE_MAPA_COMUM_OU_OUTRA_GEOMETRIA"
+  return nil
+ end
+ shot.wallDiagnosticCategory="BARREIRA_PROTECAO_TIME"
+ shot.teamBarrier=barrier
+ local client=v238ClientState(shot,barrier,bundle)
+ local hp,damage,source=v238DamageEvidence(shot)
+ local outcome=nil
+ if client=="CLIENTE_ATINGIU_ALVO" then
+  if hp=="DANO_CONFIRMADO" then outcome="DANO_CONFIRMADO"
+  elseif hp=="DANO_OBSERVADO_CORRELACIONADO" then outcome="DANO_OBSERVADO_CORRELACIONADO"
+  elseif hp=="SEM_QUEDA_HP_CONFIAVEL" then outcome="CLIENTE_ATINGE_SERVIDOR_NEGA"
+  else outcome="CLIENTE_ATINGE_RESULTADO_AMBIGUO" end
+ elseif client=="CLIENTE_BLOQUEADO_ANTES_DO_ALVO" then
+  outcome="CLIENTE_BLOQUEADO"
+ else
+  outcome="SEM_ALVO_PARA_VALIDAR"
+ end
+ shot.teamBarrierClientState=client
+ shot.teamBarrierHpState=hp
+ shot.teamBarrierOutcome=outcome
+ shot.teamBarrierObservedDamage=damage
+ shot.teamBarrierEvidenceSource=source
+ shot.teamBarrierServerDecisionDirectlyObserved=false
+ shot.teamBarrierInterpretationNote="CLIENTE_ATINGE_SERVIDOR_NEGA significa cliente alcançou o alvo e um probe confiável não observou queda de HP; é inferência diagnóstica, não leitura direta de uma decisão interna do servidor."
+ return outcome
+end
+
+local _startDamageProbeV237=startDamageProbe
+startDamageProbe=function(shot,locked,tool,shotToken)
+ local ok=_startDamageProbeV237(shot,locked,tool,shotToken)
+ local barrier=v238FindBarrier(shot)
+ if barrier then
+  shot.wallDiagnosticCategory="BARREIRA_PROTECAO_TIME"
+  shot.teamBarrier=barrier
+  shot.teamBarrierClientState=v238ClientState(shot,barrier,shot.wallTraversal and shot.wallTraversal.compositeBundles and shot.wallTraversal.compositeBundles[barrier.bundleIndex])
+  log("TEAM_BARRIER_SHOT",{shotIndex=shot.shotIndex,clientState=shot.teamBarrierClientState,barrier=barrier,category=shot.autoCategory},"#"..tostring(shot.shotIndex).." • barreira de proteção de time")
+ end
+ return ok
+end
+
+local function barrierSummaryV238()
+ local out={shots=0,clientReached=0,clientBlocked=0,damageConfirmed=0,damageCorrelated=0,clientReachedServerDenied=0,ambiguous=0,noTarget=0,totalConfirmedDamage=0,totalCorrelatedDamage=0}
+ local normal={shots=0,clientReached=0,damageConfirmed=0,damageCorrelated=0,noReliableDrop=0}
+ for _,shot in ipairs(S.Shots) do
+  local result=refreshTeamBarrierOutcomeV238(shot)
+  if shot.wallDiagnosticCategory=="BARREIRA_PROTECAO_TIME" then
+   out.shots+=1
+   if shot.teamBarrierClientState=="CLIENTE_ATINGIU_ALVO" then out.clientReached+=1 end
+   if result=="CLIENTE_BLOQUEADO" then out.clientBlocked+=1
+   elseif result=="DANO_CONFIRMADO" then out.damageConfirmed+=1;out.totalConfirmedDamage+=(tonumber(shot.teamBarrierObservedDamage) or 0)
+   elseif result=="DANO_OBSERVADO_CORRELACIONADO" then out.damageCorrelated+=1;out.totalCorrelatedDamage+=(tonumber(shot.teamBarrierObservedDamage) or 0)
+   elseif result=="CLIENTE_ATINGE_SERVIDOR_NEGA" then out.clientReachedServerDenied+=1
+   elseif result=="CLIENTE_ATINGE_RESULTADO_AMBIGUO" then out.ambiguous+=1
+   elseif result=="SEM_ALVO_PARA_VALIDAR" then out.noTarget+=1 end
+  elseif shot.autoCategory=="ALVO_ATRAS_MAPA_PAREDE" then
+   normal.shots+=1
+   local ref=shot.referenceRay
+   if ref and ref.firstCharacterIndex==1 then normal.clientReached+=1 end
+   local hp,dmg=v238DamageEvidence(shot)
+   if hp=="DANO_CONFIRMADO" then normal.damageConfirmed+=1
+   elseif hp=="DANO_OBSERVADO_CORRELACIONADO" then normal.damageCorrelated+=1
+   elseif hp=="SEM_QUEDA_HP_CONFIAVEL" then normal.noReliableDrop+=1 end
+  end
+ end
+ return out,normal
+end
+
+local _exportTableV237=exportTable
+exportTable=function()
+ local barrier,normal=barrierSummaryV238()
+ local t=_exportTableV237()
+ t.version=C.VERSION
+ t.mode="SHOT_LOCK_OBB_INTERSHOT_WALL_TRAVERSAL_PLUS_TEAM_BARRIER"
+ t.openEndedResearch=t.openEndedResearch or {}
+ t.openEndedResearch.teamProtectionBarrier={
+  signature="OVERLAPPING_LARGE_FORCEFIELD_PLUS_SMOOTHPLASTIC",confidence="HIGH_SIGNATURE_PAIR",
+  summary=barrier,normalMapWallComparison=normal,
+  outcomeStates={"CLIENTE_BLOQUEADO","CLIENTE_ATINGE_SERVIDOR_NEGA","CLIENTE_ATINGE_RESULTADO_AMBIGUO","DANO_OBSERVADO_CORRELACIONADO","DANO_CONFIRMADO","SEM_ALVO_PARA_VALIDAR"}
+ }
+ t.interpretationRules=t.interpretationRules or {}
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.8: BARREIRA_PROTECAO_TIME é separada por assinatura conservadora: bundle sobreposto de painéis grandes ForceField + SmoothPlastic com dimensões semelhantes."
+ t.interpretationRules[#t.interpretationRules+1]="CLIENTE_ATINGE_SERVIDOR_NEGA é inferência quando o raycast local alcança o alvo atrás da barreira e um probe de HP confiável observa zero queda; não é leitura direta de lógica interna do servidor."
+ t.interpretationRules[#t.interpretationRules+1]="DANO_OBSERVADO_CORRELACIONADO vem de interShotHealthDelta e permanece correlação temporal; somente DAMAGE_PROBE_RELIABLE com queda positiva recebe DANO_CONFIRMADO."
+ return t
+end
+
+local _resetSessionV237=resetSession
+resetSession=function()
+ _resetSessionV237()
+ S.TeamBarrierShots=0
+ S.TeamBarrierClientReached=0
+ S.TeamBarrierClientBlocked=0
+ S.TeamBarrierDamageConfirmed=0
+ S.TeamBarrierDamageCorrelated=0
+ S.TeamBarrierServerDenied=0
+ S.TeamBarrierAmbiguous=0
+end
+
+local _updateUIV237=updateUI
+updateUI=function()
+ _updateUIV237()
+ Ver.Text=C.VERSION
+ Sub.Text="SHOT-LOCK + PAREDE COMUM × BARREIRA DE TIME"
+ Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.7","PESQUISA DE ARMAS V2.3.8")
+ local last=S.Shots[#S.Shots]
+ if last then
+  local barrier=v238FindBarrier(last)
+  if barrier then
+   refreshTeamBarrierOutcomeV238(last)
+   MHelp.Text="BARREIRA TIME • "..tostring(last.teamBarrierOutcome or last.teamBarrierClientState or "ANALISANDO")
+  end
+ end
+end
+S.UIRefresh=updateUI
+local rt238=ENV[RUNTIME_KEY]
+if type(rt238)=="table" then rt238.version=C.VERSION end
+
+local oldExport238=Export
+local NewExport238=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+round(NewExport238,8)
+pcall(function() oldExport238:Destroy() end)
+Export=NewExport238
+Export.Activated:Connect(function()
+ if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+ if S.ExportBusy then Status.Text="Exportação já está em andamento.";Status.TextColor3=COL.yellow;return end
+ if S.Recording then pauseSession("EXPORT") end
+ S.ExportBusy=true
+ Status.Text="Preparando JSON V2.3.8 • cruzando barreira, trajetória e HP."
+ Status.TextColor3=COL.yellow
+ updateUI()
+ local sessionId=S.SessionId
+ task.spawn(function()
+  while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+  if not Gui.Parent or S.SessionId~=sessionId then return end
+  local data,encErr=encode()
+  if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+  local name="Psicosenatico_WeaponResearch_V2_3_8_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+  local saved=false
+  if typeof(writefile)=="function" then saved=pcall(function() writefile(name,data) end) end
+  if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..name;Status.TextColor3=COL.green
+  elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+  else Status.Text="Não foi possível salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+  S.ExportBusy=false;updateUI()
+ end)
+end)
+
+live("SISTEMA","V2.3.8 • barreira de proteção de time separada de paredes comuns.")
+live("SISTEMA","Estados: cliente bloqueado / cliente atinge sem HP / dano correlacionado / dano confirmado.")
+pcall(updateUI)
