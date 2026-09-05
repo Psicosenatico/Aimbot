@@ -1,0 +1,177 @@
+-- V2.3.6 INTER-SHOT HP + COLLISION-GROUP DIAGNOSTIC PATCH
+-- Keeps SHOT-LOCK and OBB authority from V2.3.5.
+-- Adds adjacent ammo-lock HP deltas for automatic fire without reusing stale categories.
+
+C.VERSION="V2.3.6"
+C.INTERSHOT_MAX_AGE=0.50
+S.InterShotDamageIntervals=0
+S.InterShotObservedDamage=0
+
+local function shotTargetPathV236(shot)
+ if not shot then return nil end
+ local p=shot.damageProbe
+ if p and p.target and p.target.modelPath then return p.target.modelPath end
+ local ref=shot.referenceRay
+ local idx=ref and ref.firstCharacterIndex
+ local chain=ref and ref.multiHitChain or {}
+ local item=idx and chain[idx] or nil
+ return item and item.model or nil
+end
+
+local function shotHealthAtLockV236(shot)
+ local p=shot and shot.damageProbe
+ if p then
+  local h=tonumber(p.healthAtAmmoDecrease)
+  if h~=nil then return h end
+  local t=p.target
+  if t then return tonumber(t.health) end
+ end
+ return nil
+end
+
+local _startDamageProbeV235=startDamageProbe
+startDamageProbe=function(shot,locked,tool,shotToken)
+ local prev=S.Shots[#S.Shots-1]
+ local currentTarget=locked and locked.target or nil
+ local currentPath=currentTarget and currentTarget.modelPath or nil
+ local currentHealth=currentTarget and tonumber(currentTarget.health) or nil
+ if prev and currentPath and currentHealth~=nil then
+  local prevPath=shotTargetPathV236(prev)
+  local prevHealth=shotHealthAtLockV236(prev)
+  local dt=(tonumber(shot.time) or clock())-(tonumber(prev.time) or clock())
+  local sameWeapon=prev.weapon and shot.weapon and prev.weapon.name==shot.weapon.name
+  local adjacentToken=tonumber(prev.shotToken) and tonumber(shotToken) and tonumber(prev.shotToken)==tonumber(shotToken)-1
+  if sameWeapon and adjacentToken and prevPath==currentPath and prevHealth~=nil and dt>=0 and dt<=C.INTERSHOT_MAX_AGE then
+   local drop=math.max(0,prevHealth-currentHealth)
+   prev.interShotHealthDelta={
+    targetPath=currentPath,
+    fromShotIndex=prev.shotIndex,
+    observedAtNextShotIndex=shot.shotIndex,
+    age=dt,
+    healthAtPreviousAmmoLock=prevHealth,
+    healthAtNextAmmoLock=currentHealth,
+    observedDamage=drop,
+    sameWeapon=true,
+    adjacentShotToken=true,
+    correlationOnly=true,
+    note="Queda observada entre dois AMMO_DECREASE_LOCK consecutivos do mesmo alvo; não prova causalidade exclusiva."
+   }
+   S.InterShotDamageIntervals+=1
+   S.InterShotObservedDamage+=drop
+   if drop>0.001 then
+    log("INTERSHOT_HP_DROP",{
+     shotIndex=prev.shotIndex,nextShotIndex=shot.shotIndex,target=currentPath,
+     healthBefore=prevHealth,healthAfter=currentHealth,observedDamage=drop,age=dt,
+     previousCategory=prev.autoCategory
+    },string.format("#%d→#%d • HP %.2f→%.2f • Δ%.2f",prev.shotIndex,shot.shotIndex,prevHealth,currentHealth,drop))
+   end
+  end
+ end
+ return _startDamageProbeV235(shot,locked,tool,shotToken)
+end
+
+local _damageSummaryV235=damageSummary
+damageSummary=function()
+ local out=_damageSummaryV235()
+ out.interShotIntervals=0
+ out.interShotDamageObserved=0
+ out.interShotObservedDamage=0
+ out.interShotByCategory={}
+ for _,shot in ipairs(S.Shots) do
+  local d=shot.interShotHealthDelta
+  if d then
+   out.interShotIntervals+=1
+   local cat=shot.autoCategory or "SEM_CLASSIFICACAO"
+   local b=out.interShotByCategory[cat]
+   if not b then b={label=categoryLabel(cat),intervals=0,damageObserved=0,totalObservedDamage=0};out.interShotByCategory[cat]=b end
+   b.intervals+=1
+   local drop=tonumber(d.observedDamage) or 0
+   if drop>0.001 then
+    out.interShotDamageObserved+=1
+    out.interShotObservedDamage+=drop
+    b.damageObserved+=1
+    b.totalObservedDamage+=drop
+   end
+  end
+ end
+ return out
+end
+
+local function collisionGroupSnapshotV236()
+ local counts={}
+ local total=0
+ for _,c in ipairs(S.GeometryCandidates or {}) do
+  local p=c.part
+  if p and p.Parent then
+   total+=1
+   local g=tostring(prop(p,"CollisionGroup") or "?")
+   counts[g]=(counts[g] or 0)+1
+  end
+ end
+ return {total=total,byGroup=counts}
+end
+
+local _exportTableV235=exportTable
+exportTable=function()
+ local t=_exportTableV235()
+ t.version=C.VERSION
+ t.mode="SHOT_LOCK_OBB_PLUS_INTERSHOT_HP"
+ t.openEndedResearch=t.openEndedResearch or {}
+ t.openEndedResearch.interShotHealth={maxAge=C.INTERSHOT_MAX_AGE,rule="Compara HP apenas entre AMMO_DECREASE_LOCK consecutivos, mesma arma e mesmo alvo; mantém categoria do tiro anterior."}
+ t.openEndedResearch.candidateCollisionGroups=collisionGroupSnapshotV236()
+ t.interpretationRules=t.interpretationRules or {}
+ t.interpretationRules[#t.interpretationRules+1]="V2.3.6: interShotHealthDelta mede queda de HP entre dois locks consecutivos do mesmo alvo e da mesma arma; é correlação temporal e não substitui SHOT-LOCK/OBB."
+ t.interpretationRules[#t.interpretationRules+1]="candidateCollisionGroups registra o CollisionGroup atual das paredes candidatas para validar a estratégia de separação física/raycast do Bullet NoClip."
+ return t
+end
+
+local _resetSessionV235=resetSession
+resetSession=function()
+ _resetSessionV235()
+ S.InterShotDamageIntervals=0
+ S.InterShotObservedDamage=0
+end
+
+local _updateUIV235=updateUI
+updateUI=function()
+ _updateUIV235()
+ Ver.Text=C.VERSION
+ Sub.Text="SHOT-LOCK + OBB + HP ENTRE TIROS"
+ Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.5","PESQUISA DE ARMAS V2.3.6")
+end
+S.UIRefresh=updateUI
+local rt236=ENV[RUNTIME_KEY]
+if type(rt236)=="table" then rt236.version=C.VERSION end
+
+local oldExport236=Export
+local NewExport236=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+round(NewExport236,8)
+pcall(function() oldExport236:Destroy() end)
+Export=NewExport236
+Export.Activated:Connect(function()
+ if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+ if S.ExportBusy then Status.Text="Exportação já está em andamento.";Status.TextColor3=COL.yellow;return end
+ if S.Recording then pauseSession("EXPORT") end
+ S.ExportBusy=true
+ Status.Text="Preparando JSON V2.3.6 • aguardando probes válidos."
+ Status.TextColor3=COL.yellow
+ updateUI()
+ local sessionId=S.SessionId
+ task.spawn(function()
+  while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+  if not Gui.Parent or S.SessionId~=sessionId then return end
+  local data,encErr=encode()
+  if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+  local name="Psicosenatico_WeaponResearch_V2_3_6_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+  local saved=false
+  if typeof(writefile)=="function" then saved=pcall(function() writefile(name,data) end) end
+  if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..name;Status.TextColor3=COL.green
+  elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+  else Status.Text="Não foi possível salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+  S.ExportBusy=false;updateUI()
+ end)
+end)
+
+live("SISTEMA","V2.3.6 • HP entre ammo-locks consecutivos ativo para rajadas.")
+live("SISTEMA","Snapshot de CollisionGroup das candidatas será incluído no JSON.")
+pcall(updateUI)
