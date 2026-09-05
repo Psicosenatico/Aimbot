@@ -1,0 +1,42 @@
+local GP=(function()
+ if typeof(gethui)=="function" then local ok,p=pcall(gethui); if ok and p then return p end end
+ return CoreGui
+end)()
+for _,x in ipairs(GP:GetChildren()) do
+ if x.Name==C.GUI or x.Name=="PsicosenaticoBulletNoclipTest_V0_1" or x.Name=="PsicosenaticoBulletNoclipTest_V0_2" then pcall(function() x:Destroy() end) end
+end
+local Gui=Instance.new("ScreenGui")
+Gui.Name=C.GUI
+Gui.ResetOnSpawn=false
+Gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+Gui.Parent=GP
+local function corner(o,r) local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,r); c.Parent=o end
+local function label(p,t,sz,pos,ts)
+ local x=Instance.new("TextLabel")
+ x.BackgroundTransparency=1; x.Text=t; x.TextColor3=Color3.fromRGB(235,239,245); x.Font=Enum.Font.Gotham; x.TextSize=ts or 13; x.TextXAlignment=Enum.TextXAlignment.Left; x.Size=sz; x.Position=pos; x.Parent=p
+ return x
+end
+local function btn(p,t,sz,pos)
+ local b=Instance.new("TextButton")
+ b.BackgroundColor3=Color3.fromRGB(37,46,62); b.TextColor3=Color3.fromRGB(245,247,250); b.Font=Enum.Font.GothamSemibold; b.TextSize=14; b.Text=t; b.Size=sz; b.Position=pos; b.Parent=p; corner(b,8)
+ return b
+end
+local Main=Instance.new("Frame")
+Main.BackgroundColor3=Color3.fromRGB(17,22,31); Main.BorderSizePixel=0; Main.Size=UDim2.fromOffset(390,300); Main.Position=UDim2.new(.5,-195,.5,-150); Main.Parent=Gui; corner(Main,12)
+local st=Instance.new("UIStroke"); st.Color=Color3.fromRGB(48,71,107); st.Parent=Main
+local Head=Instance.new("Frame")
+Head.BackgroundColor3=Color3.fromRGB(23,31,44); Head.BorderSizePixel=0; Head.Size=UDim2.new(1,0,0,44); Head.Parent=Main; corner(Head,12)
+local mask=Instance.new("Frame"); mask.BackgroundColor3=Head.BackgroundColor3; mask.BorderSizePixel=0; mask.Size=UDim2.new(1,0,0,12); mask.Position=UDim2.new(0,0,1,-12); mask.Parent=Head
+local title=label(Head,"PSICOSENATICO • BULLET NOCLIP TEST",UDim2.new(1,-110,0,21),UDim2.fromOffset(14,5),13); title.Font=Enum.Font.GothamSemibold
+local ver=label(Head,C.VERSION,UDim2.new(1,-110,0,16),UDim2.fromOffset(14,24),11); ver.TextColor3=Color3.fromRGB(124,160,217)
+local Min=btn(Head,"—",UDim2.fromOffset(38,30),UDim2.new(1,-84,0,7))
+local Close=btn(Head,"X",UDim2.fromOffset(38,30),UDim2.new(1,-42,0,7)); Close.BackgroundColor3=Color3.fromRGB(104,42,48)
+local State=label(Main,"Estado: DESATIVADO",UDim2.new(1,-28,0,22),UDim2.fromOffset(14,57),14); State.Font=Enum.Font.GothamSemibold
+local Toggle=btn(Main,"ATIVAR NO CLIP",UDim2.new(1,-28,0,42),UDim2.fromOffset(14,84)); Toggle.BackgroundColor3=Color3.fromRGB(43,92,61)
+local Export=btn(Main,"EXPORTAR DIAGNÓSTICO",UDim2.new(1,-28,0,36),UDim2.fromOffset(14,134)); Export.BackgroundColor3=Color3.fromRGB(41,70,112)
+local Stats=label(Main,"Candidatas: 0",UDim2.new(1,-28,0,20),UDim2.fromOffset(14,179),12); Stats.TextColor3=Color3.fromRGB(181,194,214)
+local Last=label(Main,"Última leitura: nenhuma.",UDim2.new(1,-28,0,38),UDim2.fromOffset(14,202),12); Last.TextWrapped=true; Last.TextYAlignment=Enum.TextYAlignment.Top
+local Reader=Instance.new("TextLabel")
+Reader.BackgroundColor3=Color3.fromRGB(12,16,23); Reader.BorderSizePixel=0; Reader.TextColor3=Color3.fromRGB(174,187,206); Reader.Font=Enum.Font.Code; Reader.TextSize=10; Reader.TextXAlignment=Enum.TextXAlignment.Left; Reader.TextYAlignment=Enum.TextYAlignment.Top; Reader.TextWrapped=true; Reader.Size=UDim2.new(1,-28,1,-254); Reader.Position=UDim2.fromOffset(14,242); Reader.Text="Leitor: pronto."; Reader.Parent=Main; corner(Reader,8)
+local Float=btn(Gui,"NC",UDim2.fromOffset(56,56),UDim2.new(1,-72,.5,-28)); Float.Visible=false; Float.BackgroundColor3=Color3.fromRGB(20,48,86); corner(Float,28)
+
