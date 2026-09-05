@@ -1,6 +1,6 @@
 -- PSICOSENATICO • WEAPON RESEARCH V2.3.4
 -- Base íntegra V2.3.3 + patches finais V2.3.4 aplicados após o fechamento completo da fonte.
-local SOURCE_COMMIT="d64ddd73c18505179b5f526889128a38f3af6ff5"
+local SOURCE_COMMIT="04407d662bf732beb4b0ef9d96d84a219cd56069"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/weapon_research_parts/"
 local PARTS={
     "V2_3_3.part1a",
@@ -13,6 +13,7 @@ local PARTS={
     "V2_3_3.part4b2b",
     "V2_3_4.patch1",
     "V2_3_4.shotlock.patch",
+    "V2_3_4.clean.patch",
     "V2_3_4.ui.patch",
     "V2_3_4.finalize.patch"
 }
