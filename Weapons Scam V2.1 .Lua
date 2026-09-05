@@ -7,8 +7,8 @@ local Workspace=game:GetService("Workspace")
 local CollectionService=game:GetService("CollectionService")
 local LP=Players.LocalPlayer or Players.PlayerAdded:Wait()
 local C={
-VERSION="V2.3.0",
-GUI="PsicosenaticoWeaponResearch_V2_3_0",
+VERSION="V2.3.1",
+GUI="PsicosenaticoWeaponResearch_V2_3_1",
 MAX_LIVE=110,
 BOUNDARY_DISTANCE=10000,
 MAX_HIT_CHAIN=12,
@@ -55,6 +55,7 @@ PsicosenaticoWeaponResearch_V2_2_2=true,
 PsicosenaticoWeaponResearch_V2_2_3=true,
 PsicosenaticoWeaponResearch_V2_2_4=true,
 PsicosenaticoWeaponResearch_V2_2_5=true,
+PsicosenaticoWeaponResearch_V2_3_0=true,
 [C.GUI]=true
 }
 for _,x in ipairs(GP:GetChildren()) do
@@ -1091,7 +1092,7 @@ end
 resetSession()
 S.Started=true
 S.Recording=true
-log("DIAGNOSTIC_STARTED",{mode="OPEN_ENDED_AUTO_CLASSIFICATION"},"Pesquisa V2.3.0 iniciada • sem limite de tiros")
+log("DIAGNOSTIC_STARTED",{mode="OPEN_ENDED_AUTO_CLASSIFICATION"},"Pesquisa V2.3.1 iniciada • sem limite de tiros")
 inspectArchitecture("DIAGNOSTIC_START")
 scanExplicitBlockers()
 boundarySurvey()
@@ -1277,7 +1278,7 @@ BorderSizePixel=0
 })
 round(Header,15)
 label(Header,"PSICOSENATICO • PESQUISA DE ARMAS",UDim2.new(1,-140,0,24),UDim2.fromOffset(14,5),14)
-local Ver=label(Header,"V2.3.0",UDim2.fromOffset(48,16),UDim2.fromOffset(14,32),9)
+local Ver=label(Header,"V2.3.1",UDim2.fromOffset(48,16),UDim2.fromOffset(14,32),9)
 Ver.TextColor3=COL.blue2
 local Sub=label(Header,"PESQUISA LIVRE • CLASSIFICAÇÃO AUTOMÁTICA",UDim2.new(1,-190,0,16),UDim2.fromOffset(66,32),8)
 Sub.TextColor3=COL.sub
@@ -1457,7 +1458,7 @@ S.LastAssessment and ("Leitura: "..S.LastAssessment) or "Faça disparos em pared
 Start.Text=S.Recording and "PAUSAR" or "RETOMAR"
 end
 local lines={
-"PESQUISA DE ARMAS V2.3.0",
+"PESQUISA DE ARMAS V2.3.1",
 "────────────────────────────────────────",
 "MODO LIVRE • SEM LIMITE DE TIROS",
 "CLASSIFICAÇÃO AUTOMÁTICA POR DISPARO",
@@ -1554,7 +1555,7 @@ Status.TextColor3=COL.red
 updateUI()
 return
 end
-local name="Psicosenatico_WeaponResearch_V2_3_0_"
+local name="Psicosenatico_WeaponResearch_V2_3_1_"
 ..tostring(game.PlaceId)
 .."_"
 ..tostring(os.time())
@@ -1624,7 +1625,7 @@ S.Connections[#S.Connections+1]=sig:Connect(resize)
 end
 end
 scanWeapons("INITIAL_SCAN")
-live("SISTEMA","Pesquisa V2.3.0 pronta.")
+live("SISTEMA","Pesquisa V2.3.1 pronta.")
 live("SISTEMA","Modo livre • sem limite de tiros • pausa preserva os dados.")
 live("SISTEMA","Cada disparo é classificado automaticamente por trajetória e local.")
 live("SISTEMA","Multi-hit ativo • até 12 camadas por disparo.")
