@@ -1,9 +1,9 @@
--- PSICOSENATICO • WEAPON RESEARCH V2.3.12 • STRUCTURAL-SAFE + SOURCE MAP
--- Base V2.3.11 comprovada em runtime.
--- Hotfix: compatibility prebridge is loaded BEFORE V2.3.11; V2.3.12 dependencies are gated explicitly.
+-- PSICOSENATICO • WEAPON RESEARCH V2.3.13 • STRUCTURAL-SAFE + SOURCE MAP
+-- Base V2.3.12 comprovada em runtime; V2.3.13 adiciona apenas hipoteses observacionais Muzzle/Handle/AimPoint.
+-- Compatibility prebridge remains BEFORE V2.3.11; V2.3.12 dependencies remain gated explicitly.
 -- Runtime errors are mapped back to PART name + local line + assembled line.
--- Post-run hotfix: nested Handle origin + shared-bus authority for free/non-barrier shots.
-local SOURCE_COMMIT="acfcb02636608e05f9f710e6a5ffbb9f075151c4"
+-- No gameplay/RemoteEvent/CollisionGroup changes are introduced by V2.3.13.
+local SOURCE_COMMIT="092edb35a582987718ab804336e5e9bd7b20e818"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/weapon_research_parts/"
 local PARTS={
     "V2_3_3.part1a",
@@ -32,11 +32,12 @@ local PARTS={
     "V2_3_12.dependency_gate.patch",
     "V2_3_12.origin_pipeline_structural_safe.patch",
     "V2_3_12.normal_wall_target_segment.patch",
-    "V2_3_12.postrun_diagnostic_hotfix.patch"
+    "V2_3_12.postrun_diagnostic_hotfix.patch",
+    "V2_3_13.server_path_hypotheses_structural_safe.patch"
 }
 
 local function surfaceFailure(stage,msg)
-    local text="Research V2.3.12 • "..tostring(stage)..": "..tostring(msg)
+    local text="Research V2.3.13 • "..tostring(stage)..": "..tostring(msg)
     pcall(function() warn("PSICOSENATICO • "..text) end)
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification",{
@@ -89,8 +90,8 @@ local function sourceLineText(lineNo)
     return nil
 end
 
-if not string.find(source,'C.VERSION="V2.3.12"',1,true) then
-    error(surfaceFailure("PREFLIGHT","versão V2.3.12 ausente da fonte remontada"))
+if not string.find(source,'C.VERSION="V2.3.13"',1,true) then
+    error(surfaceFailure("PREFLIGHT","versão V2.3.13 ausente da fonte remontada"))
 end
 if not string.find(source,'__PSICO_RESEARCH_RUNTIME_PREBRIDGE_READY',1,true) then
     error(surfaceFailure("PREFLIGHT","prebridge anterior à V2.3.11 ausente"))
@@ -110,17 +111,23 @@ end
 if not string.find(source,'V2312_POSTRUN_HOTFIX_READY',1,true) then
     error(surfaceFailure("PREFLIGHT","hotfix Handle/sync V2.3.12 ausente"))
 end
+if not string.find(source,'V2313_SERVER_PATH_HYPOTHESES_READY',1,true) then
+    error(surfaceFailure("PREFLIGHT","hipoteses Muzzle/Handle/AimPoint V2.3.13 ausentes"))
+end
 if string.find(source,'V2_3_11.barrier_segment_direction_team_export.patch',1,true) then
     error(surfaceFailure("PREFLIGHT","referência ao patch V2.3.11 antigo detectada"))
 end
 if string.find(source,'V2312_EVENT_BRIDGE_READY',1,true) then
     error(surfaceFailure("PREFLIGHT","bridge tardio antigo V2.3.12 ainda presente na montagem"))
 end
-if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_12_',1,true) then
-    error(surfaceFailure("PREFLIGHT","nome físico de export V2_3_12 ausente"))
+if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_13_',1,true) then
+    error(surfaceFailure("PREFLIGHT","nome físico de export V2_3_13 ausente"))
 end
 if not string.find(source,'PAREDE_COMUM_ATRAS_DO_ALVO',1,true) then
     error(surfaceFailure("PREFLIGHT","regra explícita de parede atrás do alvo ausente"))
+end
+if not string.find(source,'MUZZLE_TO_AIM_POINT',1,true) or not string.find(source,'HANDLE_TO_AIM_POINT',1,true) then
+    error(surfaceFailure("PREFLIGHT","variantes AimPoint V2.3.13 incompletas"))
 end
 
 local compiler=loadstring
