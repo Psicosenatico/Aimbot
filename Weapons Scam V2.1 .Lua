@@ -1,7 +1,7 @@
 -- PSICOSENATICO • WEAPON RESEARCH V2.3.12 • STRUCTURAL-SAFE
 -- Base V2.3.11 comprovada em runtime + V2.3.12 isolada em closures.
 -- Adiciona Camera/Head/HRP/Handle/Muzzle, timeline T0..T6, retry de sync e correção parede antes/depois do alvo.
-local SOURCE_COMMIT="438b810aff2bc572461b2e5c3ab0ef6642787dd3"
+local SOURCE_COMMIT="d1cece39144e660d21edbeebb61c7d65b7d12e66"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/weapon_research_parts/"
 local PARTS={
     "V2_3_3.part1a",
@@ -26,6 +26,7 @@ local PARTS={
     "V2_3_10.relative_sync_dynamic_hp.patch",
     "V2_3_10.reconciled_sync_summary.patch",
     "V2_3_11.structural_safe.patch",
+    "V2_3_12.event_bridge.patch",
     "V2_3_12.origin_pipeline_structural_safe.patch",
     "V2_3_12.normal_wall_target_segment.patch"
 }
@@ -58,6 +59,9 @@ if not string.find(source,'C.VERSION="V2.3.12"',1,true) then
 end
 if not string.find(source,'V2311_STRUCTURAL_SAFE_READY',1,true) then
     error(surfaceFailure("PREFLIGHT","base structural-safe V2.3.11 ausente"))
+end
+if not string.find(source,'V2312_EVENT_BRIDGE_READY',1,true) then
+    error(surfaceFailure("PREFLIGHT","event bridge estrutural V2.3.12 ausente"))
 end
 if not string.find(source,'V2312_ORIGIN_PIPELINE_READY',1,true) then
     error(surfaceFailure("PREFLIGHT","pipeline Camera/Handle/Muzzle V2.3.12 ausente"))
