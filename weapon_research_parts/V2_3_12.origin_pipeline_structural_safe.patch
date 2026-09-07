@@ -1,0 +1,630 @@
+-- V2.3.12 ORIGIN / VALIDATION PIPELINE • STRUCTURAL-SAFE
+-- Preserves the runtime-proven V2.3.11 structural-safe base and all NoClip mechanics.
+-- Adds: delayed NoClip sync recovery, corrected team-barrier counters, multi-origin rays
+-- (Camera/Head/HRP/Handle/Muzzle-style attachments), per-shot state snapshots and a T0..T6 timeline.
+-- Observational only: no RemoteEvent is fired/modified and no server decision is claimed directly.
+
+C.VERSION="V2.3.12"
+S.V2312StructuralSafe=true
+S.V2312StructuralInitError=nil
+S.V2312DelayedSyncRecovered=0
+S.V2312OriginStudies=0
+S.V2312OriginStudyErrors=0
+S.V2312StateSnapshots=0
+S.V2312StateSnapshotErrors=0
+S.V2312MuzzleFound=0
+S.V2312MuzzleMissing=0
+S.V2312BarrierCounterFixApplied=false
+
+ENV.__PSICO_V2312_RESULT={pcall(function()
+ local CollectionService2312=game:GetService("CollectionService")
+
+ local function vec3(v)
+  if typeof(v)=="Vector3" then return {v.X,v.Y,v.Z} end
+  return nil
+ end
+
+ local function safeAttrs(inst)
+  if not inst then return {} end
+  local ok,value=pcall(function() return inst:GetAttributes() end)
+  return ok and type(value)=="table" and value or {}
+ end
+
+ local function safeTags(inst)
+  if not inst then return {} end
+  local ok,value=pcall(function() return CollectionService2312:GetTags(inst) end)
+  return ok and type(value)=="table" and value or {}
+ end
+
+ local function safePath(inst)
+  if not inst then return nil end
+  local ok,value=pcall(function() return full(inst) end)
+  return ok and value or tostring(inst)
+ end
+
+ local function safeDebugId(inst)
+  if not inst then return nil end
+  local ok,value=pcall(function() return inst:GetDebugId(0) end)
+  return ok and tostring(value) or nil
+ end
+
+ local function instanceState(inst)
+  if not inst then return nil end
+  local state={
+   path=safePath(inst),name=inst.Name,class=inst.ClassName,
+   attributes=safeAttrs(inst),tags=safeTags(inst)
+  }
+  if inst:IsA("BasePart") then
+   state.position=vec3(inst.Position)
+   state.size=vec3(inst.Size)
+   state.lookVector=vec3(inst.CFrame.LookVector)
+   state.upVector=vec3(inst.CFrame.UpVector)
+   state.collisionGroup=inst.CollisionGroup
+   state.canCollide=inst.CanCollide
+   state.canQuery=inst.CanQuery
+   state.canTouch=inst.CanTouch
+   state.transparency=inst.Transparency
+   state.material=tostring(inst.Material)
+  elseif inst:IsA("Attachment") then
+   state.worldPosition=vec3(inst.WorldPosition)
+   state.worldAxis=vec3(inst.WorldAxis)
+   state.worldSecondaryAxis=vec3(inst.WorldSecondaryAxis)
+  end
+  return state
+ end
+
+ local function muzzlePriority(name,className)
+  local s=string.lower(tostring(name or ""))
+  local score=0
+  if s=="muzzle" then score=120
+  elseif string.find(s,"muzzle",1,true) then score=110
+  elseif s=="firepoint" or s=="shootpoint" then score=100
+  elseif string.find(s,"firepoint",1,true) or string.find(s,"shootpoint",1,true) then score=95
+  elseif string.find(s,"fireattachment",1,true) or string.find(s,"shootorigin",1,true) or string.find(s,"shotorigin",1,true) then score=90
+  elseif string.find(s,"barrel",1,true) then score=75
+  elseif s=="tip" or string.find(s,"projectileorigin",1,true) then score=65
+  end
+  if className=="Attachment" then score+=5 end
+  return score
+ end
+
+ local function discoverOrigins(tool)
+  local out={}
+  local character=LP.Character
+  local head=character and character:FindFirstChild("Head")
+  local hrp=character and character:FindFirstChild("HumanoidRootPart")
+  local handle=tool and tool:FindFirstChild("Handle")
+  if head and head:IsA("BasePart") then out[#out+1]={key="HEAD_ORIGIN",priority=0,instance=head,position=head.Position} end
+  if hrp and hrp:IsA("BasePart") then out[#out+1]={key="HUMANOID_ROOT_ORIGIN",priority=0,instance=hrp,position=hrp.Position} end
+  if handle and handle:IsA("BasePart") then out[#out+1]={key="TOOL_HANDLE_ORIGIN",priority=0,instance=handle,position=handle.Position} end
+  local muzzle={}
+  if tool then
+   for _,d in ipairs(tool:GetDescendants()) do
+    if d:IsA("Attachment") or d:IsA("BasePart") then
+     local score=muzzlePriority(d.Name,d.ClassName)
+     if score>0 then
+      local pos=d:IsA("Attachment") and d.WorldPosition or d.Position
+      muzzle[#muzzle+1]={key="MUZZLE_"..tostring(#muzzle+1),priority=score,instance=d,position=pos}
+     end
+    end
+   end
+  end
+  table.sort(muzzle,function(a,b)
+   if a.priority==b.priority then return tostring(a.instance.Name)<tostring(b.instance.Name) end
+   return a.priority>b.priority
+  end)
+  for i=1,math.min(#muzzle,10) do out[#out+1]=muzzle[i] end
+  return out,muzzle[1]
+ end
+
+ local function captureState(tool)
+  local character=LP.Character
+  local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+  local head=character and character:FindFirstChild("Head")
+  local hrp=character and character:FindFirstChild("HumanoidRootPart")
+  local handle=tool and tool:FindFirstChild("Handle")
+  local origins,canonicalMuzzle=discoverOrigins(tool)
+  local muzzleStates={}
+  for _,o in ipairs(origins) do
+   if string.sub(o.key,1,7)=="MUZZLE_" then
+    muzzleStates[#muzzleStates+1]={key=o.key,priority=o.priority,state=instanceState(o.instance)}
+   end
+  end
+  local team=nil
+  pcall(function()
+   if LP.Team then team={name=LP.Team.Name,teamColor=tostring(LP.Team.TeamColor)} end
+  end)
+  local state={
+   capturedAt=clock(),
+   player={attributes=safeAttrs(LP),tags=safeTags(LP),team=team},
+   character=character and {path=safePath(character),attributes=safeAttrs(character),tags=safeTags(character)} or nil,
+   humanoid=humanoid and {path=safePath(humanoid),health=tonumber(humanoid.Health),maxHealth=tonumber(humanoid.MaxHealth),attributes=safeAttrs(humanoid),tags=safeTags(humanoid)} or nil,
+   head=instanceState(head),
+   humanoidRootPart=instanceState(hrp),
+   tool=instanceState(tool),
+   handle=instanceState(handle),
+   muzzleCandidates=muzzleStates,
+   canonicalMuzzle=canonicalMuzzle and {key=canonicalMuzzle.key,priority=canonicalMuzzle.priority,state=instanceState(canonicalMuzzle.instance)} or nil
+  }
+  S.V2312StateSnapshots+=1
+  return state
+ end
+
+ local oldMakeTriggerSnapshot=makeTriggerSnapshot
+ makeTriggerSnapshot=function(tool,source)
+  local snapshot=oldMakeTriggerSnapshot(tool,source)
+  if type(snapshot)=="table" then
+   local ok,state=pcall(captureState,tool)
+   if ok then snapshot.stateSnapshotV2312=state else
+    snapshot.stateSnapshotErrorV2312=tostring(state)
+    S.V2312StateSnapshotErrors+=1
+   end
+   snapshot.stateSnapshotCapturedAtV2312=clock()
+  end
+  return snapshot
+ end
+
+ local function compactExistingItem(item)
+  if type(item)~="table" then return nil end
+  return {
+   path=item.instance or item.path,
+   name=item.instanceName or item.name,
+   class=item.instanceClass or item.class,
+   model=item.model,
+   hasHumanoid=item.hasHumanoid==true or item.humanoid==true,
+   distance=tonumber(item.totalDistance or item.distance),
+   structureScope=item.structureScope,
+   mapSubtype=item.mapSubtype,
+   penetrationPolicy=item.penetrationPolicy,
+   collisionGroup=item.collisionGroup,
+   material=item.material,
+   explicitProjectileBlock=item.explicitProjectileBlock==true
+  }
+ end
+
+ local function compactRayHit(result,origin)
+  if not result then return nil end
+  local inst=result.Instance
+  local model=inst and inst:FindFirstAncestorOfClass("Model") or nil
+  local hum=model and model:FindFirstChildOfClass("Humanoid") or nil
+  local scope=nil
+  local subtype=nil
+  local policy=nil
+  local explicit=false
+  pcall(function()
+   local info=explicitBlockInfo(inst)
+   explicit=info and info.found==true or false
+   scope=hierarchyScope(inst,info)
+   if hum then scope="PERSONAGEM" end
+   if scope=="MAPA" then
+    subtype=mapSubtypeInfo(inst)
+    policy=mapPenetrationPolicy(subtype)
+   elseif scope=="BASE_PLAYER" or scope=="LASERGATE_PROTEGIDO" then policy="PROTEGIDO_NAO_ATRAVESSAR"
+   elseif hum then policy="ALVO" else policy="REVISAR_NAO_ATRAVESSAR_POR_PADRAO" end
+  end)
+  return {
+   path=safePath(inst),name=inst and inst.Name or nil,class=inst and inst.ClassName or nil,
+   debugId=safeDebugId(inst),model=model and safePath(model) or nil,hasHumanoid=hum~=nil,
+   distance=result and (result.Position-origin).Magnitude or nil,
+   position=result and vec3(result.Position) or nil,
+   material=result and tostring(result.Material) or nil,
+   collisionGroup=inst and inst:IsA("BasePart") and inst.CollisionGroup or nil,
+   structureScope=scope,mapSubtype=subtype,penetrationPolicy=policy,
+   explicitProjectileBlock=explicit
+  }
+ end
+
+ local function nearestCandidate(origin,unit,maxDistance)
+  local best=nil
+  for _,candidate in ipairs(S.GeometryCandidates or {}) do
+   local part=candidate.part
+   if part and part.Parent then
+    local distance=rayObbDistance(origin,unit,maxDistance,part)
+    if distance and distance>=0 and (not best or distance<best.distance) then
+     best={
+      distance=distance,path=candidate.path or safePath(part),subtype=candidate.subtype,
+      reason=candidate.reason,debugId=safeDebugId(part),size=vec3(part.Size),
+      collisionGroup=part.CollisionGroup,canCollide=part.CanCollide,canQuery=part.CanQuery
+     }
+    end
+   end
+  end
+  return best
+ end
+
+ local function targetProjection(origin,unit,targetModel)
+  if not targetModel or not targetModel.Parent then return nil,nil,nil end
+  local root=targetModel:FindFirstChild("HumanoidRootPart") or targetModel.PrimaryPart or targetModel:FindFirstChild("Head")
+  if not root or not root:IsA("BasePart") then return nil,nil,nil end
+  local delta=root.Position-origin
+  local along=delta:Dot(unit)
+  local closest=origin+unit*along
+  local lateral=(root.Position-closest).Magnitude
+  return along,lateral,root.Position
+ end
+
+ local function rayFromOrigin(origin,unit,maxDistance,targetModel)
+  local excluded={}
+  if Workspace.CurrentCamera then excluded[#excluded+1]=Workspace.CurrentCamera end
+  if LP.Character then excluded[#excluded+1]=LP.Character end
+  local currentOrigin=origin
+  local travelled=0
+  local firstHit=nil
+  local firstCharacter=nil
+  local chain={}
+  for index=1,6 do
+   local remaining=maxDistance-travelled
+   if remaining<=0.02 then break end
+   local params=RaycastParams.new()
+   params.FilterType=Enum.RaycastFilterType.Exclude
+   params.FilterDescendantsInstances=excluded
+   params.IgnoreWater=false
+   local ok,result=pcall(function() return Workspace:Raycast(currentOrigin,unit*remaining,params) end)
+   if not ok then return {ok=false,error=tostring(result),origin=vec3(origin)} end
+   if not result then break end
+   local hit=compactRayHit(result,origin)
+   hit.chainIndex=index
+   hit.totalDistance=(result.Position-origin).Magnitude
+   chain[#chain+1]=hit
+   if not firstHit then firstHit=hit end
+   if hit.hasHumanoid and not firstCharacter then firstCharacter=hit;break end
+   excluded[#excluded+1]=result.Instance
+   travelled=(result.Position-origin).Magnitude+0.03
+   currentOrigin=result.Position+unit*0.03
+  end
+  local candidate=nearestCandidate(origin,unit,maxDistance)
+  local targetDistance,lateral,targetPos=targetProjection(origin,unit,targetModel)
+  return {
+   ok=true,origin=vec3(origin),firstHit=firstHit,firstCharacter=firstCharacter,
+   chain=chain,chainCount=#chain,nearestCandidate=candidate,
+   targetProjectionDistance=targetDistance,targetLateralDistance=lateral,targetRootPosition=vec3(targetPos),
+   targetBehindCandidate=(candidate and targetDistance and targetDistance>candidate.distance+0.03) or false
+  }
+ end
+
+ local function originStudy(shot,locked,tool)
+  local ref=shot and shot.referenceRay
+  if not ref or type(ref.origin)~="table" or type(ref.direction)~="table" then return nil,"REFERENCE_RAY_UNAVAILABLE" end
+  local origin=Vector3.new(ref.origin[1] or 0,ref.origin[2] or 0,ref.origin[3] or 0)
+  local direction=Vector3.new(ref.direction[1] or 0,ref.direction[2] or 0,ref.direction[3] or 0)
+  local maxDistance=tonumber(ref.range) or direction.Magnitude
+  if direction.Magnitude<=0 or maxDistance<=0 then return nil,"REFERENCE_DIRECTION_INVALID" end
+  local unit=direction.Unit
+  local targetModel=locked and locked.targetModel or nil
+  local firstCharacter=nil
+  local chain=ref.multiHitChain or {}
+  if ref.firstCharacterIndex and chain[ref.firstCharacterIndex] then firstCharacter=compactExistingItem(chain[ref.firstCharacterIndex]) end
+  local cameraCandidate=nearestCandidate(origin,unit,maxDistance)
+  local cameraTargetDistance,cameraLateral,cameraTargetPos=targetProjection(origin,unit,targetModel)
+  local study={
+   method="SAME_DIRECTION_MULTI_ORIGIN_DEFAULT_RAY_PLUS_OBB",
+   observationalOnly=true,
+   directionUnit=vec3(unit),range=maxDistance,
+   camera={
+    origin=vec3(origin),firstHit=compactExistingItem(ref.firstHit),firstCharacter=firstCharacter,
+    nearestCandidate=cameraCandidate,targetProjectionDistance=cameraTargetDistance,
+    targetLateralDistance=cameraLateral,targetRootPosition=vec3(cameraTargetPos),
+    targetBehindCandidate=(cameraCandidate and cameraTargetDistance and cameraTargetDistance>cameraCandidate.distance+0.03) or false
+   },
+   origins={},originOrder={},muzzleCandidates={},canonicalMuzzleKey=nil,
+   comparisons={}
+  }
+  local origins,canonicalMuzzle=discoverOrigins(tool)
+  for _,o in ipairs(origins) do
+   local key=o.key
+   local result=rayFromOrigin(o.position,unit,maxDistance,targetModel)
+   result.sourceInstance=instanceState(o.instance)
+   result.priority=o.priority
+   study.origins[key]=result
+   study.originOrder[#study.originOrder+1]=key
+   if string.sub(key,1,7)=="MUZZLE_" then
+    study.muzzleCandidates[#study.muzzleCandidates+1]={key=key,priority=o.priority,path=safePath(o.instance),name=o.instance.Name,class=o.instance.ClassName}
+   end
+   if key=="TOOL_HANDLE_ORIGIN" then study.handleKey=key end
+   if canonicalMuzzle and o.instance==canonicalMuzzle.instance then study.canonicalMuzzleKey=key end
+  end
+  if study.canonicalMuzzleKey then S.V2312MuzzleFound+=1 else S.V2312MuzzleMissing+=1 end
+  local handle=study.handleKey and study.origins[study.handleKey] or nil
+  local muzzle=study.canonicalMuzzleKey and study.origins[study.canonicalMuzzleKey] or nil
+  local function firstPath(x) return x and x.firstHit and x.firstHit.path or nil end
+  study.comparisons.cameraToHandleDistance=(handle and handle.origin) and (Vector3.new(handle.origin[1],handle.origin[2],handle.origin[3])-origin).Magnitude or nil
+  study.comparisons.cameraToMuzzleDistance=(muzzle and muzzle.origin) and (Vector3.new(muzzle.origin[1],muzzle.origin[2],muzzle.origin[3])-origin).Magnitude or nil
+  study.comparisons.cameraRayVsHandleRayDiverged=handle and (firstPath(study.camera)~=firstPath(handle)) or nil
+  study.comparisons.cameraRayVsMuzzleRayDiverged=muzzle and (firstPath(study.camera)~=firstPath(muzzle)) or nil
+  study.comparisons.muzzleToWallEntry=muzzle and muzzle.nearestCandidate and muzzle.nearestCandidate.distance or nil
+  study.comparisons.muzzleToTargetDistance=muzzle and muzzle.targetProjectionDistance or nil
+  study.comparisons.muzzleRayFirstHit=muzzle and muzzle.firstHit or nil
+  study.comparisons.muzzleRayTargetBehindWall=muzzle and muzzle.targetBehindCandidate or nil
+  study.comparisons.handleToWallEntry=handle and handle.nearestCandidate and handle.nearestCandidate.distance or nil
+  study.comparisons.handleToTargetDistance=handle and handle.targetProjectionDistance or nil
+  S.V2312OriginStudies+=1
+  return study,nil
+ end
+
+ local function attrDiff(a,b)
+  a=type(a)=="table" and a or {}
+  b=type(b)=="table" and b or {}
+  local out={}
+  local seen={}
+  for k,v in pairs(a) do
+   seen[k]=true
+   if tostring(v)~=tostring(b[k]) then out[tostring(k)]={before=v,after=b[k]} end
+  end
+  for k,v in pairs(b) do
+   if not seen[k] and tostring(a[k])~=tostring(v) then out[tostring(k)]={before=a[k],after=v} end
+  end
+  return out
+ end
+
+ local function stateChanges(pre,locked)
+  if type(pre)~="table" or type(locked)~="table" then return nil end
+  return {
+   playerAttributes=attrDiff(pre.player and pre.player.attributes,locked.player and locked.player.attributes),
+   characterAttributes=attrDiff(pre.character and pre.character.attributes,locked.character and locked.character.attributes),
+   humanoidAttributes=attrDiff(pre.humanoid and pre.humanoid.attributes,locked.humanoid and locked.humanoid.attributes),
+   toolAttributes=attrDiff(pre.tool and pre.tool.attributes,locked.tool and locked.tool.attributes),
+   handleAttributes=attrDiff(pre.handle and pre.handle.attributes,locked.handle and locked.handle.attributes),
+   humanoidHealth={before=pre.humanoid and pre.humanoid.health or nil,after=locked.humanoid and locked.humanoid.health or nil}
+  }
+ end
+
+ local function syncTimeline(shot)
+  local timeline=shot and shot.validationTimelineV2312
+  if not timeline then return end
+  local sync=shot.noClipSync
+  timeline.T4_NOCLIP_SHARED_RESULT={
+   available=sync and sync.matched==true or false,
+   matched=sync and sync.matched==true or false,
+   source=sync and sync.source or nil,
+   deltaTime=sync and sync.deltaTime or nil,
+   indexOffset=sync and sync.indexOffset or nil,
+   clientReachedCharacter=sync and sync.clientReachedCharacter or nil,
+   crossedCandidate=sync and sync.crossedCandidate or nil,
+   wallDiagnosticCategory=sync and sync.wallDiagnosticCategory or nil,
+   barrierBetweenCameraAndTarget=sync and sync.barrierBetweenCameraAndTarget or nil,
+   barrierCrossingDirection=sync and sync.barrierCrossingDirection or nil
+  }
+  local probe=shot.damageProbe
+  timeline.T5_HP_AT_OR_BEFORE_AMMO_LOCK={
+   status=probe and probe.status or nil,
+   baselineSource=probe and probe.baselineSource or nil,
+   healthBefore=probe and probe.healthBefore or nil,
+   healthAtAmmoDecrease=probe and probe.healthAtAmmoDecrease or nil,
+   preShotBaselineAvailable=probe and probe.preShotBaselineAvailable or nil,
+   preTriggerAge=probe and probe.preTriggerAge or shot.preTriggerAge
+  }
+  timeline.T6_HP_AFTER_SHOT={
+   status=probe and probe.status or nil,reliable=probe and probe.reliable or nil,
+   observedDamage=probe and probe.observedDamage or nil,healthMinimum=probe and probe.healthMinimum or nil,
+   samples=probe and probe.samples or {},overlapped=probe and probe.overlapped or nil
+  }
+ end
+
+ local function scheduleSyncRecovery(shot)
+  if not shot then return end
+  local sessionId=S.SessionId
+  for _,delay in ipairs({0.025,0.075,0.180}) do
+   task.delay(delay,function()
+    if S.SessionId~=sessionId or not shot then return end
+    if shot.noClipSync and shot.noClipSync.matched then syncTimeline(shot);return end
+    local before=shot.noClipSync and shot.noClipSync.matched==true
+    attachNoClipSyncV239(shot,false)
+    if not before and shot.noClipSync and shot.noClipSync.matched then
+     if not shot.v2312DelayedSyncRecovered then
+      shot.v2312DelayedSyncRecovered=true
+      shot.v2312DelayedSyncRecoveryDelay=delay
+      S.V2312DelayedSyncRecovered+=1
+     end
+     syncTimeline(shot)
+    end
+   end)
+  end
+ end
+
+ local oldStartDamageProbe=startDamageProbe
+ startDamageProbe=function(shot,locked,tool,shotToken)
+  local popped=S.PoppedPreTriggerByTool and S.PoppedPreTriggerByTool[tool] or nil
+  local pre=popped and popped.entry or nil
+  local okStudy,studyOrErr=pcall(originStudy,shot,locked,tool)
+  if okStudy and studyOrErr then shot.originStudyV2312=studyOrErr else
+   shot.originStudyErrorV2312=tostring(studyOrErr)
+   S.V2312OriginStudyErrors+=1
+  end
+  local preState=pre and pre.stateSnapshotV2312 or nil
+  local lockState=locked and locked.stateSnapshotV2312 or nil
+  shot.stateChangesSinceTriggerV2312=stateChanges(preState,lockState)
+  shot.validationTimelineV2312={
+   T0_TOOL_ACTIVATED={
+    available=pre~=nil,time=pre and pre.time or nil,unix=pre and pre.unix or nil,
+    source=pre and pre.source or nil,ageAtAmmoLock=popped and popped.age or shot.preTriggerAge
+   },
+   T1_PRE_SHOT_STATE={available=preState~=nil,state=preState,error=pre and pre.stateSnapshotErrorV2312 or nil},
+   T2_AMMO_DECREASE_LOCK={
+    time=locked and locked.time or shot.classificationLockedAtTime,unix=locked and locked.unix or shot.classificationLockedAtUnix,
+    ammoBefore=shot.ammoBefore,ammoAfter=shot.ammoAfter,ammoDelta=shot.ammoDelta,
+    state=lockState,error=locked and locked.stateSnapshotErrorV2312 or nil
+   },
+   T3_LOCAL_REFERENCE_RAY={
+    authority=shot.classificationAuthority,origin=shot.referenceRay and shot.referenceRay.origin or nil,
+    direction=shot.referenceRay and shot.referenceRay.direction or nil,
+    firstHit=shot.originStudyV2312 and shot.originStudyV2312.camera and shot.originStudyV2312.camera.firstHit or nil,
+    firstCharacter=shot.originStudyV2312 and shot.originStudyV2312.camera and shot.originStudyV2312.camera.firstCharacter or nil
+   },
+   T4_NOCLIP_SHARED_RESULT={available=false},
+   T5_HP_AT_OR_BEFORE_AMMO_LOCK={},T6_HP_AFTER_SHOT={}
+  }
+  local result=oldStartDamageProbe(shot,locked,tool,shotToken)
+  syncTimeline(shot)
+  scheduleSyncRecovery(shot)
+  return result
+ end
+
+ local function correctedBarrierCounts()
+  local out={effectiveBarrierShots=0,barrierBehindTarget=0,targetInsideBarrier=0,barrierNoTarget=0}
+  for _,shot in ipairs(S.Shots) do
+   local sync=shot.noClipSync
+   local relation=shot.barrierSegmentRelationV2311 or (sync and sync.barrierSegmentRelation)
+   local category=shot.wallDiagnosticCategory or (sync and sync.wallDiagnosticCategory)
+   if relation=="BARREIRA_ENTRE_CAMERA_E_ALVO" then out.effectiveBarrierShots+=1
+   elseif relation=="BARREIRA_ATRAS_DO_ALVO" then out.barrierBehindTarget+=1
+   elseif relation=="ALVO_DENTRO_OU_NA_BARREIRA" then out.targetInsideBarrier+=1
+   elseif category=="BARREIRA_SEM_ALVO_VALIDADO" or relation=="SEM_ALVO" or relation=="SEM_BARREIRA_ASSINATURA" and shot.wallDiagnosticCategoryLegacyV238=="BARREIRA_PROTECAO_TIME" then
+    out.barrierNoTarget+=1
+   end
+  end
+  return out
+ end
+
+ local function syncSummary()
+  local out={matches=0,misses=0,delayedRecovered=S.V2312DelayedSyncRecovered or 0,maxDelta=0,offsets={}}
+  for _,shot in ipairs(S.Shots) do
+   local sync=shot.noClipSync
+   if sync and sync.matched and sync.relativeIndexGuardVerified==true then
+    out.matches+=1
+    local dt=tonumber(sync.deltaTime) or 0
+    if dt>out.maxDelta then out.maxDelta=dt end
+    local key=tostring(sync.indexOffset)
+    out.offsets[key]=(out.offsets[key] or 0)+1
+   else out.misses+=1 end
+  end
+  return out
+ end
+
+ local function originSummary()
+  local out={shots=0,withCanonicalMuzzle=0,withoutCanonicalMuzzle=0,cameraVsMuzzleDiverged=0,cameraVsHandleDiverged=0,muzzleTargetBehindCandidate=0,errors=S.V2312OriginStudyErrors or 0}
+  for _,shot in ipairs(S.Shots) do
+   local study=shot.originStudyV2312
+   if study then
+    out.shots+=1
+    if study.canonicalMuzzleKey then out.withCanonicalMuzzle+=1 else out.withoutCanonicalMuzzle+=1 end
+    if study.comparisons and study.comparisons.cameraRayVsMuzzleRayDiverged==true then out.cameraVsMuzzleDiverged+=1 end
+    if study.comparisons and study.comparisons.cameraRayVsHandleRayDiverged==true then out.cameraVsHandleDiverged+=1 end
+    if study.comparisons and study.comparisons.muzzleRayTargetBehindWall==true then out.muzzleTargetBehindCandidate+=1 end
+   end
+  end
+  return out
+ end
+
+ local oldExportTable=exportTable
+ exportTable=function()
+  -- Give delayed NoClip callbacks one final chance while records are still in memory.
+  for _,shot in ipairs(S.Shots) do
+   if not (shot.noClipSync and shot.noClipSync.matched) then attachNoClipSyncV239(shot,false) end
+   syncTimeline(shot)
+  end
+  local data=oldExportTable()
+  data.version=C.VERSION
+  data.mode="SHOT_LOCK_OBB_HP_NOCLIP_RELATIVE_SYNC_MULTI_ORIGIN_VALIDATION_TIMELINE"
+  data.openEndedResearch=data.openEndedResearch or {}
+  data.openEndedResearch.originValidationV2312={
+   observationalOnly=true,
+   sameDirectionRule="Camera/Head/HRP/Handle/Muzzle usam a MESMA direção unitária do AMMO_DECREASE_LOCK; somente a origem muda.",
+   origins={"CAMERA_ORIGIN","HEAD_ORIGIN","HUMANOID_ROOT_ORIGIN","TOOL_HANDLE_ORIGIN","MUZZLE/FirePoint/ShootPoint/Barrel candidates"},
+   obbIndependentCandidateCheck=true,
+   summary=originSummary()
+  }
+  data.openEndedResearch.validationTimelineV2312={
+   stages={"T0_TOOL_ACTIVATED","T1_PRE_SHOT_STATE","T2_AMMO_DECREASE_LOCK","T3_LOCAL_REFERENCE_RAY","T4_NOCLIP_SHARED_RESULT","T5_HP_AT_OR_BEFORE_AMMO_LOCK","T6_HP_AFTER_SHOT"},
+   stateObjects={"LocalPlayer","Character","Humanoid","Head","HumanoidRootPart","Tool","Handle","Muzzle/Attachment candidates"},
+   note="Timeline é observacional; não representa etapas internas comprovadas do servidor."
+  }
+  data.openEndedResearch.noClipRuntimeSync=data.openEndedResearch.noClipRuntimeSync or {}
+  local sync=syncSummary()
+  data.openEndedResearch.noClipRuntimeSync.matches=sync.matches
+  data.openEndedResearch.noClipRuntimeSync.misses=sync.misses
+  data.openEndedResearch.noClipRuntimeSync.relativeMatches=sync.matches
+  data.openEndedResearch.noClipRuntimeSync.relativeMisses=sync.misses
+  data.openEndedResearch.noClipRuntimeSync.reconciledMaxDelta=sync.maxDelta
+  data.openEndedResearch.noClipRuntimeSync.reconciledOffsets=sync.offsets
+  data.openEndedResearch.noClipRuntimeSync.delayedRecoveryV2312={recovered=sync.delayedRecovered,retryDelays={0.025,0.075,0.180},purpose="recuperar callbacks NoClip que chegam alguns ms depois do _ammo antes de o bus compacto descartar registros antigos"}
+  local corrected=correctedBarrierCounts()
+  local tb=data.openEndedResearch.teamProtectionBarrier
+  if type(tb)=="table" then
+   tb.correctedCountsV2312=corrected
+   if type(tb.directionalV2311)=="table" then
+    tb.directionalV2311.effectiveBarrierShots=corrected.effectiveBarrierShots
+    tb.directionalV2311.barrierBehindTarget=corrected.barrierBehindTarget
+    tb.directionalV2311.targetInsideBarrier=corrected.targetInsideBarrier
+    tb.directionalV2311.barrierNoTarget=corrected.barrierNoTarget
+   end
+   tb.counterFixV2312="barrierNoTarget inclui BARREIRA_SEM_ALVO_VALIDADO/SEM_ALVO; corrige subcontagem V2.3.11 sem alterar registros individuais."
+  end
+  S.V2312BarrierCounterFixApplied=true
+  data.interpretationRules=data.interpretationRules or {}
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.12: Camera/Head/HRP/Handle/Muzzle são comparados usando a mesma direção do SHOT-LOCK; divergência entre origens é evidência geométrica, não prova de qual origem o servidor usa."
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.12: timeline T0..T6 correlaciona gatilho, estados, _ammo, ray local, NoClip e HP sem afirmar acesso ao pipeline interno do servidor."
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.12: misses temporários do shared bus recebem retries curtos protegidos por índice relativo+arma+tempo; o mecanismo PlayerOnly não é alterado."
+  return data
+ end
+
+ local oldResetSession=resetSession
+ resetSession=function()
+  oldResetSession()
+  S.V2312DelayedSyncRecovered=0
+  S.V2312OriginStudies=0
+  S.V2312OriginStudyErrors=0
+  S.V2312StateSnapshots=0
+  S.V2312StateSnapshotErrors=0
+  S.V2312MuzzleFound=0
+  S.V2312MuzzleMissing=0
+  S.V2312BarrierCounterFixApplied=false
+ end
+
+ local oldUpdateUI=updateUI
+ updateUI=function()
+  oldUpdateUI()
+  Ver.Text=C.VERSION
+  Sub.Text="SHOT-LOCK + ORIGENS + TIMELINE + SYNC"
+  Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.11","PESQUISA DE ARMAS V2.3.12")
+ end
+ S.UIRefresh=updateUI
+ if type(ENV[RUNTIME_KEY])=="table" then ENV[RUNTIME_KEY].version=C.VERSION end
+
+ -- Physical export filename update is non-fatal: collection must survive any UI-only error.
+ local exportOk,exportErr=pcall(function()
+  local previous=Export
+  local button=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+  round(button,8)
+  button.Activated:Connect(function()
+   if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+   if S.ExportBusy then Status.Text="Exportação já está em andamento.";Status.TextColor3=COL.yellow;return end
+   if S.Recording then pauseSession("EXPORT") end
+   S.ExportBusy=true
+   Status.Text="Preparando JSON V2.3.12 • origens, timeline e sync."
+   Status.TextColor3=COL.yellow
+   updateUI()
+   local sessionId=S.SessionId
+   task.spawn(function()
+    while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+    if not Gui.Parent or S.SessionId~=sessionId then return end
+    task.wait(0.20)
+    local data,encErr=encode()
+    if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+    local filename="Psicosenatico_WeaponResearch_V2_3_12_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+    local saved=false
+    if typeof(writefile)=="function" then saved=pcall(function() writefile(filename,data) end) end
+    if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..filename;Status.TextColor3=COL.green
+    elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+    else Status.Text="Não foi possível salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+    S.ExportBusy=false;updateUI()
+   end)
+  end)
+  if previous then pcall(function() previous:Destroy() end) end
+  Export=button
+ end)
+ if not exportOk then
+  S.V2312ExportUiError=tostring(exportErr)
+  pcall(function() log("ERROR",{where="V2.3.12.exportUi",message=tostring(exportErr)},"V2.3.12: export UI falhou; coleta preservada") end)
+ end
+
+ live("SISTEMA","V2.3.12 • Camera/Head/HRP/Handle/Muzzle + timeline T0..T6 ativos.")
+ live("SISTEMA","Sync tardio recebe retries curtos; contador de barreira sem alvo corrigido.")
+ pcall(updateUI)
+end)}
+
+if ENV.__PSICO_V2312_RESULT[1]~=true then
+ S.V2312StructuralInitError=tostring(ENV.__PSICO_V2312_RESULT[2])
+ error("PSICOSENATICO V2.3.12 structural-safe init: "..S.V2312StructuralInitError)
+end
+
+event("V2312_ORIGIN_PIPELINE_READY",{structuralSafe=true,multiOrigin=true,timeline=true,delayedSyncRecovery=true,barrierCounterFix=true,preservesNoClipMechanism=true,version=C.VERSION})
