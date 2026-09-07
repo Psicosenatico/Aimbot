@@ -1,0 +1,196 @@
+-- V2.3.15 TEMPORAL STABILITY GATE • STRUCTURAL-SAFE • OBSERVATIONAL ONLY
+-- Purpose: prevent a shot from being promoted as a strong penetration candidate when
+-- geometry/category changed between Tool.Activated and AMMO_DECREASE_LOCK.
+-- Preserves V2.3.14 causal HP + OBB proxy and all Bullet NoClip mechanics.
+
+C.VERSION="V2.3.15"
+S.V2315TemporalStabilityGate=true
+S.V2315Errors=0
+
+ENV.__PSICO_V2315_RESULT={pcall(function()
+ if S==nil then error("V2.3.15 dependency ausente: S") end
+ if C==nil then error("V2.3.15 dependency ausente: C") end
+ if ENV==nil then error("V2.3.15 dependency ausente: ENV") end
+ if type(exportTable)~="function" then error("V2.3.15 dependency ausente: exportTable") end
+ if type(updateUI)~="function" then error("V2.3.15 dependency ausente: updateUI") end
+ if type(resetSession)~="function" then error("V2.3.15 dependency ausente: resetSession") end
+ if type(new)~="function" then error("V2.3.15 dependency ausente: new") end
+ if type(round)~="function" then error("V2.3.15 dependency ausente: round") end
+ if type(pauseSession)~="function" then error("V2.3.15 dependency ausente: pauseSession") end
+ if type(encode)~="function" then error("V2.3.15 dependency ausente: encode") end
+
+ local function temporalGate(shot)
+  local pre=shot and shot.preTriggerCategory or nil
+  local locked=shot and shot.autoCategory or nil
+  local changed=shot and shot.categoryChangedSinceTrigger==true or false
+  local hasPre=type(pre)=="string" and pre~=""
+  local hasLocked=type(locked)=="string" and locked~=""
+  local same=hasPre and hasLocked and pre==locked
+  local stable=(not changed) and same
+  local reason="ESTAVEL"
+  if not hasPre then reason="SEM_CATEGORIA_PRE_GATILHO"
+  elseif not hasLocked then reason="SEM_CATEGORIA_AMMO_LOCK"
+  elseif changed then reason="CATEGORY_CHANGED_SINCE_TRIGGER"
+  elseif not same then reason="PRE_TRIGGER_DIFERE_AMMO_LOCK"
+  end
+  return {
+   stable=stable,
+   reason=reason,
+   preTriggerCategory=pre,
+   ammoLockCategory=locked,
+   categoryChangedSinceTrigger=changed,
+   preTriggerCategoryReason=shot and shot.preTriggerCategoryReason or nil,
+   preTriggerAge=shot and shot.preShotHealthBaseline and shot.preShotHealthBaseline.age or nil
+  }
+ end
+
+ local function applyGate(shot)
+  if not shot then return nil end
+  local gate=temporalGate(shot)
+  shot.temporalStabilityV2315=gate
+  local geo=shot.originalGeometryProxyV2314
+  local hp=shot.causalHpV2314
+  local legacy=geo and geo.evidenceClass or nil
+  local corrected=legacy or "SEM_EVIDENCIA_V2314"
+  local strongLegacy=(legacy=="CANDIDATO_FORTE_PENETRACAO_AUTORITATIVA_NAO_PROVADA")
+  if strongLegacy and not gate.stable then
+   corrected="CANDIDATO_DESCARTADO_GEOMETRIA_MUDOU_ENTRE_GATILHO_E_AMMO"
+  elseif strongLegacy and gate.stable then
+   corrected="CANDIDATO_FORTE_TEMPORALMENTE_ESTAVEL_NAO_PROVADO"
+  elseif legacy=="LOCAL_PASSA_PROXY_GEOMETRICO_BLOQUEIA_SEM_DANO" and not gate.stable then
+   corrected="SEM_DANO_COM_GEOMETRIA_TEMPORALMENTE_INSTAVEL"
+  end
+  shot.evidenceClassV2315=corrected
+  shot.strongCandidateStableV2315=(corrected=="CANDIDATO_FORTE_TEMPORALMENTE_ESTAVEL_NAO_PROVADO")
+  shot.legacyStrongCandidateDemotedV2315=strongLegacy and not gate.stable or false
+  if geo then
+   geo.evidenceClassLegacyV2314=legacy
+   geo.evidenceClassV2315=corrected
+   geo.temporalStabilityV2315=gate
+  end
+  if hp then hp.temporalStabilityV2315=gate end
+  return corrected,gate
+ end
+
+ local function summarize()
+  local out={shots=0,stable=0,unstable=0,byReason={},evidenceClasses={},legacyStrong=0,stableStrong=0,demotedStrong=0,demotedShots={}}
+  for _,shot in ipairs(S.Shots) do
+   local ev,gate=applyGate(shot)
+   out.shots+=1
+   if gate and gate.stable then out.stable+=1 else out.unstable+=1 end
+   local reason=tostring(gate and gate.reason or "SEM_GATE")
+   out.byReason[reason]=(out.byReason[reason] or 0)+1
+   out.evidenceClasses[tostring(ev)]=(out.evidenceClasses[tostring(ev)] or 0)+1
+   local legacy=shot.originalGeometryProxyV2314 and shot.originalGeometryProxyV2314.evidenceClassLegacyV2314 or nil
+   if legacy=="CANDIDATO_FORTE_PENETRACAO_AUTORITATIVA_NAO_PROVADA" then out.legacyStrong+=1 end
+   if shot.strongCandidateStableV2315 then out.stableStrong+=1 end
+   if shot.legacyStrongCandidateDemotedV2315 then
+    out.demotedStrong+=1
+    if #out.demotedShots<40 then
+     out.demotedShots[#out.demotedShots+1]={
+      shotIndex=shot.shotIndex,
+      weapon=shot.weapon and shot.weapon.name or nil,
+      preTriggerCategory=gate and gate.preTriggerCategory or nil,
+      ammoLockCategory=gate and gate.ammoLockCategory or nil,
+      reason=gate and gate.reason or nil,
+      observedDrop=shot.causalHpV2314 and shot.causalHpV2314.observedDrop or nil,
+      signature=shot.causalHpV2314 and shot.causalHpV2314.signature or nil,
+      context=shot.originalGeometryProxyV2314 and shot.originalGeometryProxyV2314.context or nil
+     }
+    end
+   end
+  end
+  return out
+ end
+
+ local oldExport=exportTable
+ exportTable=function()
+  -- Apply the temporal gate BEFORE the inherited export serializes shot tables.
+  for _,shot in ipairs(S.Shots) do applyGate(shot) end
+  local data=oldExport()
+  data.version=C.VERSION
+  data.mode="SHOT_LOCK_NOCLIP_HP_CAUSAL_GEOMETRY_PROXY_PLUS_TEMPORAL_STABILITY_V2315"
+  data.openEndedResearch=data.openEndedResearch or {}
+  data.openEndedResearch.temporalStabilityGateV2315={
+   observationalOnly=true,
+   summary=summarize(),
+   rule="Strong penetration evidence requires the same frozen category at Tool.Activated and AMMO_DECREASE_LOCK, with categoryChangedSinceTrigger=false.",
+   demotionRule="A V2.3.14 strong candidate is demoted when the target/path geometry changed during the pre-trigger→ammo-lock interval.",
+   interpretation="This gate prevents damage that may have occurred while the target was still free from being attributed to a wall/barrier state observed only later at ammo lock."
+  }
+  local v14=data.openEndedResearch.causalHpAndOriginalGeometryV2314
+  if type(v14)=="table" then
+   v14.legacyStrongCandidatesNeedTemporalGate=true
+   v14.correctedAuthority="temporalStabilityGateV2315"
+  end
+  data.interpretationRules=data.interpretationRules or {}
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.15: V2.3.14 strong candidate is not valid unless preTriggerCategory == autoCategory and categoryChangedSinceTrigger=false."
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.15: damage during a transition ALVO_LIVRE→ALVO_ATRAS_MAPA_PAREDE is demoted because the HP drop may have occurred before the wall/barrier state became true."
+  return data
+ end
+
+ local oldReset=resetSession
+ resetSession=function()
+  oldReset()
+  S.V2315TemporalStabilityGate=true
+  S.V2315Errors=0
+ end
+
+ local oldUI=updateUI
+ updateUI=function()
+  oldUI()
+  pcall(function()
+   Ver.Text=C.VERSION
+   Sub.Text="SHOT-LOCK + HP CAUSAL + GEO PROXY + ESTABILIDADE TEMPORAL"
+   Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.14","PESQUISA DE ARMAS V2.3.15")
+  end)
+ end
+ S.UIRefresh=updateUI
+ if type(ENV[RUNTIME_KEY])=="table" then ENV[RUNTIME_KEY].version=C.VERSION end
+
+ local exportOk,exportErr=pcall(function()
+  local previous=Export
+  local button=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+  round(button,8)
+  button.Activated:Connect(function()
+   if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+   if S.ExportBusy then Status.Text="Exportacao ja esta em andamento.";Status.TextColor3=COL.yellow;return end
+   if S.Recording then pauseSession("EXPORT") end
+   S.ExportBusy=true
+   Status.Text="Preparando JSON V2.3.15 • estabilidade temporal + HP causal."
+   Status.TextColor3=COL.yellow
+   updateUI()
+   local sessionId=S.SessionId
+   task.spawn(function()
+    while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+    if not Gui.Parent or S.SessionId~=sessionId then return end
+    local data,encErr=encode()
+    if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+    local filename="Psicosenatico_WeaponResearch_V2_3_15_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+    local saved=false
+    if typeof(writefile)=="function" then saved=pcall(function() writefile(filename,data) end) end
+    if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..filename;Status.TextColor3=COL.green
+    elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+    else Status.Text="Nao foi possivel salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+    S.ExportBusy=false
+    updateUI()
+   end)
+  end)
+  if previous then pcall(function() previous:Destroy() end) end
+  Export=button
+ end)
+ if not exportOk then
+  S.V2315ExportUiError=tostring(exportErr)
+  pcall(function() log("ERROR",{where="V2.3.15.exportUi",message=tostring(exportErr)},"V2.3.15: export UI falhou; coleta preservada") end)
+ end
+
+ pcall(function() live("SISTEMA","V2.3.15 • gate temporal ativo; candidatos fortes exigem geometria estável do gatilho ao _ammo.") end)
+ pcall(updateUI)
+end)}
+
+if ENV.__PSICO_V2315_RESULT[1]~=true then
+ S.V2315InitError=tostring(ENV.__PSICO_V2315_RESULT[2])
+ error("PSICOSENATICO V2.3.15 init: "..S.V2315InitError)
+end
+
+event("V2315_TEMPORAL_STABILITY_GATE_READY",{observationalOnly=true,version=C.VERSION,playerOnlyUntouched=true,strongCandidateRequiresStableCategory=true})
