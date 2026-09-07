@@ -1,9 +1,9 @@
--- PSICOSENATICO • WEAPON RESEARCH V2.3.13 • STABLE BOOTSTRAP + 429 RESILIENCE
+-- PSICOSENATICO • WEAPON RESEARCH V2.3.14 • STABLE BOOTSTRAP + 429 RESILIENCE
 -- Esta URL principal deve permanecer estável. As partes internas continuam versionadas por SOURCE_COMMIT.
 -- Runtime: CDN primária + GitHub Raw fallback + cache por sessão + retry progressivo.
 -- Os parts continuam separados apenas para manutenção/histórico; o usuário não precisa trocar a loadstring por versão.
 
-local SOURCE_COMMIT="036128e763640574b828a7789dfe2bd6e2e9dab2"
+local SOURCE_COMMIT="ab227549ed54e93e287d808fafbdc378ded50e8a"
 local REPO_PATH="Psicosenatico/Aimbot"
 local PART_DIR="weapon_research_parts/"
 local BASES={
@@ -38,10 +38,11 @@ local PARTS={
     "V2_3_12.origin_pipeline_structural_safe.patch",
     "V2_3_12.normal_wall_target_segment.patch",
     "V2_3_12.postrun_diagnostic_hotfix.patch",
-    "V2_3_13.server_path_hypotheses_v2_structural_safe.patch"
+    "V2_3_13.server_path_hypotheses_v2_structural_safe.patch",
+    "V2_3_14.causal_hp_original_geometry_proxy_structural_safe.patch"
 }
 
-local BOOT_VERSION="V2.3.13"
+local BOOT_VERSION="V2.3.14"
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 ENV.__PSICO_RESEARCH_PART_CACHE=type(ENV.__PSICO_RESEARCH_PART_CACHE)=="table" and ENV.__PSICO_RESEARCH_PART_CACHE or {}
 local CACHE=ENV.__PSICO_RESEARCH_PART_CACHE
@@ -80,7 +81,6 @@ local function fetchPart(name,index)
             local ok,body=pcall(function() return game:HttpGet(url) end)
             if ok and validBody(body) then
                 CACHE[cacheKey]=body
-                -- evita rajada de dezenas de requests mesmo quando a CDN responde rápido
                 task.wait(0.10)
                 return body,(baseIndex==1 and "JSDELIVR" or "GITHUB_RAW")
             end
@@ -133,7 +133,7 @@ local function sourceLineText(lineNo)
     return nil
 end
 
-if not string.find(source,'C.VERSION="V2.3.13"',1,true) then error(surfaceFailure("PREFLIGHT","versão V2.3.13 ausente da fonte remontada")) end
+if not string.find(source,'C.VERSION="V2.3.14"',1,true) then error(surfaceFailure("PREFLIGHT","versão V2.3.14 ausente da fonte remontada")) end
 if not string.find(source,'__PSICO_RESEARCH_RUNTIME_PREBRIDGE_READY',1,true) then error(surfaceFailure("PREFLIGHT","prebridge anterior à V2.3.11 ausente")) end
 if not string.find(source,'V2311_STRUCTURAL_SAFE_READY',1,true) then error(surfaceFailure("PREFLIGHT","base structural-safe V2.3.11 ausente")) end
 if not string.find(source,'V2312_DEPENDENCY_GATE_READY',1,true) then error(surfaceFailure("PREFLIGHT","dependency gate V2.3.12 ausente")) end
@@ -141,13 +141,16 @@ if not string.find(source,'V2312_ORIGIN_PIPELINE_READY',1,true) then error(surfa
 if not string.find(source,'V2312_NORMAL_WALL_SEGMENT_READY',1,true) then error(surfaceFailure("PREFLIGHT","correção parede antes/depois do alvo ausente")) end
 if not string.find(source,'V2312_POSTRUN_HOTFIX_READY',1,true) then error(surfaceFailure("PREFLIGHT","hotfix Handle/sync V2.3.12 ausente")) end
 if not string.find(source,'V2313_SERVER_PATH_HYPOTHESES_V2_READY',1,true) then error(surfaceFailure("PREFLIGHT","hipóteses Muzzle/Handle/AimPoint V2.3.13 ausentes")) end
+if not string.find(source,'V2314_CAUSAL_HP_ORIGINAL_GEOMETRY_READY',1,true) then error(surfaceFailure("PREFLIGHT","camada HP causal + proxy geometria V2.3.14 ausente")) end
 if string.find(source,'V2_3_11.barrier_segment_direction_team_export.patch',1,true) then error(surfaceFailure("PREFLIGHT","patch V2.3.11 antigo detectado")) end
 if string.find(source,'V2312_EVENT_BRIDGE_READY',1,true) then error(surfaceFailure("PREFLIGHT","bridge tardio antigo V2.3.12 detectado")) end
 if string.find(source,'V2313_SERVER_PATH_HYPOTHESES_READY',1,true) then error(surfaceFailure("PREFLIGHT","patch V2.3.13 inicial incompleto detectado")) end
-if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_13_',1,true) then error(surfaceFailure("PREFLIGHT","nome de export V2_3_13 ausente")) end
+if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_14_',1,true) then error(surfaceFailure("PREFLIGHT","nome de export V2_3_14 ausente")) end
 if not string.find(source,'PAREDE_COMUM_ATRAS_DO_ALVO',1,true) then error(surfaceFailure("PREFLIGHT","regra de parede atrás do alvo ausente")) end
 if not string.find(source,'MUZZLE_TO_AIM_POINT',1,true) or not string.find(source,'HANDLE_TO_AIM_POINT',1,true) then error(surfaceFailure("PREFLIGHT","variantes AimPoint incompletas")) end
 if not string.find(source,'normalWallBetweenCameraAndTargetV2312',1,true) then error(surfaceFailure("PREFLIGHT","campo corrigido de parede comum ausente")) end
+if not string.find(source,'QUEDA_HP_CONFIAVEL_COMPATIVEL_COM_ARMA',1,true) then error(surfaceFailure("PREFLIGHT","classificação causal de HP V2.3.14 ausente")) end
+if not string.find(source,'CANDIDATO_FORTE_PENETRACAO_AUTORITATIVA_NAO_PROVADA',1,true) then error(surfaceFailure("PREFLIGHT","classe conservadora de evidência V2.3.14 ausente")) end
 
 local compiler=loadstring
 if type(compiler)~="function" then error(surfaceFailure("COMPILADOR","loadstring indisponível neste ambiente")) end
