@@ -1,0 +1,453 @@
+-- V2.3.14 CAUSAL HP + ORIGINAL GEOMETRY PROXY • STRUCTURAL-SAFE • OBSERVATIONAL ONLY
+-- Purpose: stop treating any reliable HP drop as proof that THIS shot caused damage.
+-- Adds weapon-signature compatibility, first-drop timing and a geometry proxy that keeps
+-- candidate walls visible through OBB even when the local NoClip query ignores them.
+-- DOES NOT access server internals, fire/alter remotes, change CollisionGroups,
+-- CanQuery/CanCollide, damage, aim, projectile behavior or Bullet NoClip mechanics.
+
+C.VERSION="V2.3.14"
+S.V2314CausalHpGeometryProxy=true
+S.V2314Errors=0
+
+ENV.__PSICO_V2314_RESULT={pcall(function()
+ if S==nil then error("V2.3.14 dependency ausente: S") end
+ if C==nil then error("V2.3.14 dependency ausente: C") end
+ if ENV==nil then error("V2.3.14 dependency ausente: ENV") end
+ if type(startDamageProbe)~="function" then error("V2.3.14 dependency ausente: startDamageProbe") end
+ if type(exportTable)~="function" then error("V2.3.14 dependency ausente: exportTable") end
+ if type(updateUI)~="function" then error("V2.3.14 dependency ausente: updateUI") end
+ if type(resetSession)~="function" then error("V2.3.14 dependency ausente: resetSession") end
+ if type(new)~="function" then error("V2.3.14 dependency ausente: new") end
+ if type(round)~="function" then error("V2.3.14 dependency ausente: round") end
+ if type(pauseSession)~="function" then error("V2.3.14 dependency ausente: pauseSession") end
+ if type(encode)~="function" then error("V2.3.14 dependency ausente: encode") end
+
+ local function finiteNumber(v)
+  v=tonumber(v)
+  if not v or v~=v or v==math.huge or v==-math.huge then return nil end
+  return v
+ end
+
+ local function toolAttr(tool,name)
+  if not tool then return nil end
+  local ok,value=pcall(function() return tool:GetAttribute(name) end)
+  return ok and value or nil
+ end
+
+ local function shotAttr(shot,name)
+  local attrs=shot and shot.weapon and shot.weapon.attributes
+  return type(attrs)=="table" and attrs[name] or nil
+ end
+
+ local function weaponProfile(shot,tool)
+  local function read(name)
+   local v=shotAttr(shot,name)
+   if v~=nil then return v,"SHOT_WEAPON_ATTRIBUTES" end
+   v=toolAttr(tool,name)
+   if v~=nil then return v,"TOOL_ATTRIBUTE_RUNTIME" end
+   return nil,"UNAVAILABLE"
+  end
+  local damage,damageSource=read("damage")
+  local crit,critSource=read("criticalDamageMultiplier")
+  local rays,raysSource=read("raysPerShot")
+  local projectile,projectileSource=read("projectileType")
+  local fireMode,fireModeSource=read("fireMode")
+  local rof,rofSource=read("rateOfFire")
+  damage=finiteNumber(damage)
+  crit=finiteNumber(crit)
+  rays=math.max(1,math.floor(finiteNumber(rays) or 1))
+  return {
+   weaponName=shot and shot.weapon and shot.weapon.name or (tool and tool.Name or nil),
+   weaponPath=shot and shot.weapon and shot.weapon.path or nil,
+   weaponBaseDamage=damage,baseDamagePerRay=damage,
+   criticalDamageMultiplier=crit,raysPerShot=rays,
+   expectedBodyDamageSingleRay=damage,
+   expectedBodyDamageAllRays=damage and damage*rays or nil,
+   expectedCriticalDamageSingleRay=(damage and crit and crit>1) and damage*crit or nil,
+   expectedCriticalDamageAllRays=(damage and crit and crit>1) and damage*crit*rays or nil,
+   projectileType=projectile,fireMode=fireMode,rateOfFire=finiteNumber(rof),
+   sources={damage=damageSource,criticalDamageMultiplier=critSource,raysPerShot=raysSource,projectileType=projectileSource,fireMode=fireModeSource,rateOfFire=rofSource}
+  }
+ end
+
+ local function addSignature(list,label,value)
+  value=finiteNumber(value)
+  if not value or value<=0 then return end
+  for _,item in ipairs(list) do
+   if math.abs(item.value-value)<0.001 then return end
+  end
+  list[#list+1]={label=label,value=value}
+ end
+
+ local function signatures(profile)
+  local out={}
+  addSignature(out,"DANO_BASE_1_RAY",profile.expectedBodyDamageSingleRay)
+  if (profile.raysPerShot or 1)>1 then addSignature(out,"DANO_BASE_TODOS_RAYS",profile.expectedBodyDamageAllRays) end
+  addSignature(out,"DANO_CRITICO_1_RAY",profile.expectedCriticalDamageSingleRay)
+  if (profile.raysPerShot or 1)>1 then addSignature(out,"DANO_CRITICO_TODOS_RAYS",profile.expectedCriticalDamageAllRays) end
+  return out
+ end
+
+ local function toleranceFor(expected)
+  expected=finiteNumber(expected) or 0
+  return math.max(1.0,math.abs(expected)*0.06)
+ end
+
+ local function firstDropInfo(probe)
+  if type(probe)~="table" then return {phase="SEM_PROBE"} end
+  local observed=finiteNumber(probe.observedDamage) or 0
+  if probe.damageTiming=="PRE_TRIGGER_TO_AMMO_LOCK" and observed>0.001 then
+   return {phase="PRE_AMMO_LOCK_SAME_TARGET",delaySeconds=0,source="TOOL_ACTIVATED_PRE_SHOT_BASELINE",healthBefore=finiteNumber(probe.healthBefore),healthAfter=finiteNumber(probe.healthAtAmmoDecrease)}
+  end
+  local baseline=finiteNumber(probe.healthBefore) or finiteNumber(probe.healthAtAmmoDecrease)
+  if baseline then
+   for _,sample in ipairs(type(probe.samples)=="table" and probe.samples or {}) do
+    local hp=finiteNumber(sample.health)
+    local delay=finiteNumber(sample.delay)
+    if hp and hp<baseline-0.001 then
+     local phase="POST_AMMO_LATE"
+     if delay and delay<=0.18 then phase="POST_AMMO_EARLY"
+     elseif delay and delay<=0.35 then phase="POST_AMMO_MID" end
+     return {phase=phase,delaySeconds=delay,source="POST_AMMO_SAMPLE",healthBefore=baseline,healthAfter=hp}
+    end
+   end
+  end
+  return {phase=observed>0.001 and "DROP_SEM_PRIMEIRA_AMOSTRA_RESOLVIDA" or "SEM_QUEDA",delaySeconds=nil,source="PROBE_SUMMARY",healthBefore=baseline,healthAfter=finiteNumber(probe.healthMinimum)}
+ end
+
+ local function matchWeaponSignature(observed,profile,probe)
+  observed=finiteNumber(observed) or 0
+  local healthBefore=finiteNumber(probe and probe.healthBefore)
+  local healthMin=finiteNumber(probe and probe.healthMinimum)
+  local died=(probe and probe.died==true) or (healthMin and healthMin<=0.05) or false
+  local best=nil
+  for _,sig in ipairs(signatures(profile)) do
+   local tol=toleranceFor(sig.value)
+   local diff=math.abs(observed-sig.value)
+   local candidate={signature=sig.label,expected=sig.value,observed=observed,difference=diff,tolerance=tol,lethalTruncation=false,match=diff<=tol}
+   if not candidate.match and died and healthBefore and healthBefore>0 and sig.value>=healthBefore-0.001 then
+    local truncatedExpected=math.min(sig.value,healthBefore)
+    local truncTol=toleranceFor(truncatedExpected)
+    local truncDiff=math.abs(observed-truncatedExpected)
+    if truncDiff<=truncTol then
+     candidate.match=true
+     candidate.lethalTruncation=true
+     candidate.expectedAfterLethalTruncation=truncatedExpected
+     candidate.difference=truncDiff
+     candidate.tolerance=truncTol
+    end
+   end
+   if candidate.match then
+    if not best or (best.lethalTruncation and not candidate.lethalTruncation) or candidate.difference<best.difference then best=candidate end
+   elseif not best then
+    best=candidate
+   end
+  end
+  return best
+ end
+
+ local function classifyHp(shot)
+  local probe=shot and shot.damageProbe
+  local profile=shot and shot.weaponCausalityProfileV2314 or weaponProfile(shot,nil)
+  local out={
+   authoritativeForCausality=false,
+   note="Classificacao observacional. Compatibilidade com dano/tempo aumenta evidência, mas não prova causalidade exclusiva nem acesso ao servidor.",
+   weapon=profile
+  }
+  local first=firstDropInfo(probe)
+  out.firstDrop=first
+  if type(probe)=="table" and probe.reliable==true then
+   local observed=finiteNumber(probe.observedDamage) or 0
+   out.healthBefore=finiteNumber(probe.healthBefore)
+   out.healthAtAmmoDecrease=finiteNumber(probe.healthAtAmmoDecrease)
+   out.healthMinimum=finiteNumber(probe.healthMinimum)
+   out.observedDrop=observed
+   out.damageTiming=probe.damageTiming
+   out.probeStatus=probe.status
+   out.overlapped=probe.overlapped==true
+   if probe.status=="SEM_QUEDA_DE_HP_OBSERVADA" or observed<=0.001 then
+    out.label="SEM_QUEDA_HP_CONFIAVEL"
+    out.causalStrength="SEM_EVIDENCIA_DE_DANO_DESTE_PROBE"
+    return out
+   end
+   if probe.status=="QUEDA_DE_HP_OBSERVADA" and observed>0.001 then
+    local match=matchWeaponSignature(observed,profile,probe)
+    out.weaponSignatureMatch=match
+    if match and match.match then
+     out.label="QUEDA_HP_CONFIAVEL_COMPATIVEL_COM_ARMA"
+     out.signature=match.signature
+     out.lethalTruncationCompatible=match.lethalTruncation==true
+     if first.phase=="POST_AMMO_LATE" then out.causalStrength="COMPATIVEL_COM_ARMA_MAS_QUEDA_TARDIA"
+     else out.causalStrength="COMPATIBILIDADE_FORTE_DE_VALOR_E_JANELA" end
+    else
+     out.label="QUEDA_HP_CONFIAVEL_NAO_COMPATIVEL_COM_ARMA"
+     out.causalStrength="QUEDA_REAL_MAS_CAUSALIDADE_FRACA_PARA_ESTE_TIRO"
+    end
+    return out
+   end
+  end
+  local inter=finiteNumber(shot and shot.interShotHealthDelta and shot.interShotHealthDelta.observedDamage) or 0
+  if inter>0.001 then
+   out.label="QUEDA_HP_CORRELACIONADA_INTERSHOT"
+   out.observedDrop=inter
+   out.causalStrength="CORRELACAO_TEMPORAL_NAO_CAUSAL"
+  else
+   out.label="HP_AMBIGUO"
+   out.causalStrength="SEM_PROBE_CONFIAVEL"
+  end
+  return out
+ end
+
+ local function targetPathFor(study,variant)
+  return study and study.targetPath or variant and variant.targetPath or nil
+ end
+
+ local function queryFindsTarget(variant,targetPath)
+  if type(variant)~="table" then return false end
+  if variant.firstHitIsTarget==true or variant.chainFindsTarget==true then return true end
+  local first=variant.firstHit
+  if targetPath and type(first)=="table" and first.hasHumanoid==true and first.model==targetPath then return true end
+  local chain=variant.chain
+  if targetPath and type(chain)=="table" then
+   for _,item in ipairs(chain) do
+    if type(item)=="table" and item.hasHumanoid==true and item.model==targetPath then return true end
+   end
+  end
+  return false
+ end
+
+ local function geometryProxy(variant,targetPath)
+  if type(variant)~="table" then return {status="VARIANTE_AUSENTE",blockedByCandidate=false} end
+  local td=finiteNumber(variant.targetProjectionDistance)
+  local candidate=variant.nearestCandidate
+  local entry=nil
+  if type(candidate)=="table" then entry=finiteNumber(candidate.entryDistance) or finiteNumber(candidate.distance) end
+  local blocked=(variant.candidateEntryBeforeTarget==true) or (variant.targetBehindCandidate==true) or (entry and td and td>entry+0.05) or false
+  local finds=queryFindsTarget(variant,targetPath)
+  local queryState="QUERY_INDETERMINADA"
+  if finds then queryState="QUERY_ATINGE_ALVO"
+  elseif variant.blockedBeforeTarget==true then queryState="QUERY_BLOQUEADA_ANTES_ALVO"
+  elseif variant.firstHit==nil then queryState="QUERY_SEM_HIT" end
+  local status="GEOMETRIA_ORIGINAL_PROXY_NAO_RESOLVIDA"
+  if blocked then status="GEOMETRIA_ORIGINAL_PROXY_CANDIDATA_ANTES_ALVO"
+  elseif td and entry and td<entry-0.05 then status="GEOMETRIA_ORIGINAL_PROXY_CANDIDATA_ATRAS_ALVO"
+  elseif finds and not blocked then status="GEOMETRIA_ORIGINAL_PROXY_SEM_CANDIDATA_ANTES_ALVO" end
+  return {
+   status=status,blockedByCandidate=blocked,
+   queryState=queryState,queryFindsTarget=finds,
+   candidateEntryDistance=entry,targetProjectionDistance=td,
+   candidatePath=type(candidate)=="table" and candidate.path or nil,
+   candidateDebugId=type(candidate)=="table" and candidate.debugId or nil,
+   candidateCollisionGroup=type(candidate)=="table" and candidate.collisionGroup or nil,
+   targetLateralDistance=finiteNumber(variant.targetLateralDistance),
+   interpretation="Proxy OBB local independente do PlayerOnly; não é raycast/telemetria do servidor."
+  }
+ end
+
+ local function clientReached(shot)
+  local sync=shot and shot.noClipSync
+  if sync and sync.matched==true then return sync.clientReachedCharacter==true,"NOCLIP_SHARED_BUS" end
+  return shot and shot.clientPathStateV2312Hotfix=="CLIENTE_ATINGIU_ALVO","RESEARCH_FALLBACK"
+ end
+
+ local function analyzeShot(shot)
+  if not shot then return nil end
+  local hp=classifyHp(shot)
+  shot.causalHpV2314=hp
+  local study=shot.serverPathHypothesesV2313
+  local proxies={}
+  local proxyBlockedAny=false
+  local proxyBlockedAimPoint=false
+  if type(study)=="table" and type(study.variants)=="table" then
+   local targetPath=targetPathFor(study)
+   for name,variant in pairs(study.variants) do
+    local proxy=geometryProxy(variant,targetPath)
+    proxies[name]=proxy
+    if proxy.blockedByCandidate then proxyBlockedAny=true end
+    if (name=="MUZZLE_TO_AIM_POINT" or name=="HANDLE_TO_AIM_POINT") and proxy.blockedByCandidate then proxyBlockedAimPoint=true end
+   end
+  end
+  local reached,authority=clientReached(shot)
+  local context="SEM_CONTEXTO_PAREDE_ESPECIAL"
+  if shot.barrierBetweenCameraAndTargetV2311==true then context="BARREIRA_PROTECAO_TIME"
+  elseif shot.normalWallBetweenCameraAndTargetV2312==true then context="PAREDE_COMUM_ENTRE_CAMERA_E_ALVO" end
+  local evidence="SEM_EVIDENCIA_DE_PENETRACAO_AUTORITATIVA"
+  if reached and proxyBlockedAimPoint and hp.label=="SEM_QUEDA_HP_CONFIAVEL" then
+   evidence="LOCAL_PASSA_PROXY_GEOMETRICO_BLOQUEIA_SEM_DANO"
+  elseif reached and proxyBlockedAimPoint and hp.label=="QUEDA_HP_CONFIAVEL_COMPATIVEL_COM_ARMA" then
+   evidence="CANDIDATO_FORTE_PENETRACAO_AUTORITATIVA_NAO_PROVADA"
+  elseif reached and proxyBlockedAimPoint and hp.label=="QUEDA_HP_CONFIAVEL_NAO_COMPATIVEL_COM_ARMA" then
+   evidence="LOCAL_PASSA_PROXY_BLOQUEIA_QUEDA_HP_NAO_COMPATIVEL"
+  elseif reached and not proxyBlockedAimPoint and hp.label=="QUEDA_HP_CONFIAVEL_COMPATIVEL_COM_ARMA" then
+   evidence="CONTROLE_CAMINHO_PLAUSIVEL_COM_DANO_COMPATIVEL"
+  elseif reached and hp.label=="HP_AMBIGUO" then
+   evidence="LOCAL_PASSA_HP_AMBIGUO"
+  elseif reached then
+   evidence="LOCAL_PASSA_SEM_CONCLUSAO_CAUSAL"
+  end
+  shot.originalGeometryProxyV2314={
+   variants=proxies,anyCandidateBeforeTarget=proxyBlockedAny,aimPointCandidateBeforeTarget=proxyBlockedAimPoint,
+   localNoClipReachedCharacter=reached,localNoClipAuthority=authority,
+   context=context,evidenceClass=evidence,
+   authoritativePenetrationProven=false,
+   proofLimit="Mesmo CANDIDATO_FORTE não prova o raycast interno do servidor; exige inferência por HP compatível + geometria proxy + controle experimental."
+  }
+  return shot.originalGeometryProxyV2314
+ end
+
+ local oldStart=startDamageProbe
+ startDamageProbe=function(shot,locked,tool,shotToken)
+  if shot then
+   local ok,profile=pcall(weaponProfile,shot,tool)
+   if ok then shot.weaponCausalityProfileV2314=profile else S.V2314Errors+=1;shot.weaponCausalityProfileV2314Error=tostring(profile) end
+  end
+  return oldStart(shot,locked,tool,shotToken)
+ end
+
+ local function summarize()
+  local out={
+   shots=0,errors=S.V2314Errors or 0,
+   hpLabels={},causalStrengths={},firstDropPhases={},weaponSignatures={},evidenceClasses={},
+   localReachedProxyBlockedNoDamage=0,localReachedProxyBlockedWeaponCompatible=0,localReachedProxyBlockedWeaponIncompatible=0,
+   barrier={shots=0,noDamage=0,weaponCompatible=0,weaponIncompatible=0,strongCandidates=0},
+   normalWall={shots=0,noDamage=0,weaponCompatible=0,weaponIncompatible=0,strongCandidates=0},
+   strongCandidates={}
+  }
+  for _,shot in ipairs(S.Shots) do
+   local geo=analyzeShot(shot)
+   local hp=shot.causalHpV2314 or {}
+   out.shots+=1
+   local hl=tostring(hp.label or "SEM_LABEL")
+   out.hpLabels[hl]=(out.hpLabels[hl] or 0)+1
+   local cs=tostring(hp.causalStrength or "SEM_STRENGTH")
+   out.causalStrengths[cs]=(out.causalStrengths[cs] or 0)+1
+   local phase=tostring(hp.firstDrop and hp.firstDrop.phase or "SEM_PHASE")
+   out.firstDropPhases[phase]=(out.firstDropPhases[phase] or 0)+1
+   if hp.signature then out.weaponSignatures[hp.signature]=(out.weaponSignatures[hp.signature] or 0)+1 end
+   local ev=tostring(geo and geo.evidenceClass or "SEM_EVIDENCIA")
+   out.evidenceClasses[ev]=(out.evidenceClasses[ev] or 0)+1
+   if ev=="LOCAL_PASSA_PROXY_GEOMETRICO_BLOQUEIA_SEM_DANO" then out.localReachedProxyBlockedNoDamage+=1 end
+   if ev=="CANDIDATO_FORTE_PENETRACAO_AUTORITATIVA_NAO_PROVADA" then out.localReachedProxyBlockedWeaponCompatible+=1 end
+   if ev=="LOCAL_PASSA_PROXY_BLOQUEIA_QUEDA_HP_NAO_COMPATIVEL" then out.localReachedProxyBlockedWeaponIncompatible+=1 end
+   local bucket=nil
+   if shot.barrierBetweenCameraAndTargetV2311==true then bucket=out.barrier
+   elseif shot.normalWallBetweenCameraAndTargetV2312==true then bucket=out.normalWall end
+   if bucket then
+    bucket.shots+=1
+    if hp.label=="SEM_QUEDA_HP_CONFIAVEL" then bucket.noDamage+=1 end
+    if hp.label=="QUEDA_HP_CONFIAVEL_COMPATIVEL_COM_ARMA" then bucket.weaponCompatible+=1 end
+    if hp.label=="QUEDA_HP_CONFIAVEL_NAO_COMPATIVEL_COM_ARMA" then bucket.weaponIncompatible+=1 end
+    if ev=="CANDIDATO_FORTE_PENETRACAO_AUTORITATIVA_NAO_PROVADA" then bucket.strongCandidates+=1 end
+   end
+   if ev=="CANDIDATO_FORTE_PENETRACAO_AUTORITATIVA_NAO_PROVADA" and #out.strongCandidates<40 then
+    local match=hp.weaponSignatureMatch or {}
+    out.strongCandidates[#out.strongCandidates+1]={
+     shotIndex=shot.shotIndex,weapon=shot.weapon and shot.weapon.name or nil,context=geo.context,
+     observedDrop=hp.observedDrop,signature=hp.signature,expected=match.expected,
+     lethalTruncationCompatible=hp.lethalTruncationCompatible==true,
+     firstDropPhase=hp.firstDrop and hp.firstDrop.phase or nil,firstDropDelay=hp.firstDrop and hp.firstDrop.delaySeconds or nil,
+     autoCategory=shot.autoCategory,localNoClipReached=true
+    }
+   end
+  end
+  return out
+ end
+
+ local oldExport=exportTable
+ exportTable=function()
+  -- Add V2.3.14 annotations before downstream export consumers inspect shots.
+  for _,shot in ipairs(S.Shots) do analyzeShot(shot) end
+  local data=oldExport()
+  data.version=C.VERSION
+  data.mode="SHOT_LOCK_NOCLIP_HP_CAUSAL_SIGNATURE_PLUS_ORIGINAL_GEOMETRY_PROXY_V2314"
+  data.openEndedResearch=data.openEndedResearch or {}
+  data.openEndedResearch.causalHpAndOriginalGeometryV2314={
+   observationalOnly=true,
+   recommendedHpAuthority="causalHpV2314; legacy DANO_CONFIRMADO labels remain only for historical audit.",
+   summary=summarize(),
+   damageToleranceRule="match when |observed-expected| <= max(1 HP, 6% of expected); lethal truncation may match min(expected, HP before) when target reaches zero.",
+   geometryProxyRule="For each V2.3.13 origin variant, OBB candidate entry before projected target is preserved even when PlayerOnly makes the local query skip that wall.",
+   proofStandard={
+    "SEM_QUEDA_HP_CONFIAVEL = reliable probe observed no HP drop.",
+    "QUEDA_HP_CONFIAVEL_COMPATIVEL_COM_ARMA = HP drop is reliable and numerically compatible with base/critical/rays signature, but still not exclusive causal proof.",
+    "QUEDA_HP_CONFIAVEL_NAO_COMPATIVEL_COM_ARMA = HP really fell in the probe, but the amount does not fit the tested weapon signature closely enough.",
+    "CANDIDATO_FORTE_PENETRACAO_AUTORITATIVA_NAO_PROVADA requires local NoClip target reach + AimPoint geometry proxy candidate before target + reliable weapon-compatible HP drop.",
+    "No current class directly observes the server raycast; authoritative penetration remains an inference until a stronger server-side observable exists."
+   }
+  }
+  data.interpretationRules=data.interpretationRules or {}
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.14: legacy DANO_CONFIRMADO means only reliable HP drop; use causalHpV2314 to judge whether the amount/timing is compatible with the tested weapon."
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.14: ORIGINAL_GEOMETRY_PROXY uses OBB candidates locally and is independent of PlayerOnly, but is not server telemetry."
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.14: even CANDIDATO_FORTE_PENETRACAO_AUTORITATIVA_NAO_PROVADA remains evidence, not direct proof of the server accepting wall penetration."
+  return data
+ end
+
+ local oldReset=resetSession
+ resetSession=function()
+  oldReset()
+  S.V2314CausalHpGeometryProxy=true
+  S.V2314Errors=0
+ end
+
+ local oldUI=updateUI
+ updateUI=function()
+  oldUI()
+  pcall(function()
+   Ver.Text=C.VERSION
+   Sub.Text="SHOT-LOCK + HP CAUSAL + PROXY GEOMETRIA ORIGINAL"
+   Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.13","PESQUISA DE ARMAS V2.3.14")
+   local last=S.Shots[#S.Shots]
+   if last and last.causalHpV2314 and last.originalGeometryProxyV2314 then
+    MHelp.Text=tostring(last.causalHpV2314.label or "HP ?").." • "..tostring(last.originalGeometryProxyV2314.evidenceClass or "GEO ?")
+   end
+  end)
+ end
+ S.UIRefresh=updateUI
+ if type(ENV[RUNTIME_KEY])=="table" then ENV[RUNTIME_KEY].version=C.VERSION end
+
+ local exportOk,exportErr=pcall(function()
+  local previous=Export
+  local button=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+  round(button,8)
+  button.Activated:Connect(function()
+   if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+   if S.ExportBusy then Status.Text="Exportacao ja esta em andamento.";Status.TextColor3=COL.yellow;return end
+   if S.Recording then pauseSession("EXPORT") end
+   S.ExportBusy=true
+   Status.Text="Preparando JSON V2.3.14 • HP causal + geometria original proxy."
+   Status.TextColor3=COL.yellow
+   updateUI()
+   local sessionId=S.SessionId
+   task.spawn(function()
+    while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+    if not Gui.Parent or S.SessionId~=sessionId then return end
+    local data,encErr=encode()
+    if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+    local filename="Psicosenatico_WeaponResearch_V2_3_14_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+    local saved=false
+    if typeof(writefile)=="function" then saved=pcall(function() writefile(filename,data) end) end
+    if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..filename;Status.TextColor3=COL.green
+    elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+    else Status.Text="Nao foi possivel salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+    S.ExportBusy=false
+    updateUI()
+   end)
+  end)
+  if previous then pcall(function() previous:Destroy() end) end
+  Export=button
+ end)
+ if not exportOk then
+  S.V2314ExportUiError=tostring(exportErr)
+  pcall(function() log("ERROR",{where="V2.3.14.exportUi",message=tostring(exportErr)},"V2.3.14: export UI falhou; coleta preservada") end)
+ end
+
+ pcall(function() live("SISTEMA","V2.3.14 • HP causal + proxy de geometria original ativos; somente leitura.") end)
+ pcall(updateUI)
+end)}
+
+if ENV.__PSICO_V2314_RESULT[1]~=true then
+ S.V2314InitError=tostring(ENV.__PSICO_V2314_RESULT[2])
+ error("PSICOSENATICO V2.3.14 init: "..S.V2314InitError)
+end
+
+event("V2314_CAUSAL_HP_ORIGINAL_GEOMETRY_READY",{observationalOnly=true,version=C.VERSION,playerOnlyUntouched=true,legacyDamageConfirmedDemoted=true})
