@@ -2,7 +2,8 @@
 -- Base V2.3.11 comprovada em runtime.
 -- Hotfix: compatibility prebridge is loaded BEFORE V2.3.11; V2.3.12 dependencies are gated explicitly.
 -- Runtime errors are mapped back to PART name + local line + assembled line.
-local SOURCE_COMMIT="00388528bac80df4556f12b92413afe9d6dfcfcb"
+-- Post-run hotfix: nested Handle origin + shared-bus authority for free/non-barrier shots.
+local SOURCE_COMMIT="acfcb02636608e05f9f710e6a5ffbb9f075151c4"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/weapon_research_parts/"
 local PARTS={
     "V2_3_3.part1a",
@@ -30,7 +31,8 @@ local PARTS={
     "V2_3_11.structural_safe.patch",
     "V2_3_12.dependency_gate.patch",
     "V2_3_12.origin_pipeline_structural_safe.patch",
-    "V2_3_12.normal_wall_target_segment.patch"
+    "V2_3_12.normal_wall_target_segment.patch",
+    "V2_3_12.postrun_diagnostic_hotfix.patch"
 }
 
 local function surfaceFailure(stage,msg)
@@ -104,6 +106,9 @@ if not string.find(source,'V2312_ORIGIN_PIPELINE_READY',1,true) then
 end
 if not string.find(source,'V2312_NORMAL_WALL_SEGMENT_READY',1,true) then
     error(surfaceFailure("PREFLIGHT","correção parede antes/depois do alvo ausente"))
+end
+if not string.find(source,'V2312_POSTRUN_HOTFIX_READY',1,true) then
+    error(surfaceFailure("PREFLIGHT","hotfix Handle/sync V2.3.12 ausente"))
 end
 if string.find(source,'V2_3_11.barrier_segment_direction_team_export.patch',1,true) then
     error(surfaceFailure("PREFLIGHT","referência ao patch V2.3.11 antigo detectada"))
