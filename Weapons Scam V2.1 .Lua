@@ -1,6 +1,7 @@
--- PSICOSENATICO • WEAPON RESEARCH V2.3.11 • STRUCTURAL-SAFE
--- Base V2.3.10 comprovada em runtime + V2.3.11 isolada em closure para evitar pressão de locals no chunk principal.
-local SOURCE_COMMIT="f4fecc2517e888ca6fb355509a624f3e0a0bb729"
+-- PSICOSENATICO • WEAPON RESEARCH V2.3.12 • STRUCTURAL-SAFE
+-- Base V2.3.11 comprovada em runtime + V2.3.12 isolada em closures.
+-- Adiciona Camera/Head/HRP/Handle/Muzzle, timeline T0..T6, retry de sync e correção parede antes/depois do alvo.
+local SOURCE_COMMIT="438b810aff2bc572461b2e5c3ab0ef6642787dd3"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/weapon_research_parts/"
 local PARTS={
     "V2_3_3.part1a",
@@ -24,11 +25,13 @@ local PARTS={
     "V2_3_9.sync_index_guard.patch",
     "V2_3_10.relative_sync_dynamic_hp.patch",
     "V2_3_10.reconciled_sync_summary.patch",
-    "V2_3_11.structural_safe.patch"
+    "V2_3_11.structural_safe.patch",
+    "V2_3_12.origin_pipeline_structural_safe.patch",
+    "V2_3_12.normal_wall_target_segment.patch"
 }
 
 local function surfaceFailure(stage,msg)
-    local text="Research V2.3.11 • "..tostring(stage)..": "..tostring(msg)
+    local text="Research V2.3.12 • "..tostring(stage)..": "..tostring(msg)
     pcall(function() warn("PSICOSENATICO • "..text) end)
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification",{
@@ -49,18 +52,27 @@ for i,name in ipairs(PARTS) do
     chunks[i]=body
 end
 
-local source=table.concat(chunks)
-if not string.find(source,'C.VERSION="V2.3.11"',1,true) then
-    error(surfaceFailure("PREFLIGHT","versão V2.3.11 ausente da fonte remontada"))
+local source=table.concat(chunks,"\n")
+if not string.find(source,'C.VERSION="V2.3.12"',1,true) then
+    error(surfaceFailure("PREFLIGHT","versão V2.3.12 ausente da fonte remontada"))
 end
 if not string.find(source,'V2311_STRUCTURAL_SAFE_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","patch structural-safe ausente"))
+    error(surfaceFailure("PREFLIGHT","base structural-safe V2.3.11 ausente"))
+end
+if not string.find(source,'V2312_ORIGIN_PIPELINE_READY',1,true) then
+    error(surfaceFailure("PREFLIGHT","pipeline Camera/Handle/Muzzle V2.3.12 ausente"))
+end
+if not string.find(source,'V2312_NORMAL_WALL_SEGMENT_READY',1,true) then
+    error(surfaceFailure("PREFLIGHT","correção parede antes/depois do alvo ausente"))
 end
 if string.find(source,'V2_3_11.barrier_segment_direction_team_export.patch',1,true) then
     error(surfaceFailure("PREFLIGHT","referência ao patch V2.3.11 antigo detectada"))
 end
-if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_11_',1,true) then
-    error(surfaceFailure("PREFLIGHT","nome físico de export V2_3_11 ausente"))
+if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_12_',1,true) then
+    error(surfaceFailure("PREFLIGHT","nome físico de export V2_3_12 ausente"))
+end
+if not string.find(source,'PAREDE_COMUM_ATRAS_DO_ALVO',1,true) then
+    error(surfaceFailure("PREFLIGHT","regra explícita de parede atrás do alvo ausente"))
 end
 
 local compiler=loadstring
