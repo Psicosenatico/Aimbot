@@ -1,9 +1,9 @@
--- PSICOSENATICO • BULLET NOCLIP TEST V0.15 • UNIVERSAL RAY CORRIDOR + 429 RESILIENCE
+-- PSICOSENATICO • BULLET NOCLIP TEST V0.16 • PHYSICAL SAFE + 429 RESILIENCE
 -- Functional rule: traverse all Workspace geometry except Workspace.Tycoons; humanoid parts remain targets.
--- V0.15 adds temporary aim-corridor query/collision suppression so the local shot path is independent of ray CollisionGroup.
+-- V0.16 intentionally does NOT load V0.15 physical corridor suppression.
 -- Stable main loader; internal parts are pinned to an immutable SOURCE_COMMIT.
 
-local SOURCE_COMMIT="09e09871bdd4d86f343e9be0f8c738233be4d500"
+local SOURCE_COMMIT="0983897fe09692d56ec2eca81733a2fda809eb38"
 local REPO_PATH="Psicosenatico/Aimbot"
 local PART_DIR="bullet_noclip_test_parts/"
 local BASES={
@@ -31,10 +31,10 @@ local PARTS={
     "V0_12.barrier_segment_direction_team.patch",
     "V0_13.normal_wall_target_segment.patch",
     "V0_14.all_non_tycoon_geometry.patch",
-    "V0_15.universal_ray_corridor.patch"
+    "V0_16.physical_safe_no_character_noclip.patch"
 }
 
-local BOOT_VERSION="V0.15"
+local BOOT_VERSION="V0.16"
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 ENV.__PSICO_NOCLIP_PART_CACHE=type(ENV.__PSICO_NOCLIP_PART_CACHE)=="table" and ENV.__PSICO_NOCLIP_PART_CACHE or {}
 local CACHE=ENV.__PSICO_NOCLIP_PART_CACHE
@@ -76,7 +76,7 @@ local function fetchPart(name,index)
             end
             lastErr=tostring(body)
             local low=string.lower(lastErr)
-            if string.find(low,"429",1,true) or string.find(low,"too many",1,true) then
+            if string.find(low,"429",1,true) or string.find(low,"too many requests",1,true) then
                 task.wait(waits[attempt])
             else
                 task.wait(math.min(0.18*attempt,0.55))
@@ -93,10 +93,13 @@ for i,name in ipairs(PARTS) do
 end
 
 local source=table.concat(chunks,"\n")
-if not string.find(source,'C.VERSION="V0.15"',1,true) then error(surfaceFailure("PREFLIGHT","versão V0.15 ausente")) end
+if not string.find(source,'C.VERSION="V0.16"',1,true) then error(surfaceFailure("PREFLIGHT","versão V0.16 ausente")) end
 if not string.find(source,'V014_ALL_NON_TYCOON_READY',1,true) then error(surfaceFailure("PREFLIGHT","base V0.14 ausente")) end
-if not string.find(source,'V015_UNIVERSAL_RAY_CORRIDOR_READY',1,true) then error(surfaceFailure("PREFLIGHT","patch V0.15 ausente")) end
-if not string.find(source,'Psicosenatico_BulletNoclip_Test_V0_15_',1,true) then error(surfaceFailure("PREFLIGHT","export V0.15 ausente")) end
+if not string.find(source,'V016_PHYSICAL_SAFE_READY',1,true) then error(surfaceFailure("PREFLIGHT","patch V0.16 ausente")) end
+if string.find(source,'V015_UNIVERSAL_RAY_CORRIDOR_READY',1,true) then error(surfaceFailure("PREFLIGHT","V0.15 física foi carregada indevidamente")) end
+if not string.find(source,'writesCanCollide=false',1,true) then error(surfaceFailure("PREFLIGHT","garantia CanCollide ausente")) end
+if not string.find(source,'writesCanQuery=false',1,true) then error(surfaceFailure("PREFLIGHT","garantia CanQuery ausente")) end
+if not string.find(source,'Psicosenatico_BulletNoclip_Test_V0_16_',1,true) then error(surfaceFailure("PREFLIGHT","export V0.16 ausente")) end
 
 local compiler=loadstring
 if type(compiler)~="function" then error(surfaceFailure("COMPILADOR","loadstring indisponível neste ambiente")) end
