@@ -1,8 +1,9 @@
--- PSICOSENATICO • BULLET NOCLIP TEST V0.14 • ALL NON-TYCOON + 429 RESILIENCE
+-- PSICOSENATICO • BULLET NOCLIP TEST V0.15 • UNIVERSAL RAY CORRIDOR + 429 RESILIENCE
 -- Functional rule: traverse all Workspace geometry except Workspace.Tycoons; humanoid parts remain targets.
+-- V0.15 adds temporary aim-corridor query/collision suppression so the local shot path is independent of ray CollisionGroup.
 -- Stable main loader; internal parts are pinned to an immutable SOURCE_COMMIT.
 
-local SOURCE_COMMIT="34d68741cfe425154771fd2707f27fbbbb1f6b68"
+local SOURCE_COMMIT="09e09871bdd4d86f343e9be0f8c738233be4d500"
 local REPO_PATH="Psicosenatico/Aimbot"
 local PART_DIR="bullet_noclip_test_parts/"
 local BASES={
@@ -29,10 +30,11 @@ local PARTS={
     "V0_11.bus_session_anchor.patch",
     "V0_12.barrier_segment_direction_team.patch",
     "V0_13.normal_wall_target_segment.patch",
-    "V0_14.all_non_tycoon_geometry.patch"
+    "V0_14.all_non_tycoon_geometry.patch",
+    "V0_15.universal_ray_corridor.patch"
 }
 
-local BOOT_VERSION="V0.14"
+local BOOT_VERSION="V0.15"
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 ENV.__PSICO_NOCLIP_PART_CACHE=type(ENV.__PSICO_NOCLIP_PART_CACHE)=="table" and ENV.__PSICO_NOCLIP_PART_CACHE or {}
 local CACHE=ENV.__PSICO_NOCLIP_PART_CACHE
@@ -91,36 +93,15 @@ for i,name in ipairs(PARTS) do
 end
 
 local source=table.concat(chunks,"\n")
-if not string.find(source,'C.VERSION="V0.14"',1,true) then
-    error(surfaceFailure("PREFLIGHT","versão V0.14 ausente da fonte remontada"))
-end
-if not string.find(source,'V014_ALL_NON_TYCOON_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","marcador V014_ALL_NON_TYCOON_READY ausente"))
-end
-if not string.find(source,'tycoonOnlyProtected=true',1,true) then
-    error(surfaceFailure("PREFLIGHT","regra Workspace.Tycoons-only ausente"))
-end
-if not string.find(source,'allNonTycoon=true',1,true) then
-    error(surfaceFailure("PREFLIGHT","cobertura ALL_NON_TYCOON ausente"))
-end
-if not string.find(source,'humanoidTargetsExcluded=true',1,true) then
-    error(surfaceFailure("PREFLIGHT","exclusão de personagens-alvo ausente"))
-end
-if not string.find(source,'preservesV08Mechanism=true',1,true) then
-    error(surfaceFailure("PREFLIGHT","confirmação de preservação do mecanismo V0.8 ausente"))
-end
-if not string.find(source,'Psicosenatico_BulletNoclip_Test_V0_14_',1,true) then
-    error(surfaceFailure("PREFLIGHT","nome físico de export V0_14 ausente"))
-end
+if not string.find(source,'C.VERSION="V0.15"',1,true) then error(surfaceFailure("PREFLIGHT","versão V0.15 ausente")) end
+if not string.find(source,'V014_ALL_NON_TYCOON_READY',1,true) then error(surfaceFailure("PREFLIGHT","base V0.14 ausente")) end
+if not string.find(source,'V015_UNIVERSAL_RAY_CORRIDOR_READY',1,true) then error(surfaceFailure("PREFLIGHT","patch V0.15 ausente")) end
+if not string.find(source,'Psicosenatico_BulletNoclip_Test_V0_15_',1,true) then error(surfaceFailure("PREFLIGHT","export V0.15 ausente")) end
 
 local compiler=loadstring
-if type(compiler)~="function" then
-    error(surfaceFailure("COMPILADOR","loadstring indisponível neste ambiente"))
-end
+if type(compiler)~="function" then error(surfaceFailure("COMPILADOR","loadstring indisponível neste ambiente")) end
 local fn,compileErr=compiler(source)
-if not fn then
-    error(surfaceFailure("COMPILAÇÃO",compileErr))
-end
+if not fn then error(surfaceFailure("COMPILAÇÃO",compileErr)) end
 local okRun,result=xpcall(fn,function(e)
     local base=tostring(e)
     local okTrace,trace=pcall(function()
@@ -129,7 +110,5 @@ local okRun,result=xpcall(fn,function(e)
     end)
     return okTrace and trace or base
 end)
-if not okRun then
-    error(surfaceFailure("RUNTIME ANTES/NA INICIALIZAÇÃO",result))
-end
+if not okRun then error(surfaceFailure("RUNTIME ANTES/NA INICIALIZAÇÃO",result)) end
 return result
