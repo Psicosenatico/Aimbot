@@ -1,6 +1,6 @@
--- PSICOSENATICO • BULLET NOCLIP TEST V0.13 • STRUCTURAL-SAFE LOADER
--- V0.8 PlayerOnly preservado; V0.13 corrige falso positivo de parede candidata atrás do alvo.
-local SOURCE_COMMIT="438b810aff2bc572461b2e5c3ab0ef6642787dd3"
+-- PSICOSENATICO • BULLET NOCLIP TEST V0.14 • ALL NON-TYCOON GEOMETRY
+-- Functional rule: traverse all Workspace geometry except Workspace.Tycoons; humanoid parts remain targets.
+local SOURCE_COMMIT="34d68741cfe425154771fd2707f27fbbbb1f6b68"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/bullet_noclip_test_parts/"
 local PARTS={
     "V0_3.part1",
@@ -21,11 +21,12 @@ local PARTS={
     "V0_10.compact_bus.patch",
     "V0_11.bus_session_anchor.patch",
     "V0_12.barrier_segment_direction_team.patch",
-    "V0_13.normal_wall_target_segment.patch"
+    "V0_13.normal_wall_target_segment.patch",
+    "V0_14.all_non_tycoon_geometry.patch"
 }
 
 local function surfaceFailure(stage,msg)
-    local text="Bullet NoClip V0.13 • "..tostring(stage)..": "..tostring(msg)
+    local text="Bullet NoClip V0.14 • "..tostring(stage)..": "..tostring(msg)
     pcall(function() warn("PSICOSENATICO • "..text) end)
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification",{
@@ -47,20 +48,26 @@ for i,name in ipairs(PARTS) do
 end
 
 local source=table.concat(chunks,"\n")
-if not string.find(source,'C.VERSION="V0.13"',1,true) then
-    error(surfaceFailure("PREFLIGHT","versão V0.13 ausente da fonte remontada"))
+if not string.find(source,'C.VERSION="V0.14"',1,true) then
+    error(surfaceFailure("PREFLIGHT","versão V0.14 ausente da fonte remontada"))
 end
-if not string.find(source,'V013_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","marcador V013_READY ausente"))
+if not string.find(source,'V014_ALL_NON_TYCOON_READY',1,true) then
+    error(surfaceFailure("PREFLIGHT","marcador V014_ALL_NON_TYCOON_READY ausente"))
 end
-if not string.find(source,'correctsLegacyBehindTargetFalsePositive=true',1,true) then
-    error(surfaceFailure("PREFLIGHT","regra de parede atrás do alvo ausente"))
+if not string.find(source,'tycoonOnlyProtected=true',1,true) then
+    error(surfaceFailure("PREFLIGHT","regra Workspace.Tycoons-only ausente"))
+end
+if not string.find(source,'allNonTycoon=true',1,true) then
+    error(surfaceFailure("PREFLIGHT","cobertura ALL_NON_TYCOON ausente"))
+end
+if not string.find(source,'humanoidTargetsExcluded=true',1,true) then
+    error(surfaceFailure("PREFLIGHT","exclusão de personagens-alvo ausente"))
 end
 if not string.find(source,'preservesV08Mechanism=true',1,true) then
-    error(surfaceFailure("PREFLIGHT","confirmação de preservação PlayerOnly/V0.8 ausente"))
+    error(surfaceFailure("PREFLIGHT","confirmação de preservação do mecanismo V0.8 ausente"))
 end
-if not string.find(source,'Psicosenatico_BulletNoclip_Test_V0_13_',1,true) then
-    error(surfaceFailure("PREFLIGHT","nome físico de export V0_13 ausente"))
+if not string.find(source,'Psicosenatico_BulletNoclip_Test_V0_14_',1,true) then
+    error(surfaceFailure("PREFLIGHT","nome físico de export V0_14 ausente"))
 end
 
 local compiler=loadstring
