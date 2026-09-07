@@ -1,0 +1,178 @@
+-- V0.13 NORMAL WALL TARGET-SEGMENT DIAGNOSTIC
+-- Preserves V0.8 PlayerOnly mechanics unchanged.
+-- Fixes false positives where any candidate wall anywhere on the shot ray was treated as
+-- "normal wall crossed before target" even when that candidate was actually BEHIND the target.
+
+C.VERSION="V0.13"
+S.v013NormalWallBetweenTarget=0
+S.v013NormalWallBehindTarget=0
+S.v013NormalWallTargetInside=0
+S.v013NormalWallNoTarget=0
+S.v013NormalWallNoCandidate=0
+S.v013NormalWallClientReached=0
+S.v013LegacyFalsePositive=0
+S.v013BusCorrections=0
+
+ENV.__PSICO_V013_RESULT={pcall(function()
+ local function targetDistanceV013(rec)
+  local hit=rec and rec.diagnosticBaselineHit
+  if hit and hit.humanoid==true and tonumber(hit.distance) then
+   return tonumber(hit.distance),"NOCLIP_BASELINE_HUMANOID"
+  end
+  local ctx=rec and rec.targetProtectionContext
+  local tr=rec and rec.wallTraversal
+  if ctx and type(ctx.rootPosition)=="table" and tr and type(tr.rayOrigin)=="table" and type(tr.rayDirection)=="table" then
+   local o=Vector3.new(tr.rayOrigin[1] or 0,tr.rayOrigin[2] or 0,tr.rayOrigin[3] or 0)
+   local u=Vector3.new(tr.rayDirection[1] or 0,tr.rayDirection[2] or 0,tr.rayDirection[3] or 0)
+   local rp=Vector3.new(ctx.rootPosition[1] or 0,ctx.rootPosition[2] or 0,ctx.rootPosition[3] or 0)
+   if u.Magnitude>0 then return (rp-o):Dot(u.Unit),"TARGET_ROOT_PROJECTION" end
+  end
+  return nil,"TARGET_DISTANCE_UNAVAILABLE"
+ end
+
+ local function bundleIsTeamBarrierV013(bundle)
+  if type(classifyTeamBarrierBundleV09)~="function" then return false end
+  local ok,result=pcall(classifyTeamBarrierBundleV09,bundle)
+  return ok and result~=nil
+ end
+
+ local function relationV013(rec)
+  local tr=rec and rec.wallTraversal
+  local targetDistance,targetSource=targetDistanceV013(rec)
+  if not tr or type(tr.compositeBundles)~="table" then
+   return {relation="SEM_PAREDE_COMUM_CANDIDATA",targetDistance=targetDistance,targetDistanceSource=targetSource}
+  end
+  local before=nil
+  local inside=nil
+  local behind=nil
+  local candidateCount=0
+  for i,b in ipairs(tr.compositeBundles) do
+   if not bundleIsTeamBarrierV013(b) then
+    candidateCount+=1
+    local entry=tonumber(b.entryDistance)
+    local exit=tonumber(b.exitDistance)
+    if entry and exit and targetDistance then
+     local info={bundleIndex=i,entryDistance=entry,exitDistance=exit,compositeThickness=tonumber(b.compositeThickness),memberCount=tonumber(b.memberCount),members=b.members}
+     if targetDistance>exit+0.05 then
+      if not before or entry<before.entryDistance then before=info end
+     elseif targetDistance<entry-0.05 then
+      if not behind or entry<behind.entryDistance then behind=info end
+     else
+      if not inside or entry<inside.entryDistance then inside=info end
+     end
+    end
+   end
+  end
+  if candidateCount==0 then
+   return {relation="SEM_PAREDE_COMUM_CANDIDATA",targetDistance=targetDistance,targetDistanceSource=targetSource,candidateCount=0}
+  end
+  if not targetDistance then
+   return {relation="PAREDE_COMUM_SEM_ALVO_VALIDADO",targetDistance=nil,targetDistanceSource=targetSource,candidateCount=candidateCount}
+  end
+  if before then
+   before.relation="PAREDE_COMUM_ENTRE_CAMERA_E_ALVO";before.targetDistance=targetDistance;before.targetDistanceSource=targetSource;before.candidateCount=candidateCount;return before
+  end
+  if inside then
+   inside.relation="ALVO_DENTRO_OU_NA_PAREDE_COMUM";inside.targetDistance=targetDistance;inside.targetDistanceSource=targetSource;inside.candidateCount=candidateCount;return inside
+  end
+  if behind then
+   behind.relation="PAREDE_COMUM_ATRAS_DO_ALVO";behind.targetDistance=targetDistance;behind.targetDistanceSource=targetSource;behind.candidateCount=candidateCount;return behind
+  end
+  return {relation="PAREDE_COMUM_SEM_RELACAO_RESOLVIDA",targetDistance=targetDistance,targetDistanceSource=targetSource,candidateCount=candidateCount}
+ end
+
+ local function patchBusV013(rec)
+  local entry=busV010 and busV010.last
+  if not entry or not rec or tonumber(entry.shotIndex)~=tonumber(rec.index) then return end
+  entry.normalWallSegmentRelation=rec.normalWallSegmentRelation
+  entry.normalWallBetweenCameraAndTarget=rec.normalWallBetweenCameraAndTarget
+  entry.normalWallTargetDistance=rec.normalWallTargetDistance
+  entry.normalWallBundle=rec.normalWallBundle
+  entry.normalWallClientReachedLegacy=entry.normalWallClientReached==true
+  entry.normalWallClientReached=rec.normalWallClientReachedCharacterV013==true
+  entry.version=C.VERSION
+  S.v013BusCorrections+=1
+ end
+
+ local oldShotReadV012=shotRead
+ shotRead=function(tool,delta)
+  oldShotReadV012(tool,delta)
+  local rec=S.shots[#S.shots]
+  if not rec then return end
+  local rel=relationV013(rec)
+  rec.normalWallSegmentRelation=rel.relation
+  rec.normalWallBetweenCameraAndTarget=rel.relation=="PAREDE_COMUM_ENTRE_CAMERA_E_ALVO"
+  rec.normalWallTargetDistance=rel.targetDistance
+  rec.normalWallTargetDistanceSource=rel.targetDistanceSource
+  rec.normalWallBundle=(rel.entryDistance and {bundleIndex=rel.bundleIndex,entryDistance=rel.entryDistance,exitDistance=rel.exitDistance,compositeThickness=rel.compositeThickness,memberCount=rel.memberCount,members=rel.members}) or nil
+  local reached=rec.diagnosticBaselineHit and rec.diagnosticBaselineHit.humanoid==true or false
+  local legacy=(reached and rec.wallTraversal and (rec.wallTraversal.candidateIntersectionCount or 0)>0 and rec.wallDiagnosticCategory~="BARREIRA_PROTECAO_TIME") or false
+  rec.normalWallClientReachedCharacterLegacy=legacy
+  rec.normalWallClientReachedCharacterV013=reached and rec.normalWallBetweenCameraAndTarget
+  if rec.normalWallSegmentRelation=="PAREDE_COMUM_ENTRE_CAMERA_E_ALVO" then
+   S.v013NormalWallBetweenTarget+=1
+   if rec.normalWallClientReachedCharacterV013 then S.v013NormalWallClientReached+=1 end
+  elseif rec.normalWallSegmentRelation=="PAREDE_COMUM_ATRAS_DO_ALVO" then S.v013NormalWallBehindTarget+=1
+  elseif rec.normalWallSegmentRelation=="ALVO_DENTRO_OU_NA_PAREDE_COMUM" then S.v013NormalWallTargetInside+=1
+  elseif rec.normalWallSegmentRelation=="PAREDE_COMUM_SEM_ALVO_VALIDADO" then S.v013NormalWallNoTarget+=1
+  elseif rec.normalWallSegmentRelation=="SEM_PAREDE_COMUM_CANDIDATA" then S.v013NormalWallNoCandidate+=1 end
+  if legacy and not rec.normalWallClientReachedCharacterV013 then S.v013LegacyFalsePositive+=1 end
+  patchBusV013(rec)
+  event("V013_NORMAL_WALL_SEGMENT",{
+   shotIndex=rec.index,relation=rec.normalWallSegmentRelation,targetDistance=rec.normalWallTargetDistance,
+   wallBundle=rec.normalWallBundle,clientReachedCharacter=reached,
+   correctedNormalWallClientReached=rec.normalWallClientReachedCharacterV013,
+   legacyNormalWallClientReached=legacy
+  })
+  updateUI()
+ end
+
+ local oldPayloadV012=payload
+ payload=function()
+  local t=oldPayloadV012()
+  t.version=C.VERSION
+  t.policy=t.policy or {}
+  t.policy.normalWallTargetSegmentV013="Parede comum só conta como atravessada antes do alvo quando wallExitDistance < targetDistance. Candidata atrás do personagem vira PAREDE_COMUM_ATRAS_DO_ALVO e não alimenta estatística de penetração."
+  local summary={betweenTarget=0,behindTarget=0,targetInside=0,noTarget=0,noCandidate=0,clientReachedBetween=0,legacyFalsePositive=0}
+  for _,rec in ipairs(S.shots) do
+   local r=rec.normalWallSegmentRelation
+   if r=="PAREDE_COMUM_ENTRE_CAMERA_E_ALVO" then summary.betweenTarget+=1
+   elseif r=="PAREDE_COMUM_ATRAS_DO_ALVO" then summary.behindTarget+=1
+   elseif r=="ALVO_DENTRO_OU_NA_PAREDE_COMUM" then summary.targetInside+=1
+   elseif r=="PAREDE_COMUM_SEM_ALVO_VALIDADO" then summary.noTarget+=1
+   elseif r=="SEM_PAREDE_COMUM_CANDIDATA" then summary.noCandidate+=1 end
+   if rec.normalWallClientReachedCharacterV013 then summary.clientReachedBetween+=1 end
+   if rec.normalWallClientReachedCharacterLegacy and not rec.normalWallClientReachedCharacterV013 then summary.legacyFalsePositive+=1 end
+  end
+  t.summary=t.summary or {}
+  t.summary.normalWallV013=summary
+  return t
+ end
+
+ save=function()
+  local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+  if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+  local name=string.format("Psicosenatico_BulletNoclip_Test_V0_13_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+  if typeof(writefile)=="function" then
+   local a,b=pcall(writefile,name,json)
+   if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+  end
+  if typeof(setclipboard)=="function" then
+   local a,b=pcall(setclipboard,json)
+   if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+  end
+  return false,"Não foi possível salvar/copiar o JSON"
+ end
+
+ local oldUpdateUIV012=updateUI
+ updateUI=function()
+  oldUpdateUIV012()
+  Reader.Text=string.gsub(Reader.Text,"Leitor V0%.12","Leitor V0.13")
+  ver.Text=C.VERSION
+ end
+ local rt=ENV[C.KEY]
+ if type(rt)=="table" then rt.version=C.VERSION end
+end)}
+if ENV.__PSICO_V013_RESULT[1]~=true then error("PSICOSENATICO V0.13 structural init: "..tostring(ENV.__PSICO_V013_RESULT[2])) end
+event("V013_READY",{normalWallTargetSegment=true,preservesV08Mechanism=true,correctsLegacyBehindTargetFalsePositive=true,version=C.VERSION})
+pcall(updateUI)
