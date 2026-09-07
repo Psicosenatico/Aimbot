@@ -1,10 +1,15 @@
--- PSICOSENATICO • WEAPON RESEARCH V2.3.13 • STRUCTURAL-SAFE + SOURCE MAP
--- Base V2.3.12 comprovada em runtime; V2.3.13 adiciona apenas hipoteses observacionais Muzzle/Handle/AimPoint.
--- Compatibility prebridge remains BEFORE V2.3.11; V2.3.12 dependencies remain gated explicitly.
--- Runtime errors are mapped back to PART name + local line + assembled line.
--- No gameplay/RemoteEvent/CollisionGroup changes are introduced by V2.3.13.
+-- PSICOSENATICO • WEAPON RESEARCH V2.3.13 • STABLE BOOTSTRAP + 429 RESILIENCE
+-- Esta URL principal deve permanecer estável. As partes internas continuam versionadas por SOURCE_COMMIT.
+-- Runtime: CDN primária + GitHub Raw fallback + cache por sessão + retry progressivo.
+-- Os parts continuam separados apenas para manutenção/histórico; o usuário não precisa trocar a loadstring por versão.
+
 local SOURCE_COMMIT="036128e763640574b828a7789dfe2bd6e2e9dab2"
-local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/weapon_research_parts/"
+local REPO_PATH="Psicosenatico/Aimbot"
+local PART_DIR="weapon_research_parts/"
+local BASES={
+    "https://cdn.jsdelivr.net/gh/"..REPO_PATH.."@"..SOURCE_COMMIT.."/"..PART_DIR,
+    "https://raw.githubusercontent.com/"..REPO_PATH.."/"..SOURCE_COMMIT.."/"..PART_DIR
+}
 local PARTS={
     "V2_3_3.part1a",
     "V2_3_3.part1b",
@@ -36,32 +41,72 @@ local PARTS={
     "V2_3_13.server_path_hypotheses_v2_structural_safe.patch"
 }
 
+local BOOT_VERSION="V2.3.13"
+local ENV=(type(getgenv)=="function" and getgenv()) or _G
+ENV.__PSICO_RESEARCH_PART_CACHE=type(ENV.__PSICO_RESEARCH_PART_CACHE)=="table" and ENV.__PSICO_RESEARCH_PART_CACHE or {}
+local CACHE=ENV.__PSICO_RESEARCH_PART_CACHE
+
 local function surfaceFailure(stage,msg)
-    local text="Research V2.3.13 • "..tostring(stage)..": "..tostring(msg)
+    local text="Research "..BOOT_VERSION.." • "..tostring(stage)..": "..tostring(msg)
     pcall(function() warn("PSICOSENATICO • "..text) end)
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification",{
             Title="PSICOSENATICO Research",
             Text=text,
-            Duration=15
+            Duration=18
         })
     end)
     return text
 end
 
+local function validBody(body)
+    if type(body)~="string" or #body<8 then return false end
+    local lower=string.lower(body)
+    if string.find(lower,"http 429",1,true) or string.find(lower,"too many requests",1,true) then return false end
+    if string.sub(lower,1,15)=="<!doctype html>" then return false end
+    return true
+end
+
+local function fetchPart(name,index)
+    local cacheKey=SOURCE_COMMIT.."/"..name
+    local cached=CACHE[cacheKey]
+    if validBody(cached) then return cached,"CACHE" end
+
+    local lastErr="sem tentativa"
+    local waits={0.45,1.25,3.0}
+    for baseIndex,base in ipairs(BASES) do
+        for attempt=1,#waits do
+            local url=base..name
+            local ok,body=pcall(function() return game:HttpGet(url) end)
+            if ok and validBody(body) then
+                CACHE[cacheKey]=body
+                -- evita rajada de dezenas de requests mesmo quando a CDN responde rápido
+                task.wait(0.10)
+                return body,(baseIndex==1 and "JSDELIVR" or "GITHUB_RAW")
+            end
+            lastErr=tostring(body)
+            if string.find(string.lower(lastErr),"429",1,true) or string.find(string.lower(lastErr),"too many",1,true) then
+                task.wait(waits[attempt])
+            else
+                task.wait(math.min(0.20*attempt,0.60))
+            end
+        end
+    end
+    error(surfaceFailure("CARREGAMENTO","parte "..tostring(index).." ("..name.."): "..lastErr.." • CDN+RAW esgotados"))
+end
+
 local chunks={}
 local sourceMap={}
+local sourceProviders={}
 local newlineCountBefore=0
 for i,name in ipairs(PARTS) do
-    local ok,body=pcall(function() return game:HttpGet(BASE..name) end)
-    if not ok or type(body)~="string" or #body==0 then
-        error(surfaceFailure("CARREGAMENTO","parte "..tostring(i).." ("..name.."): "..tostring(body)))
-    end
+    local body,provider=fetchPart(name,i)
     chunks[i]=body
+    sourceProviders[name]=provider
     local _,insideNewlines=string.gsub(body,"\n","\n")
     local startLine=1+newlineCountBefore
     local endLine=startLine+insideNewlines
-    sourceMap[#sourceMap+1]={name=name,index=i,startLine=startLine,endLine=endLine}
+    sourceMap[#sourceMap+1]={name=name,index=i,startLine=startLine,endLine=endLine,provider=provider}
     newlineCountBefore=newlineCountBefore+insideNewlines
     if i<#PARTS then newlineCountBefore=newlineCountBefore+1 end
 end
@@ -72,9 +117,7 @@ local function mapSourceLine(lineNo)
     lineNo=tonumber(lineNo)
     if not lineNo then return nil end
     for _,m in ipairs(sourceMap) do
-        if lineNo>=m.startLine and lineNo<=m.endLine then
-            return m,lineNo-m.startLine+1
-        end
+        if lineNo>=m.startLine and lineNo<=m.endLine then return m,lineNo-m.startLine+1 end
     end
     return nil
 end
@@ -90,61 +133,29 @@ local function sourceLineText(lineNo)
     return nil
 end
 
-if not string.find(source,'C.VERSION="V2.3.13"',1,true) then
-    error(surfaceFailure("PREFLIGHT","versão V2.3.13 ausente da fonte remontada"))
-end
-if not string.find(source,'__PSICO_RESEARCH_RUNTIME_PREBRIDGE_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","prebridge anterior à V2.3.11 ausente"))
-end
-if not string.find(source,'V2311_STRUCTURAL_SAFE_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","base structural-safe V2.3.11 ausente"))
-end
-if not string.find(source,'V2312_DEPENDENCY_GATE_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","dependency gate V2.3.12 ausente"))
-end
-if not string.find(source,'V2312_ORIGIN_PIPELINE_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","pipeline Camera/Handle/Muzzle V2.3.12 ausente"))
-end
-if not string.find(source,'V2312_NORMAL_WALL_SEGMENT_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","correção parede antes/depois do alvo ausente"))
-end
-if not string.find(source,'V2312_POSTRUN_HOTFIX_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","hotfix Handle/sync V2.3.12 ausente"))
-end
-if not string.find(source,'V2313_SERVER_PATH_HYPOTHESES_V2_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","hipoteses Muzzle/Handle/AimPoint V2.3.13 V2 ausentes"))
-end
-if string.find(source,'V2_3_11.barrier_segment_direction_team_export.patch',1,true) then
-    error(surfaceFailure("PREFLIGHT","referência ao patch V2.3.11 antigo detectada"))
-end
-if string.find(source,'V2312_EVENT_BRIDGE_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","bridge tardio antigo V2.3.12 ainda presente na montagem"))
-end
-if string.find(source,'V2313_SERVER_PATH_HYPOTHESES_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","patch V2.3.13 inicial incompleto ainda presente na montagem"))
-end
-if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_13_',1,true) then
-    error(surfaceFailure("PREFLIGHT","nome físico de export V2_3_13 ausente"))
-end
-if not string.find(source,'PAREDE_COMUM_ATRAS_DO_ALVO',1,true) then
-    error(surfaceFailure("PREFLIGHT","regra explícita de parede atrás do alvo ausente"))
-end
-if not string.find(source,'MUZZLE_TO_AIM_POINT',1,true) or not string.find(source,'HANDLE_TO_AIM_POINT',1,true) then
-    error(surfaceFailure("PREFLIGHT","variantes AimPoint V2.3.13 incompletas"))
-end
-if not string.find(source,'normalWallBetweenCameraAndTargetV2312',1,true) then
-    error(surfaceFailure("PREFLIGHT","campo corrigido de parede comum V2.3.12 não utilizado"))
-end
+if not string.find(source,'C.VERSION="V2.3.13"',1,true) then error(surfaceFailure("PREFLIGHT","versão V2.3.13 ausente da fonte remontada")) end
+if not string.find(source,'__PSICO_RESEARCH_RUNTIME_PREBRIDGE_READY',1,true) then error(surfaceFailure("PREFLIGHT","prebridge anterior à V2.3.11 ausente")) end
+if not string.find(source,'V2311_STRUCTURAL_SAFE_READY',1,true) then error(surfaceFailure("PREFLIGHT","base structural-safe V2.3.11 ausente")) end
+if not string.find(source,'V2312_DEPENDENCY_GATE_READY',1,true) then error(surfaceFailure("PREFLIGHT","dependency gate V2.3.12 ausente")) end
+if not string.find(source,'V2312_ORIGIN_PIPELINE_READY',1,true) then error(surfaceFailure("PREFLIGHT","pipeline Camera/Handle/Muzzle V2.3.12 ausente")) end
+if not string.find(source,'V2312_NORMAL_WALL_SEGMENT_READY',1,true) then error(surfaceFailure("PREFLIGHT","correção parede antes/depois do alvo ausente")) end
+if not string.find(source,'V2312_POSTRUN_HOTFIX_READY',1,true) then error(surfaceFailure("PREFLIGHT","hotfix Handle/sync V2.3.12 ausente")) end
+if not string.find(source,'V2313_SERVER_PATH_HYPOTHESES_V2_READY',1,true) then error(surfaceFailure("PREFLIGHT","hipóteses Muzzle/Handle/AimPoint V2.3.13 ausentes")) end
+if string.find(source,'V2_3_11.barrier_segment_direction_team_export.patch',1,true) then error(surfaceFailure("PREFLIGHT","patch V2.3.11 antigo detectado")) end
+if string.find(source,'V2312_EVENT_BRIDGE_READY',1,true) then error(surfaceFailure("PREFLIGHT","bridge tardio antigo V2.3.12 detectado")) end
+if string.find(source,'V2313_SERVER_PATH_HYPOTHESES_READY',1,true) then error(surfaceFailure("PREFLIGHT","patch V2.3.13 inicial incompleto detectado")) end
+if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_13_',1,true) then error(surfaceFailure("PREFLIGHT","nome de export V2_3_13 ausente")) end
+if not string.find(source,'PAREDE_COMUM_ATRAS_DO_ALVO',1,true) then error(surfaceFailure("PREFLIGHT","regra de parede atrás do alvo ausente")) end
+if not string.find(source,'MUZZLE_TO_AIM_POINT',1,true) or not string.find(source,'HANDLE_TO_AIM_POINT',1,true) then error(surfaceFailure("PREFLIGHT","variantes AimPoint incompletas")) end
+if not string.find(source,'normalWallBetweenCameraAndTargetV2312',1,true) then error(surfaceFailure("PREFLIGHT","campo corrigido de parede comum ausente")) end
 
 local compiler=loadstring
-if type(compiler)~="function" then
-    error(surfaceFailure("COMPILADOR","loadstring indisponível neste ambiente"))
-end
+if type(compiler)~="function" then error(surfaceFailure("COMPILADOR","loadstring indisponível neste ambiente")) end
 local fn,compileErr=compiler(source)
 if not fn then
     local lineNo=tonumber(string.match(tostring(compileErr),":(%d+):"))
     local m,localLine=mapSourceLine(lineNo)
-    local mapped=m and (m.name..":"..tostring(localLine).." • assembled:"..tostring(lineNo)) or ("assembled:"..tostring(lineNo))
+    local mapped=m and (m.name..":"..tostring(localLine).." • assembled:"..tostring(lineNo).." • "..tostring(m.provider)) or ("assembled:"..tostring(lineNo))
     error(surfaceFailure("COMPILAÇÃO",tostring(compileErr).." • "..mapped))
 end
 
@@ -159,13 +170,11 @@ local okRun,result=xpcall(fn,function(e)
     if lineNo then
         local m,localLine=mapSourceLine(lineNo)
         local src=sourceLineText(lineNo)
-        local mapped=m and (m.name..":"..tostring(localLine).." • assembled:"..tostring(lineNo)) or ("assembled:"..tostring(lineNo))
+        local mapped=m and (m.name..":"..tostring(localLine).." • assembled:"..tostring(lineNo).." • "..tostring(m.provider)) or ("assembled:"..tostring(lineNo))
         if src and #src>180 then src=string.sub(src,1,180).."..." end
         return base.." • SOURCE_MAP="..mapped..(src and (" • CODE="..src) or "")
     end
     return trace
 end)
-if not okRun then
-    error(surfaceFailure("RUNTIME ANTES/NA INICIALIZAÇÃO",result))
-end
+if not okRun then error(surfaceFailure("RUNTIME ANTES/NA INICIALIZAÇÃO",result)) end
 return result
