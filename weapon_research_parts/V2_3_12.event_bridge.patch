@@ -1,0 +1,12 @@
+-- V2.3.12 RESEARCH EVENT COMPATIBILITY BRIDGE
+-- Weapon Research historically uses log()/live(); the new structural-safe V2.3.12 patches
+-- use event() only for two READY markers. Provide a tiny compatibility bridge before them.
+-- No gameplay/NoClip behavior is changed.
+
+if type(event)~="function" then
+ event=function(kind,data)
+  log(kind,data,tostring(kind))
+ end
+end
+ENV.__PSICO_V2312_EVENT_BRIDGE_READY=true
+log("V2312_EVENT_BRIDGE_READY",{version="V2.3.12",mapsEventTo="log",structuralOnly=true},"V2.3.12 • event bridge estrutural pronto")
