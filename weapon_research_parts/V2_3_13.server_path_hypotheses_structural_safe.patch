@@ -1,0 +1,451 @@
+-- V2.3.13 SERVER-PATH HYPOTHESES • STRUCTURAL-SAFE • OBSERVATIONAL ONLY
+-- Purpose: distinguish client-side ray/query success from several plausible weapon-origin
+-- validation geometries. This patch DOES NOT access server internals, fire/alter remotes,
+-- change CollisionGroups, CanQuery/CanCollide, damage, aim, or projectile behavior.
+-- It only compares rays/OBB locally and correlates them with the already-observed HP result.
+
+C.VERSION="V2.3.13"
+S.V2313ServerPathHypotheses=true
+S.V2313Shots=0
+S.V2313Errors=0
+
+ENV.__PSICO_V2313_RESULT={pcall(function()
+ local required={
+  S=S,C=C,ENV=ENV,Workspace=Workspace,LP=LP,full=full,rayObbDistance=rayObbDistance,
+  startDamageProbe=startDamageProbe,exportTable=exportTable,updateUI=updateUI,
+  resetSession=resetSession,new=new,round=round,pauseSession=pauseSession,encode=encode
+ }
+ for name,value in pairs(required) do
+  if value==nil then error("V2.3.13 dependency ausente: "..tostring(name)) end
+ end
+
+ local function vec(v)
+  if typeof(v)=="Vector3" then return {v.X,v.Y,v.Z} end
+  return nil
+ end
+
+ local function v3(t)
+  if type(t)~="table" then return nil end
+  return Vector3.new(tonumber(t[1]) or 0,tonumber(t[2]) or 0,tonumber(t[3]) or 0)
+ end
+
+ local function safePath(inst)
+  if not inst then return nil end
+  local ok,value=pcall(function() return full(inst) end)
+  return ok and value or tostring(inst)
+ end
+
+ local function safeId(inst)
+  if not inst then return nil end
+  local ok,value=pcall(function() return inst:GetDebugId(0) end)
+  return ok and tostring(value) or nil
+ end
+
+ local function charModelFrom(inst)
+  local cur=inst
+  while cur and cur~=Workspace do
+   if cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid") then return cur end
+   cur=cur.Parent
+  end
+  return nil
+ end
+
+ local function compactHit(result,origin)
+  if not result then return nil end
+  local inst=result.Instance
+  local model=charModelFrom(inst)
+  local scope=model and "PERSONAGEM" or nil
+  if not scope then
+   pcall(function() scope=hierarchyScope(inst,explicitBlockInfo(inst)) end)
+  end
+  return {
+   path=safePath(inst),name=inst and inst.Name or nil,class=inst and inst.ClassName or nil,
+   debugId=safeId(inst),model=model and safePath(model) or nil,hasHumanoid=model~=nil,
+   structureScope=scope,distance=(result.Position-origin).Magnitude,position=vec(result.Position),
+   material=tostring(result.Material),collisionGroup=inst and inst:IsA("BasePart") and inst.CollisionGroup or nil
+  }
+ end
+
+ local function nearestCandidate(origin,unit,maxDistance)
+  local best=nil
+  for _,candidate in ipairs(S.GeometryCandidates or {}) do
+   local part=candidate.part
+   if part and part.Parent then
+    local ok,d=pcall(rayObbDistance,origin,unit,maxDistance,part)
+    if ok and d and d>=0 and (not best or d<best.entryDistance) then
+     best={
+      entryDistance=d,path=candidate.path or safePath(part),subtype=candidate.subtype,
+      reason=candidate.reason,debugId=safeId(part),size=vec(part.Size),
+      collisionGroup=part.CollisionGroup,canCollide=part.CanCollide,canQuery=part.CanQuery
+     }
+    end
+   end
+  end
+  return best
+ end
+
+ local function targetRoot(model)
+  if not model or not model.Parent then return nil end
+  local root=model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChild("Head")
+  return root and root:IsA("BasePart") and root or nil
+ end
+
+ local function targetProjection(origin,unit,targetModel)
+  local root=targetRoot(targetModel)
+  if not root then return nil,nil,nil end
+  local delta=root.Position-origin
+  local along=delta:Dot(unit)
+  local closest=origin+unit*along
+  return along,(root.Position-closest).Magnitude,root.Position
+ end
+
+ local function castVariant(origin,dir,maxDistance,targetModel,label)
+  local out={label=label,ok=false,origin=vec(origin),direction=vec(dir)}
+  if typeof(origin)~="Vector3" or typeof(dir)~="Vector3" or dir.Magnitude<=0.0001 then
+   out.error="ORIGIN_OU_DIRECAO_INVALIDA";return out
+  end
+  local unit=dir.Unit
+  out.directionUnit=vec(unit)
+  out.maxDistance=maxDistance
+  local excluded={}
+  if Workspace.CurrentCamera then excluded[#excluded+1]=Workspace.CurrentCamera end
+  if LP.Character then excluded[#excluded+1]=LP.Character end
+  local currentOrigin=origin
+  local travelled=0
+  local firstHit=nil
+  local firstCharacter=nil
+  local chain={}
+  for index=1,6 do
+   local remaining=maxDistance-travelled
+   if remaining<=0.02 then break end
+   local params=RaycastParams.new()
+   params.FilterType=Enum.RaycastFilterType.Exclude
+   params.FilterDescendantsInstances=excluded
+   params.IgnoreWater=false
+   local ok,result=pcall(function() return Workspace:Raycast(currentOrigin,unit*remaining,params) end)
+   if not ok then out.error=tostring(result);return out end
+   if not result then break end
+   local hit=compactHit(result,origin)
+   hit.chainIndex=index
+   chain[#chain+1]=hit
+   if not firstHit then firstHit=hit end
+   if hit.hasHumanoid then firstCharacter=hit;break end
+   excluded[#excluded+1]=result.Instance
+   travelled=(result.Position-origin).Magnitude+0.03
+   currentOrigin=result.Position+unit*0.03
+  end
+  local candidate=nearestCandidate(origin,unit,maxDistance)
+  local td,lat,tp=targetProjection(origin,unit,targetModel)
+  local targetPath=targetModel and safePath(targetModel) or nil
+  out.ok=true
+  out.firstHit=firstHit
+  out.firstCharacter=firstCharacter
+  out.chain=chain
+  out.chainCount=#chain
+  out.nearestCandidate=candidate
+  out.targetProjectionDistance=td
+  out.targetLateralDistance=lat
+  out.targetRootPosition=vec(tp)
+  out.targetPath=targetPath
+  out.firstHitIsTarget=firstHit and firstHit.hasHumanoid and targetPath and firstHit.model==targetPath or false
+  out.chainFindsTarget=firstCharacter and targetPath and firstCharacter.model==targetPath or false
+  out.candidateEntryBeforeTarget=(candidate and td and td>candidate.entryDistance+0.05) or false
+  out.blockedBeforeTarget=(firstHit~=nil and not out.firstHitIsTarget and td~=nil and firstHit.distance<td-0.05) or false
+  return out
+ end
+
+ local function muzzleScore(inst)
+  if not inst then return 0 end
+  local n=string.lower(tostring(inst.Name or ""))
+  local score=0
+  if n=="muzzleattachment" or n=="muzzle" then score=120
+  elseif string.find(n,"muzzle",1,true) then score=110
+  elseif n=="firepoint" or n=="shootpoint" then score=100
+  elseif string.find(n,"firepoint",1,true) or string.find(n,"shootpoint",1,true) then score=95
+  elseif string.find(n,"fireattachment",1,true) or string.find(n,"shootorigin",1,true) or string.find(n,"shotorigin",1,true) then score=90
+  elseif string.find(n,"barrel",1,true) then score=75 end
+  if inst:IsA("Attachment") then score+=5 end
+  return score
+ end
+
+ local function resolveMuzzle(tool)
+  if not tool then return nil,"TOOL_AUSENTE" end
+  local best=nil
+  local bestScore=-1
+  for _,d in ipairs(tool:GetDescendants()) do
+   if d:IsA("Attachment") or d:IsA("BasePart") then
+    local sc=muzzleScore(d)
+    if sc>bestScore then best=d;bestScore=sc end
+   end
+  end
+  if best and bestScore>0 then return best,"SCORE_"..tostring(bestScore) end
+  return nil,"MUZZLE_NAO_ENCONTRADO"
+ end
+
+ local function resolveHandle(tool,muzzle)
+  if not tool then return nil,"TOOL_AUSENTE" end
+  local direct=tool:FindFirstChild("Handle")
+  if direct and direct:IsA("BasePart") then return direct,"DIRECT_TOOL_HANDLE" end
+  if muzzle then
+   local p=muzzle.Parent
+   if p and p:IsA("BasePart") then return p,"CANONICAL_MUZZLE_PARENT" end
+   local a=muzzle:FindFirstAncestorWhichIsA("BasePart")
+   if a then return a,"CANONICAL_MUZZLE_ANCESTOR" end
+  end
+  for _,d in ipairs(tool:GetDescendants()) do
+   if d:IsA("BasePart") and string.lower(d.Name)=="handle" then return d,"NESTED_NAMED_HANDLE" end
+  end
+  return nil,"HANDLE_NAO_ENCONTRADO"
+ end
+
+ local function originForward(inst)
+  if not inst then return nil,nil end
+  if inst:IsA("Attachment") then return inst.WorldPosition,inst.WorldAxis end
+  if inst:IsA("BasePart") then return inst.Position,inst.CFrame.LookVector end
+  return nil,nil
+ end
+
+ local function aimPointFor(shot,targetModel)
+  local ref=shot and shot.referenceRay
+  if not ref then return nil,"SEM_REFERENCE_RAY" end
+  local hit=ref.firstHit
+  if hit and hit.hasHumanoid==true and type(hit.position)=="table" then
+   return v3(hit.position),"REFERENCE_FIRST_CHARACTER_HIT"
+  end
+  local root=targetRoot(targetModel)
+  if root then return root.Position,"TARGET_ROOT" end
+  local origin=v3(ref.origin)
+  local direction=v3(ref.direction)
+  local range=tonumber(ref.range) or (direction and direction.Magnitude) or 0
+  if origin and direction and direction.Magnitude>0 then return origin+direction.Unit*range,"REFERENCE_RAY_END" end
+  return nil,"AIM_POINT_INDISPONIVEL"
+ end
+
+ local function hpEvidence(shot)
+  local p=shot and shot.damageProbe
+  if p then
+   local dmg=tonumber(p.observedDamage) or 0
+   if p.reliable==true and p.status=="QUEDA_DE_HP_OBSERVADA" and dmg>0.001 then return "HP_DAMAGE_RELIABLE",dmg end
+   if p.reliable==true and p.status=="SEM_QUEDA_DE_HP_OBSERVADA" then return "HP_NO_DROP_RELIABLE",0 end
+  end
+  local d=shot and shot.interShotHealthDelta
+  local inter=tonumber(d and d.observedDamage) or 0
+  if inter>0.001 then return "HP_DAMAGE_CORRELATED",inter end
+  return "HP_AMBIGUOUS",0
+ end
+
+ local function clientEvidence(shot)
+  local sync=shot and shot.noClipSync
+  if sync and sync.matched==true then
+   return sync.clientReachedCharacter==true,"NOCLIP_SHARED_BUS"
+  end
+  return shot and shot.clientPathStateV2312Hotfix=="CLIENTE_ATINGIU_ALVO","RESEARCH_FALLBACK"
+ end
+
+ local function attachStudy(shot,locked,tool)
+  if not shot or not shot.referenceRay then return end
+  local ref=shot.referenceRay
+  local refOrigin=v3(ref.origin)
+  local refDirection=v3(ref.direction)
+  if not refOrigin or not refDirection or refDirection.Magnitude<=0 then return end
+  local maxDistance=tonumber(ref.range) or refDirection.Magnitude
+  local targetModel=locked and locked.targetModel or nil
+  local muzzle,muzzleSource=resolveMuzzle(tool)
+  local handle,handleSource=resolveHandle(tool,muzzle)
+  local aimPoint,aimPointSource=aimPointFor(shot,targetModel)
+  local study={
+   observationalOnly=true,
+   warning="Nenhuma destas trajetorias e telemetria server-side; sao apenas hipoteses geometricas locais comparadas com HP observado.",
+   referenceOrigin=vec(refOrigin),referenceDirection=vec(refDirection.Unit),range=maxDistance,
+   aimPoint=vec(aimPoint),aimPointSource=aimPointSource,
+   muzzle={path=muzzle and safePath(muzzle) or nil,class=muzzle and muzzle.ClassName or nil,name=muzzle and muzzle.Name or nil,resolutionSource=muzzleSource},
+   handle={path=handle and safePath(handle) or nil,class=handle and handle.ClassName or nil,name=handle and handle.Name or nil,resolutionSource=handleSource},
+   variants={}
+  }
+  if muzzle then
+   local mOrigin,mAxis=originForward(muzzle)
+   if mOrigin and mAxis then
+    study.variants.MUZZLE_REFERENCE_DIRECTION=castVariant(mOrigin,refDirection,maxDistance,targetModel,"MUZZLE_REFERENCE_DIRECTION")
+    study.variants.MUZZLE_WORLD_AXIS=castVariant(mOrigin,mAxis,maxDistance,targetModel,"MUZZLE_WORLD_AXIS")
+    if aimPoint and (aimPoint-mOrigin).Magnitude>0.001 then
+     study.variants.MUZZLE_TO_AIM_POINT=castVariant(mOrigin,aimPoint-mOrigin,maxDistance,targetModel,"MUZZLE_TO_AIM_POINT")
+    end
+   end
+  end
+  if handle then
+   local hOrigin=handle.Position
+   local hLook=handle.CFrame.LookVector
+   study.variants.HANDLE_REFERENCE_DIRECTION=castVariant(hOrigin,refDirection,maxDistance,targetModel,"HANDLE_REFERENCE_DIRECTION")
+   study.variants.HANDLE_LOOK_VECTOR=castVariant(hOrigin,hLook,maxDistance,targetModel,"HANDLE_LOOK_VECTOR")
+   if aimPoint and (aimPoint-hOrigin).Magnitude>0.001 then
+    study.variants.HANDLE_TO_AIM_POINT=castVariant(hOrigin,aimPoint-hOrigin,maxDistance,targetModel,"HANDLE_TO_AIM_POINT")
+   end
+  end
+  local reached,authority=clientEvidence(shot)
+  local hp,damage=hpEvidence(shot)
+  study.clientReachedCharacter=reached
+  study.clientAuthority=authority
+  study.hpEvidenceAtCapture=hp
+  study.observedDamageAtCapture=damage
+  shot.serverPathHypothesesV2313=study
+  S.V2313Shots+=1
+ end
+
+ local oldStart=startDamageProbe
+ startDamageProbe=function(shot,locked,tool,shotToken)
+  local result=oldStart(shot,locked,tool,shotToken)
+  local ok,err=pcall(attachStudy,shot,locked,tool)
+  if not ok then
+   S.V2313Errors+=1
+   if shot then shot.serverPathHypothesesV2313Error=tostring(err) end
+  end
+  return result
+ end
+
+ local function summarize()
+  local variantNames={"MUZZLE_REFERENCE_DIRECTION","MUZZLE_WORLD_AXIS","MUZZLE_TO_AIM_POINT","HANDLE_REFERENCE_DIRECTION","HANDLE_LOOK_VECTOR","HANDLE_TO_AIM_POINT"}
+  local out={
+   shots=0,errors=S.V2313Errors or 0,localReachedHpDenied=0,localReachedHpDamageReliable=0,
+   localReachedHpDamageCorrelated=0,localReachedHpAmbiguous=0,freeControlDamageReliable=0,
+   barrierLocalReachedHpDenied=0,normalWallLocalReachedHpDenied=0,
+   variants={},evidenceMatrix={},byWeapon={}
+  }
+  for _,name in ipairs(variantNames) do
+   out.variants[name]={available=0,firstHitTarget=0,chainFindsTarget=0,candidateEntryBeforeTarget=0,blockedBeforeTarget=0,noHit=0,deniedButFirstHitTarget=0,deniedAndBlockedBeforeTarget=0}
+  end
+  for _,shot in ipairs(S.Shots) do
+   local study=shot.serverPathHypothesesV2313
+   if type(study)=="table" then
+    out.shots+=1
+    local reached=clientEvidence(shot)
+    local hp,damage=hpEvidence(shot)
+    study.hpEvidenceAtExport=hp
+    study.observedDamageAtExport=damage
+    study.clientReachedAtExport=reached==true
+    local evidence="LOCAL_NOT_REACHED_OR_UNKNOWN"
+    if reached then
+     if hp=="HP_NO_DROP_RELIABLE" then evidence="LOCAL_REACHED_HP_DENIED";out.localReachedHpDenied+=1
+     elseif hp=="HP_DAMAGE_RELIABLE" then evidence="LOCAL_REACHED_HP_DAMAGE_RELIABLE";out.localReachedHpDamageReliable+=1
+     elseif hp=="HP_DAMAGE_CORRELATED" then evidence="LOCAL_REACHED_HP_DAMAGE_CORRELATED";out.localReachedHpDamageCorrelated+=1
+     else evidence="LOCAL_REACHED_HP_AMBIGUOUS";out.localReachedHpAmbiguous+=1 end
+    end
+    study.evidenceClassAtExport=evidence
+    out.evidenceMatrix[evidence]=(out.evidenceMatrix[evidence] or 0)+1
+    local weapon=shot.weapon and shot.weapon.name or "?"
+    local wb=out.byWeapon[weapon] or {shots=0,denied=0,damageReliable=0}
+    wb.shots+=1
+    if evidence=="LOCAL_REACHED_HP_DENIED" then wb.denied+=1 end
+    if evidence=="LOCAL_REACHED_HP_DAMAGE_RELIABLE" then wb.damageReliable+=1 end
+    out.byWeapon[weapon]=wb
+    if shot.autoCategory=="ALVO_LIVRE" and evidence=="LOCAL_REACHED_HP_DAMAGE_RELIABLE" then out.freeControlDamageReliable+=1 end
+    if shot.barrierBetweenCameraAndTargetV2311==true and evidence=="LOCAL_REACHED_HP_DENIED" then out.barrierLocalReachedHpDenied+=1 end
+    if shot.normalWallBetweenTargetV2312==true and evidence=="LOCAL_REACHED_HP_DENIED" then out.normalWallLocalReachedHpDenied+=1 end
+    for _,name in ipairs(variantNames) do
+     local v=study.variants and study.variants[name]
+     local b=out.variants[name]
+     if v then
+      b.available+=1
+      if not v.firstHit then b.noHit+=1 end
+      if v.firstHitIsTarget then b.firstHitTarget+=1 end
+      if v.chainFindsTarget then b.chainFindsTarget+=1 end
+      if v.candidateEntryBeforeTarget then b.candidateEntryBeforeTarget+=1 end
+      if v.blockedBeforeTarget then b.blockedBeforeTarget+=1 end
+      if evidence=="LOCAL_REACHED_HP_DENIED" and v.firstHitIsTarget then b.deniedButFirstHitTarget+=1 end
+      if evidence=="LOCAL_REACHED_HP_DENIED" and v.blockedBeforeTarget then b.deniedAndBlockedBeforeTarget+=1 end
+     end
+    end
+   end
+  end
+  return out
+ end
+
+ local oldExport=exportTable
+ exportTable=function()
+  local data=oldExport()
+  data.version=C.VERSION
+  data.mode="SHOT_LOCK_NOCLIP_HP_PLUS_SERVER_PATH_HYPOTHESES_V2313"
+  data.openEndedResearch=data.openEndedResearch or {}
+  data.openEndedResearch.serverPathHypothesesV2313={
+   observationalOnly=true,
+   purpose="Comparar caminhos geometricos plausiveis (Muzzle/Handle/reference/WorldAxis/AimPoint) com o resultado local do NoClip e HP, sem afirmar acesso ao servidor.",
+   summary=summarize(),
+   variants={"MUZZLE_REFERENCE_DIRECTION","MUZZLE_WORLD_AXIS","MUZZLE_TO_AIM_POINT","HANDLE_REFERENCE_DIRECTION","HANDLE_LOOK_VECTOR","HANDLE_TO_AIM_POINT"},
+   inferenceLimits={
+    "NoClip clientReachedCharacter prova apenas que o raycast local medido pelo NoClip alcançou um personagem.",
+    "HP sem queda prova ausencia de dano observado; nao distingue se o servidor bloqueou na parede ou rejeitou o hit por outra regra.",
+    "Nenhum ray deste bloco e server-side telemetry.",
+    "MUZZLE_TO_AIM_POINT/HANDLE_TO_AIM_POINT testam apenas hipoteses geometricas de reconstrucao para o mesmo ponto de mira observado."
+   }
+  }
+  data.interpretationRules=data.interpretationRules or {}
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.13: LOCAL_REACHED_HP_DENIED significa caminho local do NoClip chegou ao alvo + HP confiavel sem queda; nao prova se o servidor viu a travessia ou se bloqueou/rejeitou antes do dano."
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.13: Muzzle WorldAxis, Muzzle->AimPoint, Handle LookVector e Handle->AimPoint sao hipoteses observacionais locais, nunca leitura direta do raycast do servidor."
+  return data
+ end
+
+ local oldReset=resetSession
+ resetSession=function()
+  oldReset()
+  S.V2313ServerPathHypotheses=true
+  S.V2313Shots=0
+  S.V2313Errors=0
+ end
+
+ local oldUI=updateUI
+ updateUI=function()
+  oldUI()
+  pcall(function()
+   Ver.Text=C.VERSION
+   Sub.Text="SHOT-LOCK + NOCLIP/HP + HIPOTESES MUZZLE/HANDLE"
+   Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.12","PESQUISA DE ARMAS V2.3.13")
+  end)
+ end
+ S.UIRefresh=updateUI
+ if type(ENV[RUNTIME_KEY])=="table" then ENV[RUNTIME_KEY].version=C.VERSION end
+
+ local exportOk,exportErr=pcall(function()
+  local previous=Export
+  local button=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+  round(button,8)
+  button.Activated:Connect(function()
+   if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+   if S.ExportBusy then Status.Text="Exportacao ja esta em andamento.";Status.TextColor3=COL.yellow;return end
+   if S.Recording then pauseSession("EXPORT") end
+   S.ExportBusy=true
+   Status.Text="Preparando JSON V2.3.13 • Muzzle/Handle/AimPoint + HP."
+   Status.TextColor3=COL.yellow
+   updateUI()
+   local sessionId=S.SessionId
+   task.spawn(function()
+    while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+    if not Gui.Parent or S.SessionId~=sessionId then return end
+    local data,encErr=encode()
+    if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+    local filename="Psicosenatico_WeaponResearch_V2_3_13_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+    local saved=false
+    if typeof(writefile)=="function" then saved=pcall(function() writefile(filename,data) end) end
+    if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..filename;Status.TextColor3=COL.green
+    elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+    else Status.Text="Nao foi possivel salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+    S.ExportBusy=false
+    updateUI()
+   end)
+  end)
+  if previous then pcall(function() previous:Destroy() end) end
+  Export=button
+ end)
+ if not exportOk then
+  S.V2313ExportUiError=tostring(exportErr)
+  pcall(function() log("ERROR",{where="V2.3.13.exportUi",message=tostring(exportErr)},"V2.3.13: export UI falhou; coleta preservada") end)
+ end
+
+ pcall(function() live("SISTEMA","V2.3.13 • hipoteses Muzzle/Handle/AimPoint ativas; somente leitura.") end)
+ pcall(updateUI)
+end)}
+
+if ENV.__PSICO_V2313_RESULT[1]~=true then
+ S.V2313InitError=tostring(ENV.__PSICO_V2313_RESULT[2])
+ error("PSICOSENATICO V2.3.13 init: "..S.V2313InitError)
+end
+
+event("V2313_SERVER_PATH_HYPOTHESES_READY",{observationalOnly=true,version=C.VERSION,playerOnlyUntouched=true})
