@@ -1,0 +1,26 @@
+-- V2.3.11/V2.3.12 RUNTIME PRE-BRIDGE
+-- Loaded BEFORE V2_3_11.structural_safe.patch.
+-- Prevents READY-marker calls from depending on an event() helper that may not exist
+-- in a fresh Research-only runtime. Gameplay/shot logic is not changed.
+
+if type(log)~="function" then
+ error("PSICOSENATICO Research prebridge: dependencia critica log() ausente")
+end
+
+if type(event)~="function" then
+ event=function(kind,data)
+  return log(kind,data,tostring(kind))
+ end
+end
+
+if type(event)~="function" then
+ error("PSICOSENATICO Research prebridge: nao foi possivel disponibilizar event()")
+end
+
+ENV.__PSICO_RESEARCH_RUNTIME_PREBRIDGE_READY=true
+log("RESEARCH_RUNTIME_PREBRIDGE_READY",{
+ beforeV2311=true,
+ eventAvailable=true,
+ mapsMissingEventTo="log",
+ structuralOnly=true
+},"Research prebridge • event/log compatibilidade pronta antes da V2.3.11")
