@@ -3,7 +3,7 @@
 -- Compatibility prebridge remains BEFORE V2.3.11; V2.3.12 dependencies remain gated explicitly.
 -- Runtime errors are mapped back to PART name + local line + assembled line.
 -- No gameplay/RemoteEvent/CollisionGroup changes are introduced by V2.3.13.
-local SOURCE_COMMIT="092edb35a582987718ab804336e5e9bd7b20e818"
+local SOURCE_COMMIT="036128e763640574b828a7789dfe2bd6e2e9dab2"
 local BASE="https://raw.githubusercontent.com/Psicosenatico/Aimbot/"..SOURCE_COMMIT.."/weapon_research_parts/"
 local PARTS={
     "V2_3_3.part1a",
@@ -33,7 +33,7 @@ local PARTS={
     "V2_3_12.origin_pipeline_structural_safe.patch",
     "V2_3_12.normal_wall_target_segment.patch",
     "V2_3_12.postrun_diagnostic_hotfix.patch",
-    "V2_3_13.server_path_hypotheses_structural_safe.patch"
+    "V2_3_13.server_path_hypotheses_v2_structural_safe.patch"
 }
 
 local function surfaceFailure(stage,msg)
@@ -111,14 +111,17 @@ end
 if not string.find(source,'V2312_POSTRUN_HOTFIX_READY',1,true) then
     error(surfaceFailure("PREFLIGHT","hotfix Handle/sync V2.3.12 ausente"))
 end
-if not string.find(source,'V2313_SERVER_PATH_HYPOTHESES_READY',1,true) then
-    error(surfaceFailure("PREFLIGHT","hipoteses Muzzle/Handle/AimPoint V2.3.13 ausentes"))
+if not string.find(source,'V2313_SERVER_PATH_HYPOTHESES_V2_READY',1,true) then
+    error(surfaceFailure("PREFLIGHT","hipoteses Muzzle/Handle/AimPoint V2.3.13 V2 ausentes"))
 end
 if string.find(source,'V2_3_11.barrier_segment_direction_team_export.patch',1,true) then
     error(surfaceFailure("PREFLIGHT","referência ao patch V2.3.11 antigo detectada"))
 end
 if string.find(source,'V2312_EVENT_BRIDGE_READY',1,true) then
     error(surfaceFailure("PREFLIGHT","bridge tardio antigo V2.3.12 ainda presente na montagem"))
+end
+if string.find(source,'V2313_SERVER_PATH_HYPOTHESES_READY',1,true) then
+    error(surfaceFailure("PREFLIGHT","patch V2.3.13 inicial incompleto ainda presente na montagem"))
 end
 if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_13_',1,true) then
     error(surfaceFailure("PREFLIGHT","nome físico de export V2_3_13 ausente"))
@@ -128,6 +131,9 @@ if not string.find(source,'PAREDE_COMUM_ATRAS_DO_ALVO',1,true) then
 end
 if not string.find(source,'MUZZLE_TO_AIM_POINT',1,true) or not string.find(source,'HANDLE_TO_AIM_POINT',1,true) then
     error(surfaceFailure("PREFLIGHT","variantes AimPoint V2.3.13 incompletas"))
+end
+if not string.find(source,'normalWallBetweenCameraAndTargetV2312',1,true) then
+    error(surfaceFailure("PREFLIGHT","campo corrigido de parede comum V2.3.12 não utilizado"))
 end
 
 local compiler=loadstring
