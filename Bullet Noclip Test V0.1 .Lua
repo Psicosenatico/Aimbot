@@ -1,9 +1,10 @@
--- PSICOSENATICO • BULLET NOCLIP TEST V0.16 • PHYSICAL SAFE + 429 RESILIENCE
+-- PSICOSENATICO • BULLET NOCLIP TEST V0.17 • RAYEXCLUDE SAFE + 429 RESILIENCE
 -- Functional rule: traverse all Workspace geometry except Workspace.Tycoons; humanoid parts remain targets.
--- V0.16 intentionally does NOT load V0.15 physical corridor suppression.
+-- V0.17 preserves V0.16 physical safety and tests the existing game tag RayExclude without changing CanCollide/CanQuery.
+-- V0.15 physical corridor remains intentionally excluded.
 -- Stable main loader; internal parts are pinned to an immutable SOURCE_COMMIT.
 
-local SOURCE_COMMIT="0983897fe09692d56ec2eca81733a2fda809eb38"
+local SOURCE_COMMIT="795d7e85984eae6139c00e6836f8dfd3233d49e6"
 local REPO_PATH="Psicosenatico/Aimbot"
 local PART_DIR="bullet_noclip_test_parts/"
 local BASES={
@@ -31,10 +32,11 @@ local PARTS={
     "V0_12.barrier_segment_direction_team.patch",
     "V0_13.normal_wall_target_segment.patch",
     "V0_14.all_non_tycoon_geometry.patch",
-    "V0_16.physical_safe_no_character_noclip.patch"
+    "V0_16.physical_safe_no_character_noclip.patch",
+    "V0_17.rayexclude_safe_attempt.patch"
 }
 
-local BOOT_VERSION="V0.16"
+local BOOT_VERSION="V0.17"
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 ENV.__PSICO_NOCLIP_PART_CACHE=type(ENV.__PSICO_NOCLIP_PART_CACHE)=="table" and ENV.__PSICO_NOCLIP_PART_CACHE or {}
 local CACHE=ENV.__PSICO_NOCLIP_PART_CACHE
@@ -43,11 +45,7 @@ local function surfaceFailure(stage,msg)
     local text="Bullet NoClip "..BOOT_VERSION.." • "..tostring(stage)..": "..tostring(msg)
     pcall(function() warn("PSICOSENATICO • "..text) end)
     pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification",{
-            Title="PSICOSENATICO Bullet NoClip",
-            Text=text,
-            Duration=12
-        })
+        game:GetService("StarterGui"):SetCore("SendNotification",{Title="PSICOSENATICO Bullet NoClip",Text=text,Duration=12})
     end)
     return text
 end
@@ -76,30 +74,25 @@ local function fetchPart(name,index)
             end
             lastErr=tostring(body)
             local low=string.lower(lastErr)
-            if string.find(low,"429",1,true) or string.find(low,"too many requests",1,true) then
-                task.wait(waits[attempt])
-            else
-                task.wait(math.min(0.18*attempt,0.55))
-            end
+            if string.find(low,"429",1,true) or string.find(low,"too many",1,true) then task.wait(waits[attempt])
+            else task.wait(math.min(0.18*attempt,0.55)) end
         end
     end
     error(surfaceFailure("CARREGAMENTO","parte "..tostring(index).." ("..name.."): "..lastErr.." • CDN+RAW esgotados"))
 end
 
 local chunks={}
-for i,name in ipairs(PARTS) do
-    local body=fetchPart(name,i)
-    chunks[i]=body
-end
-
+for i,name in ipairs(PARTS) do chunks[i]=fetchPart(name,i) end
 local source=table.concat(chunks,"\n")
-if not string.find(source,'C.VERSION="V0.16"',1,true) then error(surfaceFailure("PREFLIGHT","versão V0.16 ausente")) end
+
+if not string.find(source,'C.VERSION="V0.17"',1,true) then error(surfaceFailure("PREFLIGHT","versão V0.17 ausente")) end
 if not string.find(source,'V014_ALL_NON_TYCOON_READY',1,true) then error(surfaceFailure("PREFLIGHT","base V0.14 ausente")) end
-if not string.find(source,'V016_PHYSICAL_SAFE_READY',1,true) then error(surfaceFailure("PREFLIGHT","patch V0.16 ausente")) end
+if not string.find(source,'V016_PHYSICAL_SAFE_READY',1,true) then error(surfaceFailure("PREFLIGHT","base física V0.16 ausente")) end
+if not string.find(source,'V017_RAYEXCLUDE_SAFE_READY',1,true) then error(surfaceFailure("PREFLIGHT","patch RayExclude V0.17 ausente")) end
 if string.find(source,'V015_UNIVERSAL_RAY_CORRIDOR_READY',1,true) then error(surfaceFailure("PREFLIGHT","V0.15 física foi carregada indevidamente")) end
-if not string.find(source,'writesCanCollide=false',1,true) then error(surfaceFailure("PREFLIGHT","garantia CanCollide ausente")) end
-if not string.find(source,'writesCanQuery=false',1,true) then error(surfaceFailure("PREFLIGHT","garantia CanQuery ausente")) end
-if not string.find(source,'Psicosenatico_BulletNoclip_Test_V0_16_',1,true) then error(surfaceFailure("PREFLIGHT","export V0.16 ausente")) end
+if not string.find(source,'writesCanCollide=false',1,true) or not string.find(source,'writesCanQuery=false',1,true) then error(surfaceFailure("PREFLIGHT","garantia física ausente")) end
+if not string.find(source,'rayExcludeTag="RayExclude"',1,true) then error(surfaceFailure("PREFLIGHT","marcador RayExclude ausente")) end
+if not string.find(source,'Psicosenatico_BulletNoclip_Test_V0_17_',1,true) then error(surfaceFailure("PREFLIGHT","export V0.17 ausente")) end
 
 local compiler=loadstring
 if type(compiler)~="function" then error(surfaceFailure("COMPILADOR","loadstring indisponível neste ambiente")) end
@@ -107,10 +100,7 @@ local fn,compileErr=compiler(source)
 if not fn then error(surfaceFailure("COMPILAÇÃO",compileErr)) end
 local okRun,result=xpcall(fn,function(e)
     local base=tostring(e)
-    local okTrace,trace=pcall(function()
-        if debug and type(debug.traceback)=="function" then return debug.traceback(base,2) end
-        return base
-    end)
+    local okTrace,trace=pcall(function() if debug and type(debug.traceback)=="function" then return debug.traceback(base,2) end return base end)
     return okTrace and trace or base
 end)
 if not okRun then error(surfaceFailure("RUNTIME ANTES/NA INICIALIZAÇÃO",result)) end
