@@ -3,7 +3,7 @@
 -- Runtime: CDN primária + GitHub Raw fallback + cache por sessão + retry progressivo.
 -- V2.3.16 corrige sync NoClip por sequência e alinha a política funcional: somente Workspace.Tycoons protegido.
 
-local SOURCE_COMMIT="f584dcc266215a1989a10990cc4932b8b797d562"
+local SOURCE_COMMIT="aa68b1f97cac2f33ef93b5b292cec525f37897e4"
 local REPO_PATH="Psicosenatico/Aimbot"
 local PART_DIR="weapon_research_parts/"
 local BASES={
@@ -18,7 +18,7 @@ local PARTS={
     "V2_3_11_12.runtime_prebridge.patch","V2_3_11.structural_safe.patch","V2_3_12.dependency_gate.patch","V2_3_12.origin_pipeline_structural_safe.patch",
     "V2_3_12.normal_wall_target_segment.patch","V2_3_12.postrun_diagnostic_hotfix.patch","V2_3_13.server_path_hypotheses_v2_structural_safe.patch",
     "V2_3_14.causal_hp_original_geometry_proxy_structural_safe.patch","V2_3_15.temporal_stability_gate_structural_safe.patch",
-    "V2_3_16.sync_repair_functional_policy_structural_safe.patch","V2_3_16b.sync_capture_hotfix.patch"
+    "V2_3_16.sync_repair_functional_policy_structural_safe.patch","V2_3_16b.sync_capture_hotfix.patch","V2_3_16c.final_sync_export_restore.patch"
 }
 
 local BOOT_VERSION="V2.3.16"
@@ -98,10 +98,12 @@ if not string.find(source,'V2314_CAUSAL_HP_ORIGINAL_GEOMETRY_READY',1,true) then
 if not string.find(source,'V2315_TEMPORAL_STABILITY_GATE_READY',1,true) then error(surfaceFailure("PREFLIGHT","V2.3.15 ausente")) end
 if not string.find(source,'V2316_ROBUST_SYNC_POLICY_READY',1,true) then error(surfaceFailure("PREFLIGHT","V2.3.16 ausente")) end
 if not string.find(source,'V2316B_SYNC_CAPTURE_HOTFIX_READY',1,true) then error(surfaceFailure("PREFLIGHT","hotfix de captura V2.3.16B ausente")) end
+if not string.find(source,'V2316C_FINAL_SYNC_EXPORT_READY',1,true) then error(surfaceFailure("PREFLIGHT","restauração final V2.3.16C ausente")) end
 if string.find(source,'V2313_SERVER_PATH_HYPOTHESES_READY',1,true) then error(surfaceFailure("PREFLIGHT","V2.3.13 inicial incompleto detectado")) end
 if not string.find(source,'SEQUENCE_SCORED_MONOTONIC_OFFSET',1,true) then error(surfaceFailure("PREFLIGHT","sync robusto V2.3.16 ausente")) end
 if not string.find(source,'ONLY_WORKSPACE_TYCOONS_PROTECTED',1,true) then error(surfaceFailure("PREFLIGHT","política Tycoon-only ausente")) end
 if not string.find(source,'SEQUENCE_SCORED_OFFSET_MULTI_RETURN_FIXED',1,true) then error(surfaceFailure("PREFLIGHT","hotfix multi-return V2.3.16B ausente")) end
+if not string.find(source,'FINAL_POST_WRAPPER_SYNC_RESTORE',1,true) then error(surfaceFailure("PREFLIGHT","autoridade final de sync V2.3.16C ausente")) end
 if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_16_',1,true) then error(surfaceFailure("PREFLIGHT","export V2.3.16 ausente")) end
 if not string.find(source,'normalWallBetweenCameraAndTargetV2312',1,true) then error(surfaceFailure("PREFLIGHT","campo parede corrigido ausente")) end
 if not string.find(source,'QUEDA_HP_CONFIAVEL_COMPATIVEL_COM_ARMA',1,true) then error(surfaceFailure("PREFLIGHT","HP causal ausente")) end
