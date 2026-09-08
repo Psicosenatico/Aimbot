@@ -1,0 +1,202 @@
+-- V2.3.16B SYNC CAPTURE HOTFIX
+-- Corrects multi-return capture in the first V2.3.16 patch and avoids re-scoring the whole
+-- sequence on every shot after the offset is stable. Keeps version V2.3.16.
+
+C.VERSION="V2.3.16"
+S.V2316BHotfix=true
+S.V2316BMatches=0
+S.V2316BMisses=0
+S.V2316BOffset=nil
+S.V2316BRunId=nil
+S.V2316BScore=nil
+
+ENV.__PSICO_V2316B_RESULT={pcall(function()
+ if type(currentBusV2310)~="function" then error("V2.3.16B dependency ausente: currentBusV2310") end
+ if type(sameWeaponV2310)~="function" then error("V2.3.16B dependency ausente: sameWeaponV2310") end
+ if type(applyRelativeSyncV2310)~="function" then error("V2.3.16B dependency ausente: applyRelativeSyncV2310") end
+ if type(exportTable)~="function" then error("V2.3.16B dependency ausente: exportTable") end
+
+ C.NOCLIP_SYNC_MAX_DT=0.110
+
+ local function rindex(r)
+  return tonumber(r and (r.noClipShotIndex or r.shotIndex))
+ end
+
+ local function exactRecord(shot,bus,offset)
+  local si=tonumber(shot and shot.shotIndex)
+  local st=tonumber(shot and shot.time)
+  if not si or not st then return nil,nil end
+  local expected=si+offset
+  local best=nil
+  local bestDt=math.huge
+  for i=#bus.records,1,-1 do
+   local r=bus.records[i]
+   local ri=rindex(r)
+   local rt=tonumber(r and r.time)
+   if ri and rt and ri==expected and sameWeaponV2310(shot,r) then
+    local dt=math.abs(rt-st)
+    if dt<=C.NOCLIP_SYNC_MAX_DT and dt<bestDt then best=r;bestDt=dt end
+   end
+  end
+  return best,best and bestDt or nil
+ end
+
+ local function candidateSet(bus)
+  local set={}
+  for _,shot in ipairs(S.Shots) do
+   local si=tonumber(shot and shot.shotIndex)
+   local st=tonumber(shot and shot.time)
+   if si and st then
+    for _,r in ipairs(bus.records) do
+     local ri=rindex(r)
+     local rt=tonumber(r and r.time)
+     if ri and rt and sameWeaponV2310(shot,r) and math.abs(rt-st)<=C.NOCLIP_SYNC_MAX_DT then
+      local off=ri-si
+      if off>=-64 and off<=64 then set[off]=true end
+     end
+    end
+   end
+  end
+  return set
+ end
+
+ local function score(bus,off)
+  local matches=0
+  local total=0
+  local maxDt=0
+  for _,shot in ipairs(S.Shots) do
+   local r,dt=exactRecord(shot,bus,off)
+   if r and dt then
+    matches+=1
+    total+=dt
+    if dt>maxDt then maxDt=dt end
+   end
+  end
+  return {offset=off,matches=matches,meanDt=matches>0 and total/matches or math.huge,maxDt=maxDt}
+ end
+
+ local function choose(bus)
+  local scores={}
+  for off,_ in pairs(candidateSet(bus)) do scores[#scores+1]=score(bus,off) end
+  table.sort(scores,function(a,b)
+   if a.matches~=b.matches then return a.matches>b.matches end
+   if math.abs(a.meanDt-b.meanDt)>1e-7 then return a.meanDt<b.meanDt end
+   return math.abs(a.offset)<math.abs(b.offset)
+  end)
+  local a=scores[1]
+  local b=scores[2]
+  if not a or a.matches==0 then return nil,"SEM_OFFSET" end
+  if #S.Shots==1 and #scores>1 then return nil,"AGUARDANDO_SEGUNDO_TIRO" end
+  if #S.Shots>1 and a.matches<2 then return nil,"SUPORTE_INSUFICIENTE" end
+  if b and a.matches==b.matches and math.abs(a.meanDt-b.meanDt)<0.008 then return nil,"OFFSET_AMBIGUO" end
+  return a,nil
+ end
+
+ local function ensureOffset(bus,force)
+  if not force and S.V2316BRunId==bus.ownerRunId and S.V2316BOffset~=nil then
+   local current=score(bus,S.V2316BOffset)
+   S.V2316BScore=current
+   return current,nil
+  end
+  local best,why=choose(bus)
+  if not best then return nil,why end
+  local changed=S.V2316BRunId~=bus.ownerRunId or S.V2316BOffset~=best.offset
+  S.V2316BRunId=bus.ownerRunId
+  S.V2316BOffset=best.offset
+  S.V2316BScore=best
+  S.NoClipRelativeOffset=best.offset
+  S.NoClipRelativeOffsetRunId=bus.ownerRunId
+  if changed then
+   pcall(function() log("NOCLIP_OFFSET_V2316B_SELECTED",{offset=best.offset,matches=best.matches,meanDt=best.meanDt,maxDt=best.maxDt,runId=bus.ownerRunId},"V2.3.16B offset robusto: "..tostring(best.offset)) end)
+  end
+  return best,nil
+ end
+
+ attachNoClipSyncV239=function(shot,countStats)
+  if not shot then return nil end
+  local bus=currentBusV2310()
+  if not bus then
+   shot.noClipSync={matched=false,source="NOCLIP_BUS_INDISPONIVEL_V2316B"}
+   if countStats then S.V2316BMisses+=1 end
+   return shot.noClipSync
+  end
+  if S.V2316BRunId~=bus.ownerRunId then S.V2316BOffset=nil;S.V2316BRunId=bus.ownerRunId end
+  local best,why=ensureOffset(bus,false)
+  if not best then
+   shot.noClipSync={matched=false,source=why or "OFFSET_V2316B_NAO_ESTAVEL",runId=bus.ownerRunId,maxDelta=C.NOCLIP_SYNC_MAX_DT}
+   if countStats then S.V2316BMisses+=1 end
+   return shot.noClipSync
+  end
+  local r,dt=exactRecord(shot,bus,best.offset)
+  if r and dt then
+   local sync=applyRelativeSyncV2310(shot,r,dt,best.offset)
+   sync.source="BULLET_NOCLIP_SEQUENCE_SCORED_OFFSET_V2316B"
+   sync.offsetScoreMatches=best.matches
+   sync.offsetScoreMeanDt=best.meanDt
+   if countStats then S.V2316BMatches+=1 end
+   return sync
+  end
+  shot.noClipSync={matched=false,source="V2316B_RECORD_NOT_AVAILABLE_YET",runId=bus.ownerRunId,indexOffset=best.offset,maxDelta=C.NOCLIP_SYNC_MAX_DT}
+  if countStats then S.V2316BMisses+=1 end
+  return shot.noClipSync
+ end
+
+ local function reconcile()
+  local bus=currentBusV2310()
+  if not bus then return {matches=0,misses=#S.Shots,reason="SEM_BUS"} end
+  local best,why=ensureOffset(bus,true)
+  if not best then return {matches=0,misses=#S.Shots,reason=why} end
+  local matches=0
+  local misses=0
+  local maxDt=0
+  for _,shot in ipairs(S.Shots) do
+   local r,dt=exactRecord(shot,bus,best.offset)
+   if r and dt then
+    local sync=applyRelativeSyncV2310(shot,r,dt,best.offset)
+    sync.source="BULLET_NOCLIP_SEQUENCE_SCORED_OFFSET_V2316B"
+    sync.offsetScoreMatches=best.matches
+    sync.offsetScoreMeanDt=best.meanDt
+    shot.noClipSyncV2316B=sync
+    matches+=1
+    if dt>maxDt then maxDt=dt end
+   else
+    shot.noClipSyncV2316B={matched=false,source="V2316B_EXPORT_MISS",indexOffset=best.offset}
+    misses+=1
+   end
+  end
+  S.V2316BMatches=matches
+  S.V2316BMisses=misses
+  return {matches=matches,misses=misses,offset=best.offset,meanDt=best.meanDt,maxDt=maxDt,scoreMatches=best.matches,runId=bus.ownerRunId}
+ end
+
+ local oldExport=exportTable
+ exportTable=function()
+  local corrected=reconcile()
+  local data=oldExport()
+  data.version=C.VERSION
+  data.openEndedResearch=data.openEndedResearch or {}
+  data.openEndedResearch.noClipRuntimeSyncV2316B={
+   authority="SEQUENCE_SCORED_OFFSET_MULTI_RETURN_FIXED",
+   summary=corrected,
+   fixes="Captura record+deltaTime corretamente e mantém score estável após aprender offset; reavalia globalmente no export.",
+   supersedesInitialV2316SyncBlock=true
+  }
+  if type(data.openEndedResearch.noClipRuntimeSyncV2316)=="table" then
+   data.openEndedResearch.noClipRuntimeSyncV2316.correctedBy="noClipRuntimeSyncV2316B"
+  end
+  return data
+ end
+
+ local oldReset=resetSession
+ resetSession=function()
+  oldReset()
+  S.V2316BMatches=0
+  S.V2316BMisses=0
+  S.V2316BOffset=nil
+  S.V2316BRunId=nil
+  S.V2316BScore=nil
+ end
+end)}
+
+if ENV.__PSICO_V2316B_RESULT[1]~=true then error("PSICOSENATICO V2.3.16B sync hotfix: "..tostring(ENV.__PSICO_V2316B_RESULT[2])) end
+event("V2316B_SYNC_CAPTURE_HOTFIX_READY",{version=C.VERSION,multiReturnFixed=true,sequenceScoredOffset=true,exportReconciliation=true})
