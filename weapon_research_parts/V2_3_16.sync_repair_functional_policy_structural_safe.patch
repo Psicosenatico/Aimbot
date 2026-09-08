@@ -1,0 +1,317 @@
+-- V2.3.16 ROBUST NOCLIP SYNC + FUNCTIONAL POLICY ALIGNMENT • STRUCTURAL SAFE
+-- Fixes a V2.3.10 failure mode seen in V0.16: a fast MK48 burst could teach offset +1 even
+-- when Research and NoClip shot streams actually had the same indices. Offset is now chosen
+-- by scoring the whole monotonic shot sequence, not by one 15 ms anchor.
+-- Also aligns exported functional policy with the project rule: ONLY Workspace.Tycoons is protected.
+
+C.VERSION="V2.3.16"
+S.V2316SyncRepair=true
+S.V2316SyncErrors=0
+S.V2316OffsetCandidates=0
+S.V2316OffsetScore=nil
+S.V2316RepairedMatches=0
+S.V2316RepairedMisses=0
+S.V2316PolicyAligned=true
+
+ENV.__PSICO_V2316_RESULT={pcall(function()
+ if S==nil then error("V2.3.16 dependency ausente: S") end
+ if C==nil then error("V2.3.16 dependency ausente: C") end
+ if ENV==nil then error("V2.3.16 dependency ausente: ENV") end
+ if type(exportTable)~="function" then error("V2.3.16 dependency ausente: exportTable") end
+ if type(updateUI)~="function" then error("V2.3.16 dependency ausente: updateUI") end
+ if type(resetSession)~="function" then error("V2.3.16 dependency ausente: resetSession") end
+ if type(currentBusV2310)~="function" then error("V2.3.16 dependency ausente: currentBusV2310") end
+ if type(sameWeaponV2310)~="function" then error("V2.3.16 dependency ausente: sameWeaponV2310") end
+ if type(applyRelativeSyncV2310)~="function" then error("V2.3.16 dependency ausente: applyRelativeSyncV2310") end
+ if type(new)~="function" or type(round)~="function" or type(pauseSession)~="function" or type(encode)~="function" then error("V2.3.16 dependencias UI/export incompletas") end
+
+ C.NOCLIP_SYNC_MAX_DT=0.110
+
+ local function recordIndexV2316(r)
+  return tonumber(r and (r.noClipShotIndex or r.shotIndex))
+ end
+
+ local function recordForExpectedV2316(shot,bus,expected)
+  local st=tonumber(shot and shot.time)
+  if not st then return nil,nil end
+  local best=nil
+  local bestDt=math.huge
+  for i=#bus.records,1,-1 do
+   local r=bus.records[i]
+   local ri=recordIndexV2316(r)
+   local rt=tonumber(r and r.time)
+   if ri and rt and ri==expected and sameWeaponV2310(shot,r) then
+    local dt=math.abs(rt-st)
+    if dt<=C.NOCLIP_SYNC_MAX_DT and dt<bestDt then best=r;bestDt=dt end
+   end
+  end
+  return best,best and bestDt or nil
+ end
+
+ local function candidateOffsetsV2316(bus)
+  local set={}
+  local count=0
+  for _,shot in ipairs(S.Shots) do
+   local si=tonumber(shot and shot.shotIndex)
+   local st=tonumber(shot and shot.time)
+   if si and st then
+    for i=#bus.records,1,-1 do
+     local r=bus.records[i]
+     local ri=recordIndexV2316(r)
+     local rt=tonumber(r and r.time)
+     if ri and rt and sameWeaponV2310(shot,r) then
+      local dt=math.abs(rt-st)
+      if dt<=C.NOCLIP_SYNC_MAX_DT then
+       local off=ri-si
+       if off>=-64 and off<=64 and not set[off] then set[off]=true;count+=1 end
+      end
+     end
+    end
+   end
+  end
+  S.V2316OffsetCandidates=count
+  return set
+ end
+
+ local function scoreOffsetV2316(bus,offset)
+  local matches=0
+  local totalDt=0
+  local maxDt=0
+  for _,shot in ipairs(S.Shots) do
+   local si=tonumber(shot and shot.shotIndex)
+   if si then
+    local r,dt=recordForExpectedV2316(shot,bus,si+offset)
+    if r and dt then
+     matches+=1
+     totalDt+=dt
+     if dt>maxDt then maxDt=dt end
+    end
+   end
+  end
+  return {offset=offset,matches=matches,totalDt=totalDt,meanDt=matches>0 and totalDt/matches or math.huge,maxDt=maxDt}
+ end
+
+ local function chooseOffsetV2316(bus)
+  if not bus or type(bus.records)~="table" or #bus.records==0 or #S.Shots==0 then return nil,"SEM_DADOS" end
+  local set=candidateOffsetsV2316(bus)
+  local scores={}
+  for off,_ in pairs(set) do scores[#scores+1]=scoreOffsetV2316(bus,off) end
+  table.sort(scores,function(a,b)
+   if a.matches~=b.matches then return a.matches>b.matches end
+   if math.abs(a.meanDt-b.meanDt)>1e-7 then return a.meanDt<b.meanDt end
+   return math.abs(a.offset)<math.abs(b.offset)
+  end)
+  local best=scores[1]
+  local second=scores[2]
+  if not best or best.matches==0 then return nil,"SEM_OFFSET_COMPATIVEL" end
+  if #S.Shots==1 then
+   if #scores==1 then return best,nil end
+   return nil,"AGUARDANDO_SEGUNDO_TIRO"
+  end
+  if best.matches<2 then return nil,"SUPORTE_INSUFICIENTE" end
+  if second and best.matches==second.matches and math.abs(best.meanDt-second.meanDt)<0.008 then
+   return nil,"OFFSET_AMBIGUO"
+  end
+  return best,nil
+ end
+
+ local function installOffsetV2316(bus,reason)
+  local best,why=chooseOffsetV2316(bus)
+  if not best then return nil,why end
+  local changed=S.NoClipRelativeOffset~=best.offset or S.NoClipRelativeOffsetRunId~=bus.ownerRunId
+  S.NoClipRelativeOffset=best.offset
+  S.NoClipRelativeOffsetRunId=bus.ownerRunId
+  S.V2316OffsetScore=best
+  if changed then
+   pcall(function() log("NOCLIP_OFFSET_V2316_SELECTED",{offset=best.offset,matches=best.matches,meanDt=best.meanDt,maxDt=best.maxDt,reason=reason,runId=bus.ownerRunId},"V2.3.16 selecionou offset robusto: "..tostring(best.offset)) end)
+  end
+  return best,nil
+ end
+
+ attachNoClipSyncV239=function(shot,countStats)
+  if not shot then return nil end
+  local bus=currentBusV2310()
+  if not bus then
+   shot.noClipSync={matched=false,source="NOCLIP_BUS_INDISPONIVEL_V2316"}
+   if countStats then S.NoClipRelativeSyncMisses+=1 end
+   return shot.noClipSync
+  end
+  if S.NoClipRelativeOffsetRunId~=bus.ownerRunId then
+   S.NoClipRelativeOffset=nil
+   S.NoClipRelativeOffsetRunId=bus.ownerRunId
+  end
+  local best,why=installOffsetV2316(bus,"LIVE")
+  if not best then
+   shot.noClipSync={matched=false,source=why or "OFFSET_V2316_AINDA_NAO_ESTAVEL",runId=bus.ownerRunId,maxDelta=C.NOCLIP_SYNC_MAX_DT}
+   if countStats then S.NoClipRelativeSyncMisses+=1 end
+   return shot.noClipSync
+  end
+  local si=tonumber(shot.shotIndex)
+  local r,dt=si and recordForExpectedV2316(shot,bus,si+best.offset) or nil,nil
+  if r then
+   local sync=applyRelativeSyncV2310(shot,r,dt,best.offset)
+   sync.source="BULLET_NOCLIP_SEQUENCE_SCORED_OFFSET_V2316"
+   sync.offsetScoreMatches=best.matches
+   sync.offsetScoreMeanDt=best.meanDt
+   if countStats then S.NoClipRelativeSyncMatches+=1 end
+   return sync
+  end
+  shot.noClipSync={matched=false,source="V2316_EXPECTED_RECORD_NOT_AVAILABLE_YET",runId=bus.ownerRunId,indexOffset=best.offset,expectedNoClipShotIndex=si and si+best.offset or nil,maxDelta=C.NOCLIP_SYNC_MAX_DT}
+  if countStats then S.NoClipRelativeSyncMisses+=1 end
+  return shot.noClipSync
+ end
+
+ local function reconcileAllV2316()
+  local bus=currentBusV2310()
+  if not bus then return {matches=0,misses=#S.Shots,reason="SEM_BUS"} end
+  local best,why=installOffsetV2316(bus,"EXPORT")
+  if not best then return {matches=0,misses=#S.Shots,reason=why} end
+  local matches=0
+  local misses=0
+  local maxDt=0
+  for _,shot in ipairs(S.Shots) do
+   local si=tonumber(shot.shotIndex)
+   local rr,dt=si and recordForExpectedV2316(shot,bus,si+best.offset) or nil,nil
+   if rr then
+    local sync=applyRelativeSyncV2310(shot,rr,dt,best.offset)
+    sync.source="BULLET_NOCLIP_SEQUENCE_SCORED_OFFSET_V2316"
+    sync.offsetScoreMatches=best.matches
+    sync.offsetScoreMeanDt=best.meanDt
+    shot.noClipSyncV2316=sync
+    matches+=1
+    if dt and dt>maxDt then maxDt=dt end
+   else
+    shot.noClipSyncV2316={matched=false,indexOffset=best.offset,expectedNoClipShotIndex=si and si+best.offset or nil,source="V2316_EXPORT_MISS"}
+    misses+=1
+   end
+  end
+  S.V2316RepairedMatches=matches
+  S.V2316RepairedMisses=misses
+  return {matches=matches,misses=misses,offset=best.offset,meanDt=best.meanDt,maxDt=maxDt,scoreMatches=best.matches,candidateOffsets=S.V2316OffsetCandidates,runId=bus.ownerRunId}
+ end
+
+ local function tycoonBeforeTargetV2316(shot)
+  local ray=shot and shot.referenceRay
+  local chain=ray and ray.chain
+  if type(chain)~="table" then return false,nil end
+  for _,h in ipairs(chain) do
+   if h and h.hasHumanoid==true then break end
+   local p=tostring(h and (h.path or h.instance) or "")
+   if string.sub(p,1,18)=="Workspace.Tycoons." then return true,p end
+  end
+  return false,nil
+ end
+
+ local oldExport=exportTable
+ exportTable=function()
+  local syncSummary=reconcileAllV2316()
+  for _,shot in ipairs(S.Shots) do
+   local protected,path=tycoonBeforeTargetV2316(shot)
+   shot.functionalPolicyV2316={
+    rule="ONLY_WORKSPACE_TYCOONS_PROTECTED",
+    tycoonBeforeTarget=protected,
+    tycoonPath=path,
+    legacyCategoryDiagnosticOnly=true,
+    nonTycoonGeometryAction="ATRAVESSAR"
+   }
+  end
+  local data=oldExport()
+  data.version=C.VERSION
+  data.mode="SHOT_LOCK_NOCLIP_HP_CAUSAL_TEMPORAL_PLUS_ROBUST_SYNC_FUNCTIONAL_POLICY_V2316"
+  data.openEndedResearch=data.openEndedResearch or {}
+  data.openEndedResearch.noClipRuntimeSyncV2316={
+   authority="SEQUENCE_SCORED_MONOTONIC_OFFSET",
+   summary=syncSummary,
+   maxDelta=C.NOCLIP_SYNC_MAX_DT,
+   rule="Escolhe o offset que maximiza matches monotônicos de índice+arma+tempo em toda a sequência; uma rajada rápida isolada não pode ensinar offset por uma única âncora temporal.",
+   legacyV2310SingleAnchorDeprecated=true
+  }
+  data.legacyWallPenetrationPolicyBeforeV2316=data.wallPenetrationPolicy
+  data.wallPenetrationPolicy={
+   mode="ALL_NON_TYCOON_EXCEPT_BASE_V2316",
+   baseScope="Workspace.Tycoons",
+   baseAction="PROTEGIDO_NAO_ATRAVESSAR",
+   nonTycoonAction="ATRAVESSAR",
+   functionalAuthority="Somente geometria descendente de Workspace.Tycoons permanece protegida. Ground, Mountain, TerrainPart Parts, CombatObstacles, TeamColors/Spawn, paredes e geometria genérica fora do Tycoon são atravessáveis para o Bullet NoClip.",
+   diagnosticCategoriesOnly=true,
+   notes={
+    "Categorias antigas de mapa/terreno permanecem apenas para diagnóstico histórico e não controlam o NoClip.",
+    "Workspace.Tycoons é a única exceção estrutural funcional.",
+    "Terrain voxel real não é BasePart e continua fora do mecanismo CollisionGroup atual."
+   }
+  }
+  data.interpretationRules=data.interpretationRules or {}
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.16: política funcional corrigida — somente Workspace.Tycoons é protegido; classificações antigas de Ground/Mountain/Map são diagnósticas."
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.16: sync NoClip usa score da sequência inteira; offset de uma única âncora em rajada rápida é legado e não é mais autoridade."
+  return data
+ end
+
+ local oldReset=resetSession
+ resetSession=function()
+  oldReset()
+  S.V2316SyncErrors=0
+  S.V2316OffsetCandidates=0
+  S.V2316OffsetScore=nil
+  S.V2316RepairedMatches=0
+  S.V2316RepairedMisses=0
+  S.V2316PolicyAligned=true
+ end
+
+ local oldUI=updateUI
+ updateUI=function()
+  oldUI()
+  pcall(function()
+   Ver.Text=C.VERSION
+   Sub.Text="SYNC ROBUSTO + SOMENTE TYCOON PROTEGIDO"
+   Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.15","PESQUISA DE ARMAS V2.3.16")
+  end)
+ end
+ S.UIRefresh=updateUI
+ if type(ENV[RUNTIME_KEY])=="table" then ENV[RUNTIME_KEY].version=C.VERSION end
+
+ local exportOk,exportErr=pcall(function()
+  local previous=Export
+  local button=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+  round(button,8)
+  button.Activated:Connect(function()
+   if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+   if S.ExportBusy then Status.Text="Exportacao ja esta em andamento.";Status.TextColor3=COL.yellow;return end
+   if S.Recording then pauseSession("EXPORT") end
+   S.ExportBusy=true
+   Status.Text="Preparando JSON V2.3.16 • sync robusto + política Tycoon-only."
+   Status.TextColor3=COL.yellow
+   updateUI()
+   local sessionId=S.SessionId
+   task.spawn(function()
+    while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+    if not Gui.Parent or S.SessionId~=sessionId then return end
+    local data,encErr=encode()
+    if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+    local filename="Psicosenatico_WeaponResearch_V2_3_16_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+    local saved=false
+    if typeof(writefile)=="function" then saved=pcall(function() writefile(filename,data) end) end
+    if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..filename;Status.TextColor3=COL.green
+    elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+    else Status.Text="Nao foi possivel salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+    S.ExportBusy=false
+    updateUI()
+   end)
+  end)
+  if previous then pcall(function() previous:Destroy() end) end
+  Export=button
+ end)
+ if not exportOk then
+  S.V2316ExportUiError=tostring(exportErr)
+  pcall(function() log("ERROR",{where="V2.3.16.exportUi",message=tostring(exportErr)},"V2.3.16: export UI falhou; coleta preservada") end)
+ end
+
+ pcall(function() live("SISTEMA","V2.3.16 • sync NoClip por sequência + política funcional somente-Tycoon ativos.") end)
+ pcall(updateUI)
+end)}
+
+if ENV.__PSICO_V2316_RESULT[1]~=true then
+ S.V2316InitError=tostring(ENV.__PSICO_V2316_RESULT[2])
+ error("PSICOSENATICO V2.3.16 init: "..S.V2316InitError)
+end
+
+event("V2316_ROBUST_SYNC_POLICY_READY",{version=C.VERSION,sequenceScoredOffset=true,onlyTycoonProtected=true,legacyMapCategoriesDiagnosticOnly=true,observationalOnly=true})
