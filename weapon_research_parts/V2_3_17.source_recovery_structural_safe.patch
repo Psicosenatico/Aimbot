@@ -1,0 +1,292 @@
+-- V2.3.17 SOURCE RECOVERY • STRUCTURAL SAFE • READ-ONLY
+-- Focused next step after V0.17: recover castRays/canPierce implementation directly when
+-- the executor exposes decompile(), instead of continuing blind geometry experiments.
+-- Does NOT require ModuleScripts, call remotes, change collisions, or alter weapon state.
+
+C.VERSION="V2.3.17"
+S.V2317SourceRecovery=S.V2317SourceRecovery or {attempts=0,successes=0,failures=0,targets={},capabilities={}}
+S.V2317SourceRecoveryBusy=false
+S.V2317SourceRecoveryLastReason=nil
+
+ENV.__PSICO_V2317_RESULT={pcall(function()
+ if S==nil then error("V2.3.17 dependency ausente: S") end
+ if C==nil then error("V2.3.17 dependency ausente: C") end
+ if ENV==nil then error("V2.3.17 dependency ausente: ENV") end
+ if type(exportTable)~="function" then error("V2.3.17 dependency ausente: exportTable") end
+ if type(updateUI)~="function" then error("V2.3.17 dependency ausente: updateUI") end
+ if type(resetSession)~="function" then error("V2.3.17 dependency ausente: resetSession") end
+ if type(new)~="function" or type(round)~="function" or type(pauseSession)~="function" or type(encode)~="function" then error("V2.3.17 dependencias UI/export incompletas") end
+
+ local ReplicatedStorage=game:GetService("ReplicatedStorage")
+ local MAX_SOURCE_CHARS=180000
+
+ local function envFunction(name)
+  local v=nil
+  pcall(function()
+   if type(ENV)=="table" then v=rawget(ENV,name) end
+  end)
+  if type(v)=="function" then return v,"ENV" end
+  local g=nil
+  pcall(function() g=_G[name] end)
+  if type(g)=="function" then return g,"_G" end
+  return nil,nil
+ end
+
+ local function debugConstantsFunction()
+  local f=nil
+  pcall(function()
+   if debug and type(debug.getconstants)=="function" then f=debug.getconstants end
+  end)
+  if type(f)=="function" then return f,"debug.getconstants" end
+  local alt,src=envFunction("getconstants")
+  return alt,src
+ end
+
+ local function rollingChecksum(s)
+  if type(s)~="string" then return nil end
+  local h=0
+  local n=math.min(#s,120000)
+  for i=1,n do h=(h*131+string.byte(s,i))%4294967291 end
+  return string.format("%08X",h),n
+ end
+
+ local function keywordCounts(source)
+  local out={}
+  if type(source)~="string" then return out end
+  local keys={"RayExclude","RaycastParams","CollisionGroup","FilterDescendantsInstances","RespectCanCollide","canPierce","Workspace:Raycast","ProjectileHit","BulletsCannotPierce","CollectionService"}
+  for _,k in ipairs(keys) do
+   local n=0
+   local pos=1
+   while true do
+    local a,b=string.find(source,k,pos,true)
+    if not a then break end
+    n+=1
+    pos=b+1
+   end
+   out[k]=n
+  end
+  return out
+ end
+
+ local function locateTargets()
+  local root=ReplicatedStorage:FindFirstChild("BlasterSystem")
+  local list={}
+  if not root then return list,"BLASTERSYSTEM_AUSENTE" end
+  for _,d in ipairs(root:GetDescendants()) do
+   if d:IsA("ModuleScript") and (d.Name=="castRays" or d.Name=="canPierce") then
+    list[#list+1]=d
+   end
+  end
+  table.sort(list,function(a,b) return a:GetFullName()<b:GetFullName() end)
+  return list,nil
+ end
+
+ local function inspectOne(module,decompileFn,bytecodeFn,closureFn,constantsFn)
+  local result={name=module.Name,path=module:GetFullName(),class=module.ClassName,sourceMethod="NONE",source="",sourceLength=0,decompileAttempted=false,decompileSucceeded=false}
+
+  local okSource,propSource=pcall(function() return module.Source end)
+  result.sourcePropertyReadable=okSource
+  result.sourcePropertyLength=okSource and type(propSource)=="string" and #propSource or 0
+
+  if type(decompileFn)=="function" then
+   result.decompileAttempted=true
+   local ok,res=pcall(decompileFn,module)
+   if ok and type(res)=="string" and #res>0 then
+    result.decompileSucceeded=true
+    result.sourceMethod="decompile"
+    result.sourceLength=#res
+    result.sourceTruncated=#res>MAX_SOURCE_CHARS
+    result.source=string.sub(res,1,MAX_SOURCE_CHARS)
+   else
+    result.decompileError=tostring(res)
+   end
+  end
+
+  if result.sourceLength==0 and okSource and type(propSource)=="string" and #propSource>0 then
+   result.sourceMethod="SourceProperty"
+   result.sourceLength=#propSource
+   result.sourceTruncated=#propSource>MAX_SOURCE_CHARS
+   result.source=string.sub(propSource,1,MAX_SOURCE_CHARS)
+  end
+
+  if type(bytecodeFn)=="function" then
+   local ok,bc=pcall(bytecodeFn,module)
+   result.bytecodeAttempted=true
+   result.bytecodeSucceeded=ok and type(bc)=="string" and #bc>0
+   if result.bytecodeSucceeded then
+    result.bytecodeLength=#bc
+    result.bytecodeChecksum,result.bytecodeChecksumBytes=rollingChecksum(bc)
+   else
+    result.bytecodeError=tostring(bc)
+   end
+  end
+
+  if result.sourceLength==0 and type(closureFn)=="function" and type(constantsFn)=="function" then
+   local okClosure,closure=pcall(closureFn,module)
+   result.scriptClosureAttempted=true
+   if okClosure and type(closure)=="function" then
+    local okConst,constants=pcall(constantsFn,closure)
+    result.constantsAttempted=true
+    if okConst and type(constants)=="table" then
+     result.constants={}
+     for i=1,math.min(#constants,240) do
+      local v=constants[i]
+      local tv=typeof(v)
+      if tv=="string" or tv=="number" or tv=="boolean" then result.constants[#result.constants+1]=v end
+     end
+     result.constantsCaptured=#result.constants
+    else
+     result.constantsError=tostring(constants)
+    end
+   else
+    result.scriptClosureError=tostring(closure)
+   end
+  end
+
+  result.keywordCounts=keywordCounts(result.source)
+  return result
+ end
+
+ local function collectSourceV2317(reason)
+  if S.V2317SourceRecoveryBusy then return S.V2317SourceRecovery end
+  S.V2317SourceRecoveryBusy=true
+  S.V2317SourceRecoveryLastReason=reason
+  local state={attempts=0,successes=0,failures=0,reason=reason,targets={},capabilities={},observationalOnly=true,noRequire=true,noRemoteCalls=true}
+
+  local decompileFn,decompileSource=envFunction("decompile")
+  local bytecodeFn,bytecodeSource=envFunction("getscriptbytecode")
+  local closureFn,closureSource=envFunction("getscriptclosure")
+  local constantsFn,constantsSource=debugConstantsFunction()
+  state.capabilities={
+   decompile=type(decompileFn)=="function",decompileSource=decompileSource,
+   getscriptbytecode=type(bytecodeFn)=="function",getscriptbytecodeSource=bytecodeSource,
+   getscriptclosure=type(closureFn)=="function",getscriptclosureSource=closureSource,
+   getconstants=type(constantsFn)=="function",getconstantsSource=constantsSource
+  }
+
+  local targets,why=locateTargets()
+  state.targetCount=#targets
+  state.locateError=why
+  for _,m in ipairs(targets) do
+   state.attempts+=1
+   local ok,res=pcall(inspectOne,m,decompileFn,bytecodeFn,closureFn,constantsFn)
+   if ok and type(res)=="table" then
+    state.targets[#state.targets+1]=res
+    if (res.sourceLength or 0)>0 then state.successes+=1 else state.failures+=1 end
+   else
+    state.failures+=1
+    state.targets[#state.targets+1]={name=m.Name,path=m:GetFullName(),error=tostring(res),sourceLength=0}
+   end
+  end
+  state.completedAtUnix=os.time()
+  S.V2317SourceRecovery=state
+  S.V2317SourceRecoveryBusy=false
+  pcall(function() event("V2317_SOURCE_RECOVERY",{reason=reason,attempts=state.attempts,successes=state.successes,failures=state.failures,targetCount=state.targetCount,capabilities=state.capabilities}) end)
+  pcall(updateUI)
+  return state
+ end
+
+ local oldExport=exportTable
+ exportTable=function()
+  local recovered=collectSourceV2317("EXPORT")
+  local data=oldExport()
+  data.version=C.VERSION
+  data.mode="SHOT_LOCK_NOCLIP_HP_CAUSAL_TEMPORAL_ROBUST_SYNC_PLUS_SOURCE_RECOVERY_V2317"
+  data.openEndedResearch=data.openEndedResearch or {}
+  data.openEndedResearch.sourceRecoveryV2317={
+   observationalOnly=true,
+   noRequire=true,
+   noRemoteCalls=true,
+   targetModules={"ReplicatedStorage.BlasterSystem.Blaster.Utility.castRays","ReplicatedStorage.BlasterSystem.Blaster.Utility.canPierce"},
+   result=recovered,
+   interpretation="decompile output is an executor reconstruction and may differ from original authored source; successful recovery is used to inspect the actual client-side ray/filter implementation instead of guessing from geometry properties."
+  }
+  data.architecture=data.architecture or {}
+  data.architecture.sourceRecoveryAuthority="sourceRecoveryV2317"
+  data.interpretationRules=data.interpretationRules or {}
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.17: tenta recuperar castRays/canPierce via decompile sem require; nenhum RemoteEvent é chamado e nenhuma propriedade física é alterada."
+  data.interpretationRules[#data.interpretationRules+1]="V2.3.17: código decompilado é reconstrução do executor; usar para localizar filtros/raycast reais, não como prova de código-fonte autoral exato."
+  return data
+ end
+
+ local oldReset=resetSession
+ resetSession=function()
+  oldReset()
+  S.V2317SourceRecovery=S.V2317SourceRecovery or {attempts=0,successes=0,failures=0,targets={},capabilities={}}
+  S.V2317SourceRecoveryBusy=false
+  S.V2317SourceRecoveryLastReason=nil
+ end
+
+ local oldUI=updateUI
+ updateUI=function()
+  oldUI()
+  pcall(function()
+   Ver.Text=C.VERSION
+   Sub.Text="SYNC ROBUSTO + TYCOON-ONLY + SOURCE RECOVERY"
+   Text.Text=string.gsub(Text.Text,"PESQUISA DE ARMAS V2%.3%.16","PESQUISA DE ARMAS V2.3.17")
+   local r=S.V2317SourceRecovery
+   if type(r)=="table" and Status then
+    if (r.successes or 0)>0 then
+     Status.Text=string.format("Source recovery: %d/%d módulos recuperados.",r.successes or 0,r.attempts or 0)
+     Status.TextColor3=COL.green
+    elseif S.V2317SourceRecoveryBusy then
+     Status.Text="Source recovery em andamento..."
+     Status.TextColor3=COL.yellow
+    end
+   end
+  end)
+ end
+ S.UIRefresh=updateUI
+ if type(ENV[RUNTIME_KEY])=="table" then ENV[RUNTIME_KEY].version=C.VERSION end
+
+ local exportOk,exportErr=pcall(function()
+  local previous=Export
+  local button=new("TextButton",{Parent=Main,Size=UDim2.new(0.5,-17,0,34),Position=UDim2.new(0.5,3,0,81),Text="EXPORTAR",BackgroundColor3=COL.blue,TextColor3=COL.text,Font=Enum.Font.GothamBold,TextSize=10,BorderSizePixel=0})
+  round(button,8)
+  button.Activated:Connect(function()
+   if not S.Started then Status.Text="Inicie a coleta antes de exportar.";Status.TextColor3=COL.yellow;return end
+   if S.ExportBusy then Status.Text="Exportacao ja esta em andamento.";Status.TextColor3=COL.yellow;return end
+   if S.Recording then pauseSession("EXPORT") end
+   S.ExportBusy=true
+   Status.Text="Preparando JSON V2.3.17 • recuperando castRays/canPierce..."
+   Status.TextColor3=COL.yellow
+   updateUI()
+   local sessionId=S.SessionId
+   task.spawn(function()
+    while Gui.Parent and S.SessionId==sessionId and S.PendingDamageProbes>0 do task.wait(0.05) end
+    if not Gui.Parent or S.SessionId~=sessionId then return end
+    collectSourceV2317("EXPORT_BUTTON")
+    local data,encErr=encode()
+    if not data then S.ExportBusy=false;Status.Text="Falha JSON: "..tostring(encErr);Status.TextColor3=COL.red;updateUI();return end
+    local filename="Psicosenatico_WeaponResearch_V2_3_17_"..tostring(game.PlaceId).."_"..tostring(os.time())..".json"
+    local saved=false
+    if typeof(writefile)=="function" then saved=pcall(function() writefile(filename,data) end) end
+    if saved then S.Exported=true;Status.Text="✓ ARQUIVO EXPORTADO: "..filename;Status.TextColor3=COL.green
+    elseif typeof(setclipboard)=="function" and pcall(function() setclipboard(data) end) then S.Exported=true;Status.Text="✓ JSON COPIADO.";Status.TextColor3=COL.green
+    else Status.Text="Nao foi possivel salvar ou copiar o JSON.";Status.TextColor3=COL.red end
+    S.ExportBusy=false
+    updateUI()
+   end)
+  end)
+  if previous then pcall(function() previous:Destroy() end) end
+  Export=button
+ end)
+ if not exportOk then
+  S.V2317ExportUiError=tostring(exportErr)
+  pcall(function() log("ERROR",{where="V2.3.17.exportUi",message=tostring(exportErr)},"V2.3.17: export UI falhou; coleta preservada") end)
+ end
+
+ task.spawn(function()
+  task.wait(0.25)
+  pcall(function() collectSourceV2317("INIT") end)
+ end)
+ pcall(function() live("SISTEMA","V2.3.17 • source recovery castRays/canPierce ativo; sem require/remotes/física.") end)
+ pcall(updateUI)
+end)}
+
+if ENV.__PSICO_V2317_RESULT[1]~=true then
+ S.V2317InitError=tostring(ENV.__PSICO_V2317_RESULT[2])
+ error("PSICOSENATICO V2.3.17 init: "..S.V2317InitError)
+end
+
+event("V2317_SOURCE_RECOVERY_READY",{version=C.VERSION,decompilePreferred=true,noRequire=true,noRemoteCalls=true,writesCanCollide=false,writesCanQuery=false,observationalOnly=true})
