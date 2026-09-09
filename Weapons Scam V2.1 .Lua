@@ -1,9 +1,9 @@
 -- PSICOSENATICO • WEAPON RESEARCH V2.3.17 • STABLE BOOTSTRAP + 429 RESILIENCE
 -- Esta URL principal deve permanecer estável. As partes internas continuam versionadas por SOURCE_COMMIT.
 -- Runtime: CDN primária + GitHub Raw fallback + cache por sessão + retry progressivo.
--- V2.3.17 preserva sync robusto/Tycoon-only e tenta recuperar castRays/canPierce via decompile sem require.
+-- V2.3.17 preserva sync robusto/Tycoon-only e recupera castRays/canPierce via decompile sem require ou tiros obrigatórios.
 
-local SOURCE_COMMIT="e7998b03d0056c31b868e6d84f01a627e28e44b5"
+local SOURCE_COMMIT="abeb4995b49a2054b1c3dfa36a0f468bc26c4eca"
 local REPO_PATH="Psicosenatico/Aimbot"
 local PART_DIR="weapon_research_parts/"
 local BASES={
@@ -19,7 +19,7 @@ local PARTS={
     "V2_3_12.normal_wall_target_segment.patch","V2_3_12.postrun_diagnostic_hotfix.patch","V2_3_13.server_path_hypotheses_v2_structural_safe.patch",
     "V2_3_14.causal_hp_original_geometry_proxy_structural_safe.patch","V2_3_15.temporal_stability_gate_structural_safe.patch",
     "V2_3_16.sync_repair_functional_policy_structural_safe.patch","V2_3_16b.sync_capture_hotfix.patch","V2_3_16c.final_sync_export_restore.patch",
-    "V2_3_17.source_recovery_structural_safe.patch"
+    "V2_3_17.source_recovery_structural_safe.patch","V2_3_17b.source_only_export.patch"
 }
 
 local BOOT_VERSION="V2.3.17"
@@ -101,12 +101,14 @@ if not string.find(source,'V2316_ROBUST_SYNC_POLICY_READY',1,true) then error(su
 if not string.find(source,'V2316B_SYNC_CAPTURE_HOTFIX_READY',1,true) then error(surfaceFailure("PREFLIGHT","hotfix V2.3.16B ausente")) end
 if not string.find(source,'V2316C_FINAL_SYNC_EXPORT_READY',1,true) then error(surfaceFailure("PREFLIGHT","restauração final V2.3.16C ausente")) end
 if not string.find(source,'V2317_SOURCE_RECOVERY_READY',1,true) then error(surfaceFailure("PREFLIGHT","source recovery V2.3.17 ausente")) end
+if not string.find(source,'V2317B_SOURCE_ONLY_EXPORT_READY',1,true) then error(surfaceFailure("PREFLIGHT","source-only export V2.3.17B ausente")) end
 if string.find(source,'V2313_SERVER_PATH_HYPOTHESES_READY',1,true) then error(surfaceFailure("PREFLIGHT","V2.3.13 inicial incompleto detectado")) end
 if not string.find(source,'SEQUENCE_SCORED_MONOTONIC_OFFSET',1,true) then error(surfaceFailure("PREFLIGHT","sync robusto V2.3.16 ausente")) end
 if not string.find(source,'ONLY_WORKSPACE_TYCOONS_PROTECTED',1,true) then error(surfaceFailure("PREFLIGHT","política Tycoon-only ausente")) end
 if not string.find(source,'SEQUENCE_SCORED_OFFSET_MULTI_RETURN_FIXED',1,true) then error(surfaceFailure("PREFLIGHT","hotfix multi-return V2.3.16B ausente")) end
 if not string.find(source,'FINAL_POST_WRAPPER_SYNC_RESTORE',1,true) then error(surfaceFailure("PREFLIGHT","autoridade final de sync V2.3.16C ausente")) end
 if not string.find(source,'decompilePreferred=true',1,true) then error(surfaceFailure("PREFLIGHT","marcador decompile V2.3.17 ausente")) end
+if not string.find(source,'requiresShots=false',1,true) then error(surfaceFailure("PREFLIGHT","source-only sem tiros V2.3.17B ausente")) end
 if not string.find(source,'noRequire=true',1,true) or not string.find(source,'noRemoteCalls=true',1,true) then error(surfaceFailure("PREFLIGHT","garantia read-only V2.3.17 ausente")) end
 if not string.find(source,'Psicosenatico_WeaponResearch_V2_3_17_',1,true) then error(surfaceFailure("PREFLIGHT","export V2.3.17 ausente")) end
 if not string.find(source,'normalWallBetweenCameraAndTargetV2312',1,true) then error(surfaceFailure("PREFLIGHT","campo parede corrigido ausente")) end
