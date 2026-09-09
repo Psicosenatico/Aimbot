@@ -1,0 +1,408 @@
+-- V0.19 NATIVE CANPIERCE + SAFE DEFAULT-RAY BYPASS • STRUCTURAL SAFE
+-- Source-backed by Weapon Research V2.3.17: canPierce explicitly evaluates collision against "Default".
+-- V0.19 keeps the real canPierce hook from V0.18 and removes STATIC non-Tycoon BaseParts from
+-- the Default ray by assigning only an EXISTING CollisionGroup empirically proven by V0.8 to:
+--   1) be ignored by ray group Default; and
+--   2) remain collidable with every CollisionGroup currently used by the local character.
+-- No collision matrix is edited. CanCollide and CanQuery are NEVER written.
+-- Workspace.Tycoons and Humanoid models are never moved. Non-anchored parts stay on native canPierce only.
+
+C.VERSION="V0.19"
+S.v019BypassEnabled=false
+S.v019SelectedPassGroup=nil
+S.v019GroupApplied=0
+S.v019GroupRestored=0
+S.v019GroupApplyFailed=0
+S.v019GroupRestoreFailed=0
+S.v019PhysicalSafetyViolations=0
+S.v019GroupReverts=0
+S.v019EligibleNow=0
+S.v019TycoonProtected=0
+S.v019HumanoidExcluded=0
+S.v019NonAnchoredNativeOnly=0
+S.v019InternalExcluded=0
+S.v019NativeBurstHumanoidShots=0
+S.v019NativeBurstFiveCapStops=0
+S.v019Parts={}
+S.v019GuardCursor=0
+S.v019GuardAcc=0
+
+ENV.__PSICO_V019_RESULT={pcall(function()
+ if type(prepareExistingGroupStrategyV08)~="function" then error("V0.19 dependency ausente: prepareExistingGroupStrategyV08") end
+ if type(readPartState)~="function" or type(full)~="function" then error("V0.19 dependencias base ausentes") end
+ if type(setEnabled)~="function" or type(shotRead)~="function" or type(payload)~="function" or type(cleanup)~="function" then error("V0.19 wrappers base ausentes") end
+
+ local setEnabledV018=setEnabled
+ local shotReadV018=shotRead
+ local payloadV018=payload
+ local cleanupV018=cleanup
+
+ local function tycoonRootV019()
+  return Workspace:FindFirstChild("Tycoons")
+ end
+
+ local function humanoidAncestorV019(o)
+  local cur=o
+  for _=1,18 do
+   if not cur or cur==Workspace then break end
+   if cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid") then return cur end
+   cur=cur.Parent
+  end
+  return nil
+ end
+
+ local function internalV019(o)
+  local n=string.lower(tostring(o and o.Name or ""))
+  return string.find(n,"__psico_",1,true)~=nil
+ end
+
+ local function eligibilityV019(p)
+  if not p or not p.Parent or not p:IsA("BasePart") then return false,"NAO_BASEPART" end
+  local t=tycoonRootV019()
+  if t and p:IsDescendantOf(t) then return false,"TYCOON" end
+  if humanoidAncestorV019(p) then return false,"HUMANOID" end
+  if internalV019(p) then return false,"INTERNO" end
+  local okA,anchored=pcall(function() return p.Anchored end)
+  if not okA or anchored~=true then return false,"NAO_ANCHORED_NATIVE_ONLY" end
+  return true,"STATIC_NON_TYCOON"
+ end
+
+ local function physicalUnchangedV019(a,b)
+  if type(a)~="table" or type(b)~="table" then return false end
+  if a.canCollide~=b.canCollide then return false end
+  if a.canQueryReadOk and (not b.canQueryReadOk or a.canQuery~=b.canQuery) then return false end
+  return true
+ end
+
+ local function ensureMetaV019(p,before)
+  local m=S.v019Parts[p]
+  if not m then
+   m={path=full(p),restoreGroup=before.collisionGroup,applied=false,applyCount=0,restoreCount=0}
+   S.v019Parts[p]=m
+  elseif not m.applied and before.collisionGroup~=S.v019SelectedPassGroup then
+   -- Respect a legitimate group change made by the game while V0.19 was not owning the part.
+   m.restoreGroup=before.collisionGroup
+  end
+  return m
+ end
+
+ local function restoreOneV019(p,m,reason)
+  if not p or not p.Parent or type(m)~="table" or not m.applied then return true end
+  local before=readPartState(p)
+  local target=m.restoreGroup or before.collisionGroup or "Default"
+  local ok,e=pcall(function() p.CollisionGroup=target end)
+  local after=readPartState(p)
+  local safe=physicalUnchangedV019(before,after)
+  local good=ok and after.collisionGroup==target and safe
+  if good then
+   S.v019GroupRestored+=1
+   m.restoreCount=(m.restoreCount or 0)+1
+  else
+   S.v019GroupRestoreFailed+=1
+   if not safe then S.v019PhysicalSafetyViolations+=1 end
+   if S.v019GroupRestoreFailed<=25 then event("V019_GROUP_RESTORE_FAILED",{path=m.path,reason=reason,targetGroup=target,error=tostring(e),before=before,after=after,physicalUnchanged=safe}) end
+  end
+  m.applied=false
+  return good
+ end
+
+ local function applyOneV019(p,reason)
+  local eligible,why=eligibilityV019(p)
+  if not eligible then return false,why end
+  if type(S.v019SelectedPassGroup)~="string" or S.v019SelectedPassGroup=="" then return false,"SEM_GRUPO" end
+  local before=readPartState(p)
+  if not before.collisionGroup then return false,"SEM_COLLISIONGROUP" end
+  local m=ensureMetaV019(p,before)
+  if m.applied and before.collisionGroup==S.v019SelectedPassGroup then return true,"JA_APLICADO" end
+  if not m.applied then m.restoreGroup=before.collisionGroup end
+  local ok,e=pcall(function() p.CollisionGroup=S.v019SelectedPassGroup end)
+  local after=readPartState(p)
+  local safe=physicalUnchangedV019(before,after)
+  local good=ok and after.collisionGroup==S.v019SelectedPassGroup and safe
+  if good then
+   m.applied=true
+   m.applyCount=(m.applyCount or 0)+1
+   S.v019GroupApplied+=1
+   return true,"APLICADO"
+  end
+  S.v019GroupApplyFailed+=1
+  if not safe then S.v019PhysicalSafetyViolations+=1 end
+  -- Only undo our CollisionGroup write. Never write CanCollide or CanQuery.
+  pcall(function() p.CollisionGroup=m.restoreGroup or before.collisionGroup end)
+  m.applied=false
+  if S.v019GroupApplyFailed<=25 then event("V019_GROUP_APPLY_FAILED",{path=m.path,reason=reason,selectedGroup=S.v019SelectedPassGroup,error=tostring(e),before=before,after=after,physicalUnchanged=safe}) end
+  return false,"FALHA_APLICACAO"
+ end
+
+ local function restoreAllV019(reason)
+  local n=0
+  for p,m in pairs(S.v019Parts) do
+   if p and p.Parent and m.applied and restoreOneV019(p,m,reason) then n+=1 end
+  end
+  return n
+ end
+
+ local function scanAndApplyV019(reason)
+  local okDesc,desc=pcall(function() return Workspace:GetDescendants() end)
+  if not okDesc or type(desc)~="table" then
+   event("V019_SCAN_FAILED",{reason=reason,error=tostring(desc)})
+   return 0,0
+  end
+  local eligible,applied,tycoon,humanoid,nonAnchored,internal=0,0,0,0,0,0
+  for i,p in ipairs(desc) do
+   if p:IsA("BasePart") then
+    local ok,why=eligibilityV019(p)
+    if ok then
+     eligible+=1
+     local a=applyOneV019(p,reason)
+     if a then applied+=1 end
+    elseif why=="TYCOON" then tycoon+=1
+    elseif why=="HUMANOID" then humanoid+=1
+    elseif why=="NAO_ANCHORED_NATIVE_ONLY" then nonAnchored+=1
+    elseif why=="INTERNO" then internal+=1 end
+   end
+   if i%600==0 then task.wait() end
+  end
+  S.v019EligibleNow=eligible
+  S.v019TycoonProtected=tycoon
+  S.v019HumanoidExcluded=humanoid
+  S.v019NonAnchoredNativeOnly=nonAnchored
+  S.v019InternalExcluded=internal
+  event("V019_DEFAULT_BYPASS_SCAN",{reason=reason,eligible=eligible,applied=applied,selectedGroup=S.v019SelectedPassGroup,tycoonProtected=tycoon,humanoidExcluded=humanoid,nonAnchoredNativeOnly=nonAnchored,physicalSafetyViolations=S.v019PhysicalSafetyViolations})
+  return applied,eligible
+ end
+
+ local function prepareBypassV019(reason)
+  local ok,why=prepareExistingGroupStrategyV08()
+  if not ok or type(S.v08SelectedPassGroup)~="string" then
+   S.v019BypassEnabled=false
+   S.v019SelectedPassGroup=nil
+   event("V019_DEFAULT_BYPASS_UNAVAILABLE",{reason=reason,why=why,tests=S.v08CompatibilityTests,characterGroups=S.groupStrategyCharacterGroups})
+   return false,why
+  end
+  S.v019SelectedPassGroup=S.v08SelectedPassGroup
+  S.v019BypassEnabled=true
+  local applied,eligible=scanAndApplyV019(reason)
+  event("V019_DEFAULT_BYPASS_READY",{reason=reason,selectedGroup=S.v019SelectedPassGroup,applied=applied,eligible=eligible,physicalCharacterCollisionPreserved=true})
+  return true,nil
+ end
+
+ local function latestNativeBurstV019(now)
+  local list=S.v018RecentDecisions
+  if type(list)~="table" or #list==0 then return {available=false,reason="SEM_DECISOES"} end
+  local last=nil
+  for i=#list,1,-1 do
+   local t=tonumber(list[i] and list[i].time)
+   if t and t<=now+0.03 and now-t<=1.60 then last=i;break end
+  end
+  if not last then return {available=false,reason="SEM_BURST_RECENTE"} end
+  local first=last
+  while first>1 do
+   local a=tonumber(list[first] and list[first].time)
+   local b=tonumber(list[first-1] and list[first-1].time)
+   if not a or not b or a-b>0.025 then break end
+   first-=1
+  end
+  local out={available=true,firstIndex=first,lastIndex=last,forcedCount=0,humanoidCount=0,tycoonCount=0,errorCount=0,paths={},decisions={},ageToShot=now-(tonumber(list[last].time) or now)}
+  for i=first,last do
+   local d=list[i]
+   local decision=tostring(d.decision or "")
+   if decision=="FORCE_PIERCE_NON_TYCOON" then out.forcedCount+=1
+   elseif decision=="HUMANOID_DELEGATE" then out.humanoidCount+=1
+   elseif decision=="TYCOON_BLOCK" then out.tycoonCount+=1
+   elseif decision=="DECISION_ERROR" then out.errorCount+=1 end
+   if #out.paths<12 then out.paths[#out.paths+1]=d.path end
+   if #out.decisions<12 then out.decisions[#out.decisions+1]=decision end
+  end
+  out.reachedHumanoid=out.humanoidCount>0
+  out.hitTycoon=out.tycoonCount>0
+  out.possibleFivePierceCapStop=out.forcedCount>=5 and out.humanoidCount==0 and out.tycoonCount==0
+  return out
+ end
+
+ setEnabled=function(v,reason)
+  if S.closed or S.enabled==v then return end
+  if v then
+   -- First activate the real game canPierce hook. If it cannot activate, do not mutate any group.
+   setEnabledV018(true,reason)
+   if not S.enabled then return end
+   local ok,why=prepareBypassV019("ENABLE:"..tostring(reason))
+   if ok then
+    S.last=string.format("V0.19 ATIVO • canPierce + Default bypass %s • %d estáticas",tostring(S.v019SelectedPassGroup),S.v019EligibleNow)
+   else
+    S.last="V0.19 PARCIAL • canPierce nativo ativo • bypass Default indisponível: "..tostring(why)
+   end
+   event("V019_NOCLIP_ON",{reason=reason,nativeCanPierce=S.v018Enabled==true,defaultRayBypass=S.v019BypassEnabled,selectedGroup=S.v019SelectedPassGroup,eligible=S.v019EligibleNow,physicalSafetyViolations=S.v019PhysicalSafetyViolations})
+  else
+   S.v019BypassEnabled=false
+   local restored=restoreAllV019("NOCLIP_OFF")
+   setEnabledV018(false,reason)
+   S.last=string.format("V0.19 DESATIVADO • grupos restaurados %d • canPierce original",restored)
+   event("V019_NOCLIP_OFF",{reason=reason,restored=restored,physicalSafetyViolations=S.v019PhysicalSafetyViolations})
+  end
+  updateUI()
+ end
+
+ -- New static geometry outside Tycoons is covered after a short delay so character parts can acquire Humanoid first.
+ S.conns[#S.conns+1]=Workspace.DescendantAdded:Connect(function(o)
+  if not o:IsA("BasePart") then
+   if o:IsA("Humanoid") then
+    task.defer(function()
+     local model=o.Parent
+     if not model then return end
+     for _,p in ipairs(model:GetDescendants()) do
+      local m=S.v019Parts[p]
+      if p:IsA("BasePart") and m and m.applied then restoreOneV019(p,m,"HUMANOID_APPEARED") end
+     end
+    end)
+   end
+   return
+  end
+  task.delay(0.15,function()
+   if S.closed or not S.enabled or not S.v019BypassEnabled or not o.Parent then return end
+   applyOneV019(o,"DESCENDANT_ADDED")
+  end)
+ end)
+
+ -- Respawn may change the character CollisionGroup. Re-probe before continuing broad bypass.
+ S.conns[#S.conns+1]=LP.CharacterAdded:Connect(function()
+  task.delay(0.8,function()
+   if S.closed or not S.enabled then return end
+   S.v019BypassEnabled=false
+   restoreAllV019("RESPAWN_REPROBE")
+   prepareBypassV019("RESPAWN_REPROBE")
+   updateUI()
+  end)
+ end)
+
+ -- Lightweight rotating guard: protect late Tycoon/Humanoid changes and respect game-side group updates.
+ S.conns[#S.conns+1]=RunService.Heartbeat:Connect(function()
+  if S.closed or not S.enabled or not S.v019BypassEnabled then return end
+  S.v019GuardAcc+=1
+  if S.v019GuardAcc<120 then return end
+  S.v019GuardAcc=0
+  local arr={}
+  for p,m in pairs(S.v019Parts) do if p and p.Parent and m.applied then arr[#arr+1]=p end end
+  local total=#arr
+  if total==0 then return end
+  local start=S.v019GuardCursor
+  for step=1,math.min(64,total) do
+   local idx=((start+step-1)%total)+1
+   local p=arr[idx]
+   local m=S.v019Parts[p]
+   if p and m and m.applied then
+    local eligible=eligibilityV019(p)
+    if not eligible then
+     restoreOneV019(p,m,"POLICY_GUARD")
+    else
+     local st=readPartState(p)
+     if st.collisionGroup~=S.v019SelectedPassGroup then
+      S.v019GroupReverts+=1
+      -- Preserve the game's new group as the future restore target, then reapply the safe bypass.
+      m.applied=false
+      m.restoreGroup=st.collisionGroup or m.restoreGroup
+      applyOneV019(p,"GROUP_REVERT")
+     end
+    end
+   end
+  end
+  S.v019GuardCursor=(start+64)%math.max(total,1)
+ end)
+
+ shotRead=function(tool,delta)
+  shotReadV018(tool,delta)
+  local rec=S.shots[#S.shots]
+  if not rec then return end
+  local burst=latestNativeBurstV019(os.clock())
+  rec.v019NativeBurst=burst
+  rec.v019DefaultBypass={enabled=S.v019BypassEnabled,selectedGroup=S.v019SelectedPassGroup,eligible=S.v019EligibleNow,physicalSafetyViolations=S.v019PhysicalSafetyViolations}
+  if burst.reachedHumanoid then S.v019NativeBurstHumanoidShots+=1 end
+  if burst.possibleFivePierceCapStop then S.v019NativeBurstFiveCapStops+=1 end
+  local entry=busV010 and busV010.last
+  if entry and tonumber(entry.shotIndex)==tonumber(rec.index) then
+   entry.version=C.VERSION
+   entry.v019NativeReachedHumanoid=burst.reachedHumanoid==true
+   entry.v019NativeForcedCount=burst.forcedCount
+   entry.v019NativeTycoonBlocked=burst.hitTycoon==true
+   entry.v019PossibleFivePierceCapStop=burst.possibleFivePierceCapStop==true
+   entry.v019DefaultBypassEnabled=S.v019BypassEnabled
+   entry.v019SelectedPassGroup=S.v019SelectedPassGroup
+  end
+ end
+
+ payload=function()
+  local t=payloadV018()
+  t.version=C.VERSION
+  t.policy=t.policy or {}
+  t.policy.mode="NATIVE_CANPIERCE_PLUS_SAFE_DEFAULT_RAY_BYPASS_V019"
+  t.policy.functionalAuthority="V0.18 hook do canPierce real + V0.19 CollisionGroup existente empiricamente seguro para retirar BaseParts estáticas fora de Workspace.Tycoons do ray Default antes que consumam iterações do castRays."
+  t.policy.protected={"Workspace.Tycoons"}
+  t.policy.defaultRayBypass=true
+  t.policy.defaultRayEvidence="Weapon Research V2.3.17 recuperou canPierce consultando CollisionGroupsAreCollidable(part.CollisionGroup, 'Default')."
+  t.policy.physicalCharacterCollisionPreserved=true
+  t.policy.groupSelection="V0.8 EXISTING_GROUP_EMPIRICAL_RAY_PROBE: Default precisa ignorar; todos os grupos físicos atuais do personagem precisam continuar colidindo."
+  t.policy.staticBasePartsOnly=true
+  t.policy.nonAnchoredAction="NATIVE_CANPIERCE_ONLY"
+  t.policy.terrainVoxelAction="NATIVE_CANPIERCE_ONLY"
+  t.policy.writesCanCollide=false
+  t.policy.writesCanQuery=false
+  t.policy.writesCollisionGroup=true
+  t.policy.writesTags=false
+  t.summary=t.summary or {}
+  t.summary.v019SelectedPassGroup=S.v019SelectedPassGroup
+  t.summary.v019BypassEnabled=S.v019BypassEnabled
+  t.summary.v019GroupApplied=S.v019GroupApplied
+  t.summary.v019GroupRestored=S.v019GroupRestored
+  t.summary.v019GroupApplyFailed=S.v019GroupApplyFailed
+  t.summary.v019GroupRestoreFailed=S.v019GroupRestoreFailed
+  t.summary.v019PhysicalSafetyViolations=S.v019PhysicalSafetyViolations
+  t.summary.v019GroupReverts=S.v019GroupReverts
+  t.summary.v019EligibleNow=S.v019EligibleNow
+  t.summary.v019TycoonProtected=S.v019TycoonProtected
+  t.summary.v019HumanoidExcluded=S.v019HumanoidExcluded
+  t.summary.v019NonAnchoredNativeOnly=S.v019NonAnchoredNativeOnly
+  t.summary.v019NativeBurstHumanoidShots=S.v019NativeBurstHumanoidShots
+  t.summary.v019NativeBurstFiveCapStops=S.v019NativeBurstFiveCapStops
+  return t
+ end
+
+ save=function()
+  local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+  if not ok then err("JSONEncode",json);return false,"Falha ao gerar JSON" end
+  local name=string.format("Psicosenatico_BulletNoclip_Test_V0_19_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+  if typeof(writefile)=="function" then
+   local a,b=pcall(writefile,name,json)
+   if a then event("EXPORT",{method="writefile",file=name,bytes=#json});return true,"Arquivo exportado: "..name else err("writefile",b) end
+  end
+  if typeof(setclipboard)=="function" then
+   local a,b=pcall(setclipboard,json)
+   if a then event("EXPORT",{method="clipboard",bytes=#json});return true,"JSON copiado" else err("clipboard",b) end
+  end
+  return false,"Não foi possível salvar/copiar o JSON"
+ end
+
+ local updateUIV018=updateUI
+ updateUI=function()
+  updateUIV018()
+  ver.Text=C.VERSION
+  State.Text=S.enabled and "Estado: ATIVO • NATIVE + DEFAULT BYPASS • TYCOON PROTEGIDO" or "Estado: DESATIVADO • restaurado"
+  local group=S.v019SelectedPassGroup or "nenhum"
+  Reader.Text=string.format("Leitor V0.19\ncanPierce nativo: %s • Default bypass: %s\nGrupo seguro: %s • estáticas: %d\nAplicações: %d • falhas: %d • reversões: %d\nHumanoid bursts: %d • possíveis stops em 5: %d\nCanCollide/CanQuery: PRESERVADOS • Tycoon: PROTEGIDO",S.v018HookInstalled and "OK" or "FALHA",S.v019BypassEnabled and "ON" or "OFF",tostring(group),S.v019EligibleNow,S.v019GroupApplied,S.v019GroupApplyFailed,S.v019GroupReverts,S.v019NativeBurstHumanoidShots,S.v019NativeBurstFiveCapStops)
+ end
+
+ cleanup=function()
+  S.v019BypassEnabled=false
+  restoreAllV019("CLEANUP")
+  cleanupV018()
+ end
+ local rt=ENV[C.KEY]
+ if type(rt)=="table" then rt.cleanup=cleanup;rt.version=C.VERSION end
+
+ event("V019_NATIVE_PLUS_DEFAULT_BYPASS_READY",{version=C.VERSION,nativeCanPierce=true,defaultRayBypass=true,tycoonProtected=true,humanoidTargetsExcluded=true,staticBasePartsOnly=true,physicalCharacterCollisionPreserved=true,writesCanCollide=false,writesCanQuery=false,writesCollisionGroup=true,writesTags=false})
+ pcall(updateUI)
+end)}
+
+if ENV.__PSICO_V019_RESULT[1]~=true then
+ S.v019InitError=tostring(ENV.__PSICO_V019_RESULT[2])
+ error("PSICOSENATICO V0.19 structural init: "..S.v019InitError)
+end
