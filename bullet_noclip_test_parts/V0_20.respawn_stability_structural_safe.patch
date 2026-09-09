@@ -1,0 +1,100 @@
+-- V0.20 RESPAWN STABILITY • STRUCTURAL SAFE
+-- Fixes a concrete legacy conflict: V0.6 keeps a CharacterAdded listener that calls
+-- setEnabled(false,"RESPAWN_UNSAFE") when prepareGroupStrategyV06() returns false.
+-- V0.18 intentionally made that legacy preparation return false because the native
+-- canPierce hook superseded it, which caused the NEW runtime to be disabled after respawn.
+-- V0.20 neutralizes only that obsolete shutdown path. User/UI shutdown still works.
+
+C.VERSION="V0.20"
+S.v020LegacyRespawnDisableBlocked=0
+S.v020RespawnCompatibilityCalls=0
+S.v020LastBlockedReason=nil
+
+ENV.__PSICO_V020_RESULT={pcall(function()
+ if type(setEnabled)~="function" then error("V0.20 dependency ausente: setEnabled") end
+ if type(payload)~="function" or type(updateUI)~="function" then error("V0.20 dependencies ausentes: payload/updateUI") end
+
+ local setEnabledV019=setEnabled
+ local payloadV019=payload
+ local updateUIV019=updateUI
+
+ -- Compatibility shim exclusively for the old V0.6 CharacterAdded connection.
+ -- V0.19 performs its own safe empirical re-probe on CharacterAdded, so the legacy
+ -- listener must not treat the superseded V0.6 group preparation as a fatal condition.
+ prepareGroupStrategyV06=function()
+  S.v020RespawnCompatibilityCalls=(S.v020RespawnCompatibilityCalls or 0)+1
+  return true,nil
+ end
+
+ -- Defensive second layer: if an already-running legacy callback still reaches the old
+ -- shutdown call, ignore only RESPAWN_UNSAFE. Explicit UI/cleanup/off calls are preserved.
+ setEnabled=function(v,reason)
+  if v==false and tostring(reason)=="RESPAWN_UNSAFE" then
+   S.v020LegacyRespawnDisableBlocked=(S.v020LegacyRespawnDisableBlocked or 0)+1
+   S.v020LastBlockedReason=tostring(reason)
+   event("V020_LEGACY_RESPAWN_DISABLE_BLOCKED",{
+    reason=reason,
+    enabled=S.enabled==true,
+    nativeCanPierce=S.v018Enabled==true,
+    defaultBypass=S.v019BypassEnabled==true
+   })
+   pcall(updateUI)
+   return
+  end
+  return setEnabledV019(v,reason)
+ end
+
+ payload=function()
+  local t=payloadV019()
+  t.version=C.VERSION
+  t.policy=t.policy or {}
+  t.policy.respawnStabilityV020=true
+  t.policy.legacyV06RespawnShutdownNeutralized=true
+  t.policy.explicitUserDisablePreserved=true
+  t.policy.functionalMechanismUnchangedFromV019=true
+  t.summary=t.summary or {}
+  t.summary.v020LegacyRespawnDisableBlocked=S.v020LegacyRespawnDisableBlocked
+  t.summary.v020RespawnCompatibilityCalls=S.v020RespawnCompatibilityCalls
+  t.summary.v020LastBlockedReason=S.v020LastBlockedReason
+  return t
+ end
+
+ save=function()
+  local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+  if not ok then err("JSONEncode",json);return false,"Falha ao gerar JSON" end
+  local name=string.format("Psicosenatico_BulletNoclip_Test_V0_20_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+  if typeof(writefile)=="function" then
+   local a,b=pcall(writefile,name,json)
+   if a then event("EXPORT",{method="writefile",file=name,bytes=#json});return true,"Arquivo exportado: "..name else err("writefile",b) end
+  end
+  if typeof(setclipboard)=="function" then
+   local a,b=pcall(setclipboard,json)
+   if a then event("EXPORT",{method="clipboard",bytes=#json});return true,"JSON copiado" else err("clipboard",b) end
+  end
+  return false,"Não foi possível salvar/copiar o JSON"
+ end
+
+ updateUI=function()
+  updateUIV019()
+  ver.Text=C.VERSION
+  if S.enabled then
+   State.Text="Estado: ATIVO • V0.20 ESTÁVEL APÓS RESPAWN"
+  end
+ end
+
+ local rt=ENV[C.KEY]
+ if type(rt)=="table" then rt.version=C.VERSION end
+
+ event("V020_RESPAWN_STABILITY_READY",{
+  version=C.VERSION,
+  legacyV06RespawnShutdownNeutralized=true,
+  explicitUserDisablePreserved=true,
+  functionalMechanismUnchangedFromV019=true
+ })
+ pcall(updateUI)
+end)}
+
+if ENV.__PSICO_V020_RESULT[1]~=true then
+ S.v020InitError=tostring(ENV.__PSICO_V020_RESULT[2])
+ error("PSICOSENATICO V0.20 structural init: "..S.v020InitError)
+end
