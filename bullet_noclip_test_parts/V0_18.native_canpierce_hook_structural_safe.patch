@@ -1,0 +1,325 @@
+-- V0.18 NATIVE CANPIERCE HOOK • STRUCTURAL SAFE
+-- Source-backed implementation after Weapon Research V2.3.17 recovered the real client canPierce module.
+-- Functional rule requested by user:
+--   * Any ray hit OUTSIDE Workspace.Tycoons and outside a Humanoid target => pierce.
+--   * Any ray hit INSIDE Workspace.Tycoons => block.
+--   * Humanoid targets delegate to the game's original canPierce logic, preserving target/allied behavior.
+-- This version does NOT write CanCollide, CanQuery, CollisionGroup, CollectionService tags, or map attributes.
+-- Legacy geometry mutation paths are intentionally suppressed; the hook targets the game's canPierce function itself.
+
+C.VERSION="V0.18"
+S.v018Enabled=false
+S.v018HookAvailable=false
+S.v018HookInstalled=false
+S.v018RequireSucceeded=false
+S.v018HookError=nil
+S.v018RequireError=nil
+S.v018ForcedPierce=0
+S.v018ForcedTerrainPierce=0
+S.v018ForcedExplicitBlockerOutsideTycoon=0
+S.v018TycoonBlocked=0
+S.v018HumanoidDelegated=0
+S.v018OriginalFallback=0
+S.v018DecisionErrors=0
+S.v018LegacyMutationSuppressed=0
+S.v018RecentDecisions={}
+S.v018RecentMax=96
+
+ENV.__PSICO_V018_RESULT={pcall(function()
+ local ReplicatedStorage=game:GetService("ReplicatedStorage")
+ local hookFn=nil
+ pcall(function()
+  if type(hookfunction)=="function" then hookFn=hookfunction end
+ end)
+ if type(hookFn)~="function" and type(ENV)=="table" then
+  local ok,v=pcall(function() return rawget(ENV,"hookfunction") end)
+  if ok and type(v)=="function" then hookFn=v end
+ end
+ S.v018HookAvailable=type(hookFn)=="function"
+
+ local function tycoonRootV018()
+  return Workspace:FindFirstChild("Tycoons")
+ end
+
+ local function humanoidAncestorV018(inst)
+  local cur=inst
+  for _=1,16 do
+   if not cur or cur==Workspace then break end
+   if cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid") then return cur end
+   cur=cur.Parent
+  end
+  return nil
+ end
+
+ local function safeAttrV018(inst,name)
+  local ok,v=pcall(function() return inst:GetAttribute(name) end)
+  return ok and v or nil
+ end
+
+ local function pushDecisionV018(inst,decision,extra)
+  local item={time=os.clock(),unix=os.time(),decision=decision,path=inst and full(inst) or nil,class=inst and inst.ClassName or nil}
+  if type(extra)=="table" then for k,v in pairs(extra) do item[k]=v end end
+  local r=S.v018RecentDecisions
+  r[#r+1]=item
+  local over=#r-(S.v018RecentMax or 96)
+  if over>0 then for _=1,over do table.remove(r,1) end end
+ end
+
+ local function recentForShotV018(now)
+  local out={}
+  for i=#S.v018RecentDecisions,1,-1 do
+   local d=S.v018RecentDecisions[i]
+   local dt=now-(tonumber(d.time) or now)
+   if dt>0.35 then break end
+   if dt>=-0.05 then
+    out[#out+1]={dt=dt,decision=d.decision,path=d.path,class=d.class,terrain=d.terrain,explicitBlocker=d.explicitBlocker}
+    if #out>=16 then break end
+   end
+  end
+  return out
+ end
+
+ -- Completely suppress legacy part-mutation paths. The old candidates remain diagnostic only.
+ local legacyApplyV018=apply
+ apply=function(p,meta)
+  S.v018LegacyMutationSuppressed+=1
+  if meta then
+   meta.applied=false
+   meta.applyVerified=false
+   meta.v018LegacyMutationSuppressed=true
+  end
+  return false
+ end
+
+ local root=ReplicatedStorage:FindFirstChild("BlasterSystem")
+ local module=nil
+ if root then
+  local blaster=root:FindFirstChild("Blaster")
+  local util=blaster and blaster:FindFirstChild("Utility")
+  module=util and util:FindFirstChild("canPierce") or nil
+ end
+ if not module or not module:IsA("ModuleScript") then
+  S.v018RequireError="MODULE_CANPIERCE_AUSENTE"
+ else
+  local okRequire,targetFn=pcall(require,module)
+  S.v018RequireSucceeded=okRequire and type(targetFn)=="function"
+  if not S.v018RequireSucceeded then
+   S.v018RequireError=tostring(targetFn)
+  elseif not S.v018HookAvailable then
+   S.v018HookError="HOOKFUNCTION_INDISPONIVEL"
+  else
+   local previousState=type(ENV)=="table" and rawget(ENV,"__PSICO_V018_CANPIERCE_HOOK") or nil
+   if type(previousState)=="table" then
+    previousState.active=false
+    previousState.runtime=nil
+   end
+
+   local state={active=false,runtime=S,target=targetFn,modulePath=module:GetFullName(),version=C.VERSION}
+   local oldFn=nil
+   local replacement=function(a,b,...)
+    local current=type(ENV)=="table" and rawget(ENV,"__PSICO_V018_CANPIERCE_HOOK") or state
+    local runtime=(type(current)=="table" and current.runtime) or nil
+    if not (type(current)=="table" and current.active==true and runtime==S and S.v018Enabled==true and S.enabled==true) then
+     S.v018OriginalFallback+=1
+     return oldFn(a,b,...)
+    end
+
+    local okDecision,result=pcall(function()
+     local inst=nil
+     pcall(function() inst=b and b.Instance or nil end)
+     if typeof(inst)~="Instance" then
+      S.v018OriginalFallback+=1
+      return oldFn(a,b,...)
+     end
+
+     local t=tycoonRootV018()
+     if t and (inst==t or inst:IsDescendantOf(t)) then
+      S.v018TycoonBlocked+=1
+      pushDecisionV018(inst,"TYCOON_BLOCK",{})
+      return false
+     end
+
+     local hum=humanoidAncestorV018(inst)
+     if hum then
+      S.v018HumanoidDelegated+=1
+      pushDecisionV018(inst,"HUMANOID_DELEGATE",{humanoidPath=full(hum)})
+      return oldFn(a,b,...)
+     end
+
+     local isTerrain=false
+     pcall(function() isTerrain=inst:IsA("Terrain") end)
+     local explicit=safeAttrV018(inst,"BulletsCannotPierce")==true
+     S.v018ForcedPierce+=1
+     if isTerrain then S.v018ForcedTerrainPierce+=1 end
+     if explicit then S.v018ForcedExplicitBlockerOutsideTycoon+=1 end
+     pushDecisionV018(inst,"FORCE_PIERCE_NON_TYCOON",{terrain=isTerrain,explicitBlocker=explicit})
+     return true
+    end)
+    if okDecision then return result end
+    S.v018DecisionErrors+=1
+    pushDecisionV018(nil,"DECISION_ERROR",{error=tostring(result)})
+    return oldFn(a,b,...)
+   end
+
+   local okHook,oldOrErr=pcall(function() return hookFn(targetFn,replacement) end)
+   if okHook and type(oldOrErr)=="function" then
+    oldFn=oldOrErr
+    state.original=oldFn
+    state.replacement=replacement
+    state.installed=true
+    ENV.__PSICO_V018_CANPIERCE_HOOK=state
+    S.v018HookInstalled=true
+   else
+    S.v018HookError=tostring(oldOrErr)
+   end
+  end
+ end
+
+ -- Direct functional toggle. Do not call legacy setEnabled, because legacy versions mutate geometry.
+ setEnabled=function(v,reason)
+  if S.closed or S.enabled==v then return end
+  local hs=type(ENV)=="table" and rawget(ENV,"__PSICO_V018_CANPIERCE_HOOK") or nil
+  if v then
+   if not (S.v018HookInstalled and type(hs)=="table" and hs.installed==true) then
+    S.enabled=false
+    S.v018Enabled=false
+    S.last="V0.18 BLOQUEADO • canPierce hook indisponível: "..tostring(S.v018HookError or S.v018RequireError or "desconhecido")
+    event("V018_ENABLE_BLOCKED",{reason=reason,hookAvailable=S.v018HookAvailable,hookInstalled=S.v018HookInstalled,requireSucceeded=S.v018RequireSucceeded,hookError=S.v018HookError,requireError=S.v018RequireError})
+    updateUI()
+    return
+   end
+   S.enabled=true
+   S.v018Enabled=true
+   hs.active=true
+   hs.runtime=S
+   hs.version=C.VERSION
+   S.last="V0.18 ATIVO • hook nativo canPierce • TUDO fora Tycoon"
+   event("NOCLIP_ON",{reason=reason,mechanism="HOOK_NATIVE_CANPIERCE",allNonTycoon=true,tycoonProtected=true,humanoidsDelegated=true,module=hs.modulePath})
+  else
+   S.v018Enabled=false
+   S.enabled=false
+   if type(hs)=="table" and hs.runtime==S then hs.active=false;hs.runtime=nil end
+   S.last="V0.18 DESATIVADO • canPierce original ativo"
+   event("NOCLIP_OFF",{reason=reason,mechanism="HOOK_NATIVE_CANPIERCE",mapMutations=0})
+  end
+  updateUI()
+ end
+
+ local oldShotReadV013=shotRead
+ shotRead=function(tool,delta)
+  oldShotReadV013(tool,delta)
+  local rec=S.shots[#S.shots]
+  if not rec then return end
+  local now=os.clock()
+  rec.v018NativeCanPierce={
+   enabled=S.v018Enabled,
+   hookInstalled=S.v018HookInstalled,
+   forcedPierceTotal=S.v018ForcedPierce,
+   forcedTerrainTotal=S.v018ForcedTerrainPierce,
+   tycoonBlockedTotal=S.v018TycoonBlocked,
+   humanoidDelegatedTotal=S.v018HumanoidDelegated,
+   decisionErrors=S.v018DecisionErrors,
+   recentDecisions=recentForShotV018(now)
+  }
+  local entry=busV010 and busV010.last
+  if entry and tonumber(entry.shotIndex)==tonumber(rec.index) then
+   entry.version=C.VERSION
+   entry.v018NativeCanPierceEnabled=S.v018Enabled
+   entry.v018ForcedPierceTotal=S.v018ForcedPierce
+   entry.v018TycoonBlockedTotal=S.v018TycoonBlocked
+   entry.v018HumanoidDelegatedTotal=S.v018HumanoidDelegated
+  end
+  task.delay(0.08,function()
+   if S.closed or not rec then return end
+   rec.v018NativeCanPierce=rec.v018NativeCanPierce or {}
+   rec.v018NativeCanPierce.recentDecisionsDelayed=recentForShotV018(os.clock())
+  end)
+ end
+
+ local oldPayloadV013=payload
+ payload=function()
+  local t=oldPayloadV013()
+  t.version=C.VERSION
+  t.policy=t.policy or {}
+  t.policy.mode="NATIVE_CANPIERCE_HOOK_ALL_NON_TYCOON_V018"
+  t.policy.functionalAuthority="Hook direto da função ReplicatedStorage.BlasterSystem.Blaster.Utility.canPierce usada por castRays: qualquer hit não-humano fora de Workspace.Tycoons retorna true; qualquer hit sob Workspace.Tycoons retorna false; Humanoids delegam à função original."
+  t.policy.protected={"Workspace.Tycoons"}
+  t.policy.nonTycoonAction="FORCE_PIERCE"
+  t.policy.tycoonAction="FORCE_BLOCK"
+  t.policy.humanoidAction="DELEGATE_ORIGINAL_CANPIERCE"
+  t.policy.terrainAction="FORCE_PIERCE_WHEN_OUTSIDE_TYCOON"
+  t.policy.sourceBackedBy="Weapon Research V2.3.17 decompile de canPierce/castRays"
+  t.policy.legacyGeometryMutationsDisabled=true
+  t.policy.writesCanCollide=false
+  t.policy.writesCanQuery=false
+  t.policy.writesCollisionGroup=false
+  t.policy.writesCollectionTags=false
+  t.summary=t.summary or {}
+  t.summary.v018HookAvailable=S.v018HookAvailable
+  t.summary.v018HookInstalled=S.v018HookInstalled
+  t.summary.v018RequireSucceeded=S.v018RequireSucceeded
+  t.summary.v018HookError=S.v018HookError
+  t.summary.v018RequireError=S.v018RequireError
+  t.summary.v018ForcedPierce=S.v018ForcedPierce
+  t.summary.v018ForcedTerrainPierce=S.v018ForcedTerrainPierce
+  t.summary.v018ForcedExplicitBlockerOutsideTycoon=S.v018ForcedExplicitBlockerOutsideTycoon
+  t.summary.v018TycoonBlocked=S.v018TycoonBlocked
+  t.summary.v018HumanoidDelegated=S.v018HumanoidDelegated
+  t.summary.v018OriginalFallback=S.v018OriginalFallback
+  t.summary.v018DecisionErrors=S.v018DecisionErrors
+  t.summary.v018LegacyMutationSuppressed=S.v018LegacyMutationSuppressed
+  t.v018RecentDecisions=S.v018RecentDecisions
+  return t
+ end
+
+ save=function()
+  local ok,json=pcall(function() return HttpService:JSONEncode(payload()) end)
+  if not ok then err("JSONEncode",json); return false,"Falha ao gerar JSON" end
+  local name=string.format("Psicosenatico_BulletNoclip_Test_V0_18_%s_%s.json",tostring(game.PlaceId),tostring(os.time()))
+  if typeof(writefile)=="function" then
+   local a,b=pcall(writefile,name,json)
+   if a then event("EXPORT",{method="writefile",file=name,bytes=#json}); return true,"Arquivo exportado: "..name else err("writefile",b) end
+  end
+  if typeof(setclipboard)=="function" then
+   local a,b=pcall(setclipboard,json)
+   if a then event("EXPORT",{method="clipboard",bytes=#json}); return true,"JSON copiado" else err("clipboard",b) end
+  end
+  return false,"Não foi possível salvar/copiar o JSON"
+ end
+
+ local oldUpdateUIV013=updateUI
+ updateUI=function()
+  oldUpdateUIV013()
+  ver.Text=C.VERSION
+  State.Text=S.enabled and "Estado: ATIVO • CANPIERCE NATIVO • TUDO FORA TYCOON" or "Estado: DESATIVADO • canPierce original"
+  State.TextColor3=S.enabled and Color3.fromRGB(111,221,145) or Color3.fromRGB(223,190,111)
+  Toggle.Text=S.enabled and "DESATIVAR NO CLIP" or "ATIVAR NO CLIP"
+  local hookStatus=S.v018HookInstalled and "OK" or ("FALHA: "..tostring(S.v018HookError or S.v018RequireError or "indisponível"))
+  Reader.Text=Reader.Text..string.format("\nV0.18 NATIVE CANPIERCE\nHook: %s • forçados: %d • Terrain: %d\nTycoon bloqueado: %d • humanoides delegados: %d\nSem CanCollide/CanQuery/CollisionGroup/Tags",hookStatus,S.v018ForcedPierce,S.v018ForcedTerrainPierce,S.v018TycoonBlocked,S.v018HumanoidDelegated)
+ end
+
+ local cleanupV013=cleanup
+ cleanup=function()
+  S.v018Enabled=false
+  local hs=type(ENV)=="table" and rawget(ENV,"__PSICO_V018_CANPIERCE_HOOK") or nil
+  if type(hs)=="table" and hs.runtime==S then hs.active=false;hs.runtime=nil end
+  cleanupV013()
+ end
+ local rt=ENV[C.KEY]
+ if type(rt)=="table" then rt.cleanup=cleanup;rt.version=C.VERSION end
+
+ event("V018_NATIVE_CANPIERCE_INIT",{
+  hookAvailable=S.v018HookAvailable,hookInstalled=S.v018HookInstalled,requireSucceeded=S.v018RequireSucceeded,
+  hookError=S.v018HookError,requireError=S.v018RequireError,module=module and module:GetFullName() or nil,
+  allNonTycoon=true,tycoonProtected=true,humanoidDelegated=true,writesCanCollide=false,writesCanQuery=false,writesCollisionGroup=false,writesTags=false
+ })
+ pcall(updateUI)
+end)}
+
+if ENV.__PSICO_V018_RESULT[1]~=true then
+ S.v018InitError=tostring(ENV.__PSICO_V018_RESULT[2])
+ error("PSICOSENATICO V0.18 structural init: "..S.v018InitError)
+end
+
+event("V018_NATIVE_CANPIERCE_READY",{version=C.VERSION,allNonTycoon=true,tycoonProtected=true,humanoidDelegated=true,directCanPierceHook=true,legacyGeometryMutationSuppressed=true,writesCanCollide=false,writesCanQuery=false,writesCollisionGroup=false,writesTags=false})
+pcall(updateUI)
