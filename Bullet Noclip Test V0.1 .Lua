@@ -1,10 +1,9 @@
--- PSICOSENATICO • BULLET NOCLIP TEST V0.19 • NATIVE CANPIERCE + SAFE DEFAULT BYPASS + 429 RESILIENCE
--- Functional rule: everything outside Workspace.Tycoons is bullet-passable; Humanoids remain targets.
--- V0.19 keeps the native canPierce hook and uses only an empirically safe EXISTING CollisionGroup to skip static non-Tycoon BaseParts in ray group Default.
--- CanCollide/CanQuery are never written. V0.14/V0.15/V0.16/V0.17 remain intentionally NOT loaded directly.
+-- PSICOSENATICO • BULLET NOCLIP TEST V0.20 • RESPAWN STABILITY + NATIVE CANPIERCE + SAFE DEFAULT BYPASS
+-- Fixes the concrete V0.6 legacy RESPWAN_UNSAFE auto-disable conflict found in runtime evidence.
+-- Functional mechanism remains V0.19; only the obsolete automatic shutdown path is neutralized.
 -- Stable main loader; internal parts are pinned to an immutable SOURCE_COMMIT.
 
-local SOURCE_COMMIT="3f34c0ebb5561017423ce0a9413ee51fe1e9a6b8"
+local SOURCE_COMMIT="93b13c6ad7d7a78a9a1ccf43ab836433fa059dc8"
 local REPO_PATH="Psicosenatico/Aimbot"
 local PART_DIR="bullet_noclip_test_parts/"
 local BASES={
@@ -32,10 +31,11 @@ local PARTS={
     "V0_12.barrier_segment_direction_team.patch",
     "V0_13.normal_wall_target_segment.patch",
     "V0_18.native_canpierce_hook_structural_safe.patch",
-    "V0_19.native_plus_default_bypass_structural_safe.patch"
+    "V0_19.native_plus_default_bypass_structural_safe.patch",
+    "V0_20.respawn_stability_structural_safe.patch"
 }
 
-local BOOT_VERSION="V0.19"
+local BOOT_VERSION="V0.20"
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 ENV.__PSICO_NOCLIP_PART_CACHE=type(ENV.__PSICO_NOCLIP_PART_CACHE)=="table" and ENV.__PSICO_NOCLIP_PART_CACHE or {}
 local CACHE=ENV.__PSICO_NOCLIP_PART_CACHE
@@ -84,10 +84,13 @@ local chunks={}
 for i,name in ipairs(PARTS) do chunks[i]=fetchPart(name,i) end
 local source=table.concat(chunks,"\n")
 
-if not string.find(source,'C.VERSION="V0.19"',1,true) then error(surfaceFailure("PREFLIGHT","versão V0.19 ausente")) end
+if not string.find(source,'C.VERSION="V0.20"',1,true) then error(surfaceFailure("PREFLIGHT","versão V0.20 ausente")) end
 if not string.find(source,'V013_READY',1,true) then error(surfaceFailure("PREFLIGHT","base diagnóstica V0.13 ausente")) end
 if not string.find(source,'V018_NATIVE_CANPIERCE_READY',1,true) then error(surfaceFailure("PREFLIGHT","hook nativo canPierce V0.18 ausente")) end
 if not string.find(source,'V019_NATIVE_PLUS_DEFAULT_BYPASS_READY',1,true) then error(surfaceFailure("PREFLIGHT","V0.19 native+Default bypass ausente")) end
+if not string.find(source,'V020_RESPAWN_STABILITY_READY',1,true) then error(surfaceFailure("PREFLIGHT","correção de respawn V0.20 ausente")) end
+if not string.find(source,'legacyV06RespawnShutdownNeutralized=true',1,true) then error(surfaceFailure("PREFLIGHT","neutralização do auto-disable legado ausente")) end
+if not string.find(source,'explicitUserDisablePreserved=true',1,true) then error(surfaceFailure("PREFLIGHT","desativação explícita do usuário não preservada")) end
 if string.find(source,'V014_ALL_NON_TYCOON_READY',1,true) then error(surfaceFailure("PREFLIGHT","V0.14 foi carregada diretamente")) end
 if string.find(source,'V015_UNIVERSAL_RAY_CORRIDOR_READY',1,true) then error(surfaceFailure("PREFLIGHT","V0.15 física foi carregada indevidamente")) end
 if string.find(source,'V016_PHYSICAL_SAFE_READY',1,true) then error(surfaceFailure("PREFLIGHT","V0.16 cadeia antiga foi carregada diretamente")) end
@@ -97,9 +100,9 @@ if not string.find(source,'defaultRayBypass=true',1,true) then error(surfaceFail
 if not string.find(source,'physicalCharacterCollisionPreserved=true',1,true) then error(surfaceFailure("PREFLIGHT","garantia de colisão do personagem ausente")) end
 if not string.find(source,'reusableHookState=true',1,true) then error(surfaceFailure("PREFLIGHT","estado de hook reutilizável ausente")) end
 if not string.find(source,'writesCanCollide=false',1,true) or not string.find(source,'writesCanQuery=false',1,true) then error(surfaceFailure("PREFLIGHT","garantia CanCollide/CanQuery ausente")) end
-if not string.find(source,'writesCollisionGroup=true',1,true) then error(surfaceFailure("PREFLIGHT","estratégia CollisionGroup segura V0.19 ausente")) end
+if not string.find(source,'writesCollisionGroup=true',1,true) then error(surfaceFailure("PREFLIGHT","estratégia CollisionGroup segura ausente")) end
 if not string.find(source,'writesTags=false',1,true) then error(surfaceFailure("PREFLIGHT","garantia sem tags ausente")) end
-if not string.find(source,'Psicosenatico_BulletNoclip_Test_V0_19_',1,true) then error(surfaceFailure("PREFLIGHT","export V0.19 ausente")) end
+if not string.find(source,'Psicosenatico_BulletNoclip_Test_V0_20_',1,true) then error(surfaceFailure("PREFLIGHT","export V0.20 ausente")) end
 
 local compiler=loadstring
 if type(compiler)~="function" then error(surfaceFailure("COMPILADOR","loadstring indisponível neste ambiente")) end
